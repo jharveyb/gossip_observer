@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4.11.0"
-ldk-node = { path = "../ldk-node"}
+ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer" }
 tokio = { version = "1.47.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 configparser = "3.0"

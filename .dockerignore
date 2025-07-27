@@ -1,0 +1,7 @@
+# flyctl launch added from .gitignore
+**/*.code-workspace
+
+# Added by cargo
+
+target
+fly.toml
