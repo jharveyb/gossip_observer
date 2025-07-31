@@ -40,12 +40,10 @@ impl NodeConfig {
                 cfg.network = Network::from_core_arg(&network)?;
         }
         if let Some(esplora) = config.get("node", "chain_source_esplora") {
-                let network_path = if cfg.network != Network::Bitcoin {
-                        cfg.network.to_string()
-                } else {
-                        "".to_string()
-                };
-            cfg.chain_source_esplora = esplora + "/" + &network_path + "/api";
+                cfg.chain_source_esplora = match cfg.network {
+                        Network::Bitcoin => esplora + "/api",
+                        _ => esplora + "/" + &cfg.network.to_string() + "/api",
+                }
         }
         if let Some(storage) = config.get("node", "storage_dir_path") {
             cfg.storage_dir_path = storage;
