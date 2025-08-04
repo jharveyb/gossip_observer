@@ -1,0 +1,12 @@
+[package]
+name = "gossip_collector"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4.11.0"
+ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer" }
+tokio = { version = "1.47.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+configparser = "3.0"
+anyhow = "1.0.98"

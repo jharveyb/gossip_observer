@@ -7,7 +7,6 @@ use ldk_node::logger::LogLevel;
 mod config;
 use config::{NodeConfig, ServerConfig};
 
-
 #[get("/instanceid")]
 async fn instanceid(data: web::Data<AppState>) -> impl Responder {
     // Derived from seed + network + IP
@@ -39,7 +38,9 @@ async fn node_connect(data: web::Data<AppState>, body: String) -> impl Responder
         let node = data.node.clone();
         match tokio::task::spawn_blocking(move || node.connect(pubkey, addr, false)).await {
             Ok(Ok(_)) => HttpResponse::Ok().body("Connected successfully"),
-            Ok(Err(e)) => HttpResponse::InternalServerError().body(format!("Connection failed: {e}")),
+            Ok(Err(e)) => {
+                HttpResponse::InternalServerError().body(format!("Connection failed: {e}"))
+            }
             Err(e) => HttpResponse::InternalServerError().body(format!("Task failed: {e}")),
         }
     } else {
@@ -67,16 +68,15 @@ async fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .build()
-            .unwrap(),
+            .build()?,
     );
 
     // Spawn LDK node
     let mut builder = ldk_node::Builder::new();
-    
+
     builder.set_network(ldk_config.network);
     builder.set_chain_source_esplora(ldk_config.chain_source_esplora, None);
-    
+
     let log_level = match ldk_config.log_level.to_lowercase().as_str() {
         "error" => LogLevel::Error,
         "warn" => LogLevel::Warn,
@@ -87,13 +87,13 @@ async fn main() -> anyhow::Result<()> {
         _ => LogLevel::Error,
     };
     builder.set_filesystem_logger(None, Some(log_level));
-    
+
     builder.set_gossip_source_p2p();
     builder.set_storage_dir_path(ldk_config.storage_dir_path);
 
-    let node = Arc::new(builder.build().unwrap());
+    let node = Arc::new(builder.build()?);
 
-    node.start_with_runtime(runtime).unwrap();
+    node.start_with_runtime(runtime)?;
 
     Ok(tokio::join!(
         HttpServer::new(move || {
