@@ -1,13 +1,24 @@
+use anyhow::anyhow;
 use anyhow::bail;
 use chrono::DateTime;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use csv::ReaderBuilder;
+use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::lightning::ln::msgs::SocketAddress;
 use serde::{Deserialize, Deserializer};
-use statrs::statistics::{OrderStatistics, Statistics};
+use statrs::statistics::Statistics;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::fs;
 use std::fs::exists;
+use std::io::BufWriter;
+use std::io::Write;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 fn deserialize_unix_micros<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
 where
@@ -53,6 +64,16 @@ struct BasicStats {
     std_dev: f64,
 }
 
+fn parse_peer_specifier(peer_specifier: &str) -> anyhow::Result<(PublicKey, SocketAddress)> {
+    let (pubkey_str, address) = peer_specifier
+        .split_once('@')
+        .ok_or_else(|| anyhow!("Invalid peer specifier"))?;
+    let addr =
+        SocketAddress::from_str(address).map_err(|e| anyhow!("Invalid address format: {e}"))?;
+    let pubkey = PublicKey::from_str(pubkey_str)?;
+    Ok((pubkey, addr))
+}
+
 #[derive(Parser)]
 #[command(name = "gossip_analyze")]
 #[command(about = "A CLI tool for analyzing gossip data")]
@@ -67,12 +88,107 @@ enum Commands {
         #[arg(help = "Paths to CSV files to compare", required = true)]
         paths: Vec<PathBuf>,
     },
+    Dump {
+        #[arg(help = "List of peers to sync gossip from", required = false)]
+        peers: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Commands::Dump { peers } => {
+            let mut peers = match peers.len() {
+                0 => Vec::new(),
+                l if l > 10 => bail!("Maximum 10 peers"),
+                _ => peers
+                    .iter()
+                    .map(|p| parse_peer_specifier(p))
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+
+            // Add friendly peers
+            // BFX 0 node rejected us, interesting
+            let acinq = "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f@3.33.236.230:9735";
+            let wos = "035e4ff418fc8b5554c5d9eea66396c227bd429a3251c8cbc711002ba215bfc226@170.75.163.209:9735";
+            let megalithic = "0322d0e43b3d92d30ed187f4e101a9a9605c3ee5fc9721e6dac3ce3d7732fbb13e@164.92.106.32:9735";
+            let default_peers = [acinq, wos, megalithic];
+            let default_peers = default_peers
+                .iter()
+                .map(|p| parse_peer_specifier(p))
+                .collect::<Result<Vec<_>, _>>()?;
+            peers.extend(default_peers);
+
+            // Mainnet only
+            let esplora_url = "https://blockstream.info/api";
+            let datadir = "./gossip_dump";
+            let mut builder = ldk_node::Builder::new();
+            builder.set_network(ldk_node::bitcoin::Network::Bitcoin);
+            builder.set_chain_source_esplora(esplora_url.to_string(), None);
+            builder.set_gossip_source_p2p();
+            builder.set_storage_dir_path(datadir.to_string());
+            builder.set_filesystem_logger(None, None);
+
+            let node = Arc::new(builder.build()?);
+            node.start()?;
+
+            for peer in peers {
+                println!("Connecting to peer: {peer:?}");
+                node.clone().connect(peer.0, peer.1, false)?;
+            }
+
+            let queue_size = 5;
+            let mut graph_size = VecDeque::from_iter(std::iter::repeat_n(0, queue_size));
+
+            // The gossip state we end up with must have at least 11,000 nodes.
+            // We'll stop waiting once the node count is stable.
+            let min_node_count = 11_000;
+            let mut node_count = 0;
+            let check_delay = Duration::from_secs(2);
+            while !(graph_size.iter().all(|x| x > &min_node_count)
+                && graph_size.iter().all(|x| x == &node_count))
+            {
+                println!("{graph_size:?}");
+                let current_node_count = node.network_graph().list_nodes().len();
+                node_count = current_node_count;
+                graph_size.pop_front();
+                graph_size.push_back(current_node_count);
+                sleep(check_delay);
+            }
+
+            let current_graph = node.network_graph();
+            println!("Final graph stats:");
+            println!("Nodes: {:?}", current_graph.list_nodes().len());
+            println!("Channels: {:?}", current_graph.list_channels().len());
+
+            // Overwrite results from previous runs if present.
+            let node_list_path = format!("{}/{}", datadir, "node_list.csv");
+            let node_list_file = fs::File::create(node_list_path)?;
+            let mut buf_node_list = BufWriter::new(node_list_file);
+
+            for node in current_graph.list_nodes() {
+                let node_key = format!("{}\n", node.as_pubkey()?);
+                buf_node_list.write_all(node_key.as_bytes())?;
+            }
+            buf_node_list.flush()?;
+
+            let channel_list_path = format!("{}/{}", datadir, "channel_list.csv");
+            let channel_list_file = fs::File::create(channel_list_path)?;
+            let mut buf_channel_list = BufWriter::new(channel_list_file);
+
+            for channel_id in current_graph.list_channels() {
+                let channel = current_graph
+                    .channel(channel_id)
+                    .ok_or_else(|| anyhow!("Channel missing from graph"))?;
+                let channel = format!("{},{},{}\n", channel_id, channel.node_one, channel.node_two);
+                buf_channel_list.write_all(channel.as_bytes())?;
+            }
+            buf_channel_list.flush()?;
+
+            node.stop()?;
+            Ok(())
+        }
         Commands::Compare { paths } => {
             if paths.len() < 2 {
                 bail!("Error: At least 2 CSV files are required for comparison");

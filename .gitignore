@@ -1,5 +1,10 @@
 *.code-workspace
+/.vscode
 
-# Added by cargo
+**/ldk_node_data.sqlite
+**/keys_seed
+**/ldk_node.log
+
+**/gossip_export.csv
 
 /target
