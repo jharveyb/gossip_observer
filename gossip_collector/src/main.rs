@@ -1,11 +1,15 @@
 use std::{str::FromStr, sync::Arc};
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
+use anyhow::anyhow;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
 
 mod config;
+mod logger;
 use config::{NodeConfig, ServerConfig};
+
+use crate::logger::Logger as CollectorLogger;
 
 #[get("/instanceid")]
 async fn instanceid(data: web::Data<AppState>) -> impl Responder {
@@ -86,7 +90,17 @@ async fn main() -> anyhow::Result<()> {
         "gossip" => LogLevel::Gossip,
         _ => LogLevel::Error,
     };
-    builder.set_filesystem_logger(None, Some(log_level));
+
+    // Make an FS logger inside a custom logger.
+    let log_file_path = format!(
+        "{}/{}",
+        ldk_config.storage_dir_path,
+        ldk_node::config::DEFAULT_LOG_FILENAME
+    );
+    let fs_logger = CollectorLogger::new_fs_writer(log_file_path, log_level)
+        .map_err(|_| anyhow!("Failed to create FS logger"))?;
+
+    builder.set_custom_logger(Arc::new(fs_logger));
 
     builder.set_gossip_source_p2p();
     builder.set_storage_dir_path(ldk_config.storage_dir_path);
