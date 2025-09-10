@@ -8,3 +8,6 @@
 **/gossip_export.csv
 
 /target
+
+/observer_data
+/mainnet_data

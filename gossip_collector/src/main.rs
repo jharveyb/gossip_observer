@@ -6,10 +6,9 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
 
 mod config;
+mod exporter;
 mod logger;
-use config::{NodeConfig, ServerConfig};
-
-use crate::logger::Logger as CollectorLogger;
+use config::{NodeConfig, S3Config, ServerConfig};
 
 #[get("/instanceid")]
 async fn instanceid(data: web::Data<AppState>) -> impl Responder {
@@ -68,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let ldk_config = NodeConfig::load_from_ini("config.ini")?;
     let server_config = ServerConfig::load_from_ini("config.ini")?;
+    // let s3_config = S3Config::load_from_ini("config.ini")?;
 
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -97,10 +97,13 @@ async fn main() -> anyhow::Result<()> {
         ldk_config.storage_dir_path,
         ldk_node::config::DEFAULT_LOG_FILENAME
     );
-    let fs_logger = CollectorLogger::new_fs_writer(log_file_path, log_level)
-        .map_err(|_| anyhow!("Failed to create FS logger"))?;
 
-    builder.set_custom_logger(Arc::new(fs_logger));
+    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
+        .map_err(|_| anyhow!("Failed to create FS wrier"))?;
+    let stdout_exporter = Arc::new(crate::exporter::MockExporter {});
+    let writer_exporter = crate::exporter::LogWriterExporter::new(fs_logger, stdout_exporter);
+
+    builder.set_custom_logger(Arc::new(writer_exporter));
 
     builder.set_gossip_source_p2p();
     builder.set_storage_dir_path(ldk_config.storage_dir_path);
