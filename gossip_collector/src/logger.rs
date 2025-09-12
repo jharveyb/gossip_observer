@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+// TODO: Do we need to have this duplicated from ldk-node at all?
 /// Defines a writer for [`Logger`].
 pub(crate) enum Writer {
     /// Writes logs to the file system.

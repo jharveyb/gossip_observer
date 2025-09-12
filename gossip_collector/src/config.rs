@@ -18,6 +18,11 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+pub struct NATSConfig {
+    // TODO: update
+    pub base_url: String,
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
@@ -74,12 +79,43 @@ impl ServerConfig {
         if let Some(hostname) = config.get("server", "bind") {
             cfg.hostname = hostname;
         }
-        if let Some(port_str) = config.get("server", "port") {
-            if let Ok(port) = port_str.parse::<u16>() {
-                cfg.port = port;
-            }
+        if let Some(port_str) = config.get("server", "port")
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            cfg.port = port;
         }
 
         Ok(cfg)
+    }
+}
+
+// TODO: update
+impl NATSConfig {
+    pub fn load_from_ini(path: &str) -> anyhow::Result<Self> {
+        /*
+        let mut config = configparser::ini::Ini::new();
+        config.load(path).map_err(anyhow::Error::msg)?;
+
+        let base_url = config
+            .get("s3", "base_url")
+            .ok_or(anyhow!("Missing S3 base_url"))?;
+
+        let access_key = config
+            .get("s3", "access_key")
+            .ok_or(anyhow!("Missing S3 access_key"))?;
+
+        let secret_key = config
+            .get("s3", "secret_key")
+            .ok_or(anyhow!("Missing S3 secret_key"))?;
+
+        Ok(S3Config {
+            base_url,
+            access_key,
+            secret_key,
+        })
+        */
+        Ok(NATSConfig {
+            base_url: "".to_string(),
+        })
     }
 }

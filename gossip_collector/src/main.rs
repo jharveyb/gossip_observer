@@ -8,7 +8,8 @@ use ldk_node::logger::LogLevel;
 mod config;
 mod exporter;
 mod logger;
-use config::{NodeConfig, S3Config, ServerConfig};
+use crate::exporter::NATSExporter;
+use config::{NATSConfig, NodeConfig, ServerConfig};
 
 #[get("/instanceid")]
 async fn instanceid(data: web::Data<AppState>) -> impl Responder {
@@ -67,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let ldk_config = NodeConfig::load_from_ini("config.ini")?;
     let server_config = ServerConfig::load_from_ini("config.ini")?;
-    // let s3_config = S3Config::load_from_ini("config.ini")?;
+    let nats_config = NATSConfig::load_from_ini("config.ini")?;
 
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -91,25 +92,28 @@ async fn main() -> anyhow::Result<()> {
         _ => LogLevel::Error,
     };
 
-    // Make an FS logger inside a custom logger.
+    // Create an FS logger for normal node logs, and a separate handler for
+    // gossip messages being exported by that node.
     let log_file_path = format!(
         "{}/{}",
         ldk_config.storage_dir_path,
         ldk_node::config::DEFAULT_LOG_FILENAME
     );
-
     let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
-    let stdout_exporter = Arc::new(crate::exporter::MockExporter {});
-    let writer_exporter = crate::exporter::LogWriterExporter::new(fs_logger, stdout_exporter);
+
+    let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone());
+    nats_exporter.start()?;
+    let nats_exporter = Arc::new(nats_exporter);
+
+    // let stdout_exporter = Arc::new(crate::exporter::StdoutExporter {});
+    let writer_exporter = crate::exporter::LogWriterExporter::new(fs_logger, nats_exporter.clone());
 
     builder.set_custom_logger(Arc::new(writer_exporter));
-
     builder.set_gossip_source_p2p();
     builder.set_storage_dir_path(ldk_config.storage_dir_path);
 
     let node = Arc::new(builder.build()?);
-
     node.start_with_runtime(runtime)?;
 
     Ok(tokio::join!(
