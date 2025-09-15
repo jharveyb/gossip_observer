@@ -23,3 +23,4 @@ log = { version = "0.4.22", default-features = false, features = ["std"] }
 lightning = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer", features = [
         "std",
 ] }
+async-nats = "0.42.0"

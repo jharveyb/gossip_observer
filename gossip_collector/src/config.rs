@@ -18,9 +18,11 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
+// For NATS message upload
+#[derive(Debug, Clone, Deserialize)]
 pub struct NATSConfig {
-    // TODO: update
-    pub base_url: String,
+    pub server_addr: String,
+    pub stream: String,
 }
 
 impl Default for NodeConfig {
@@ -89,33 +91,23 @@ impl ServerConfig {
     }
 }
 
-// TODO: update
 impl NATSConfig {
     pub fn load_from_ini(path: &str) -> anyhow::Result<Self> {
-        /*
         let mut config = configparser::ini::Ini::new();
         config.load(path).map_err(anyhow::Error::msg)?;
 
-        let base_url = config
-            .get("s3", "base_url")
-            .ok_or(anyhow!("Missing S3 base_url"))?;
+        // TODO: actually parse
+        let server_addr = config
+            .get("nats", "server_addr")
+            .ok_or(anyhow!("Missing NATS server_addr"))?;
 
-        let access_key = config
-            .get("s3", "access_key")
-            .ok_or(anyhow!("Missing S3 access_key"))?;
+        let stream = config
+            .get("nats", "stream")
+            .ok_or(anyhow!("Missing NATS stream name"))?;
 
-        let secret_key = config
-            .get("s3", "secret_key")
-            .ok_or(anyhow!("Missing S3 secret_key"))?;
-
-        Ok(S3Config {
-            base_url,
-            access_key,
-            secret_key,
-        })
-        */
         Ok(NATSConfig {
-            base_url: "".to_string(),
+            server_addr,
+            stream,
         })
     }
 }

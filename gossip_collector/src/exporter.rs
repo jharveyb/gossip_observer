@@ -1,14 +1,17 @@
 use crate::logger::Writer;
+use async_nats::jetstream;
 use flume::Receiver;
 use flume::Sender;
 use ldk_node::logger::{LogRecord, LogWriter};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::OnceLock;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
-use tokio::time::sleep;
 
 use crate::config::NATSConfig;
+
+static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
+static NODEKEY: OnceLock<String> = OnceLock::new();
 
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
@@ -18,6 +21,9 @@ pub trait Exporter: Send + Sync {
     // TODO: this should probably return a Result, though we should handle
     // errors here not in ldk-node
     fn export(&self, msg: String);
+
+    // Provide extra data to be included alongside each exported message.
+    fn set_export_metadata(&self, meta: String) -> Result<(), String>;
 }
 
 pub struct StdoutExporter {}
@@ -26,6 +32,10 @@ impl Exporter for StdoutExporter {
     fn export(&self, _msg: String) {
         let now = chrono::Utc::now().timestamp_micros();
         println!("{now}: exported!");
+    }
+
+    fn set_export_metadata(&self, _meta: String) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -39,18 +49,23 @@ pub struct NATSExporter {
     publish_ack: Arc<Notify>,
     nats_tx: Sender<String>,
     nats_rx: Receiver<String>,
-    // actual jetstream client
     // What else?
 }
 
 impl Exporter for NATSExporter {
     fn export(&self, msg: String) {
         // Non-blocking send, so we don't hang the node.
-        // TODO: annotate the message with our pubkey!
         if let Err(e) = self.export_tx.send(msg) {
             // TODO: crash?
             println!("internal exporter error: export(): {e}");
         }
+    }
+
+    fn set_export_metadata(&self, meta: String) -> Result<(), String> {
+        let stream_name = format!("{}.{}", self.cfg.stream, meta);
+        NATS_SUBJECT.get_or_init(|| stream_name);
+        NODEKEY.get_or_init(|| meta);
+        Ok(())
     }
 }
 
@@ -59,6 +74,7 @@ impl NATSExporter {
         // Use flume channels to bridge sync -> async, and as a ring buffer.
         let (export_tx, export_rx) = flume::unbounded();
         // TODO: dynamic buffer size here; needs to stay below NATS msg_size limit
+        // Max. export msg size is ~500B, we could go higher here
         let (nats_tx, nats_rx) = flume::bounded(256);
         // TODO: there's probably a better sync primitive for this
         let (publish, publish_ack) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
@@ -79,11 +95,14 @@ impl NATSExporter {
     }
 
     // Build connections + spawn any long-running tasks we need for export.
-    pub fn start(&mut self) -> anyhow::Result<()> {
+    pub async fn start(&mut self) -> anyhow::Result<()> {
         let export_rx = self.export_rx.clone();
         let nats_tx = self.nats_tx.clone();
         let publish = self.publish.clone();
         let publish_ack = self.publish_ack.clone();
+
+        let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
+        let stream_ctx = jetstream::new(nats_client);
         self.tasks.spawn_on(
             async move { Self::queue_exported_msg(export_rx, nats_tx, publish, publish_ack).await },
             self.runtime.clone().handle(),
@@ -93,7 +112,7 @@ impl NATSExporter {
         let publish = self.publish.clone();
         let publish_ack = self.publish_ack.clone();
         self.tasks.spawn_on(
-            async move { Self::publish_msgs(nats_rx, publish, publish_ack).await },
+            async move { Self::publish_msgs(stream_ctx, nats_rx, publish, publish_ack).await },
             self.runtime.clone().handle(),
         );
         Ok(())
@@ -111,10 +130,12 @@ impl NATSExporter {
     ) {
         while let Ok(msg) = rx.recv_async().await {
             if tx.is_full() {
-                println!("RX queue size: notifying: {}", rx.len());
                 publish.notify_one();
                 publish_ack.notified().await;
             }
+            // Add our node ID to the message, after the timestamp.
+            let msg_parts = msg.split_once(',').unwrap();
+            let msg = format!("{},{},{}", msg_parts.0, NODEKEY.get().unwrap(), msg_parts.1);
             if let Err(e) = tx.send_async(msg).await {
                 // TODO: crash?
                 println!("internal exporter error: queue_exported_msg(): {e}");
@@ -123,18 +144,25 @@ impl NATSExporter {
     }
 
     // Drain our ring buffer of msgs by publishing to NATS.
-    async fn publish_msgs(rx: Receiver<String>, publish: Arc<Notify>, publish_ack: Arc<Notify>) {
+    async fn publish_msgs(
+        ctx: jetstream::Context,
+        rx: Receiver<String>,
+        publish: Arc<Notify>,
+        publish_ack: Arc<Notify>,
+    ) {
         loop {
             publish.notified().await;
 
-            // TODO: add delimiter that's not a comma
-            let msg_batch = rx.drain().collect::<Vec<_>>();
-            // do NATS stuff
-            // println!("NATS: {msg_batch:?}");
-            println!("NATS publish!");
-
-            // artificial delay to test queueing in the unbounded channel
-            sleep(Duration::from_millis(500)).await;
+            let msg_batch = rx.drain().collect::<Vec<_>>().join(";");
+            // TODO: err handling here
+            let msg_send_time = chrono::Utc::now().timestamp_micros();
+            let ack = ctx
+                .publish(NATS_SUBJECT.get().unwrap().as_str(), msg_batch.into())
+                .await
+                .unwrap();
+            ack.await.unwrap();
+            let msg_ack_time = chrono::Utc::now().timestamp_micros();
+            println!("NATS upload time: {}us", msg_ack_time - msg_send_time);
 
             publish_ack.notify_one();
         }

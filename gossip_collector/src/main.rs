@@ -1,13 +1,17 @@
+use std::time::Duration;
 use std::{str::FromStr, sync::Arc};
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use anyhow::anyhow;
+use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
 
+use tokio::time::sleep;
 mod config;
 mod exporter;
 mod logger;
+use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
 use config::{NATSConfig, NodeConfig, ServerConfig};
 
@@ -76,11 +80,21 @@ async fn main() -> anyhow::Result<()> {
             .build()?,
     );
 
-    // Spawn LDK node
+    // Spawn LDK node; use longer sync intervals for chain watching.
     let mut builder = ldk_node::Builder::new();
+    let sync_cfg = BackgroundSyncConfig {
+        onchain_wallet_sync_interval_secs: 600,
+        lightning_wallet_sync_interval_secs: 600,
+        fee_rate_cache_update_interval_secs: 600,
+    };
 
     builder.set_network(ldk_config.network);
-    builder.set_chain_source_esplora(ldk_config.chain_source_esplora, None);
+    builder.set_chain_source_esplora(
+        ldk_config.chain_source_esplora,
+        Some(EsploraSyncConfig {
+            background_sync_config: Some(sync_cfg),
+        }),
+    );
 
     let log_level = match ldk_config.log_level.to_lowercase().as_str() {
         "error" => LogLevel::Error,
@@ -103,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
     let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone());
-    nats_exporter.start()?;
+    nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
 
     // let stdout_exporter = Arc::new(crate::exporter::StdoutExporter {});
@@ -115,6 +129,13 @@ async fn main() -> anyhow::Result<()> {
 
     let node = Arc::new(builder.build()?);
     node.start_with_runtime(runtime)?;
+
+    println!("Waiting for node startup");
+    sleep(Duration::from_secs(5)).await;
+
+    nats_exporter
+        .set_export_metadata(node.node_id().to_string())
+        .map_err(anyhow::Error::msg)?;
 
     Ok(tokio::join!(
         HttpServer::new(move || {
