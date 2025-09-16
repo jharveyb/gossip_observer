@@ -17,8 +17,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
+use tokio::time::sleep;
 
 fn deserialize_unix_micros<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
 where
@@ -92,12 +92,61 @@ enum Commands {
         #[arg(help = "List of peers to sync gossip from", required = false)]
         peers: Vec<String>,
     },
+    FetchAddresses {},
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Commands::FetchAddresses {} => {
+            // load node pubkey list
+            let datadir = "./gossip_dump";
+            let node_list_path = format!("{}/{}", datadir, "node_list.csv");
+            let node_list_file = fs::read_to_string(node_list_path)?;
+
+            let node_addresses_path = format!("{}/{}", datadir, "node_addresses.txt");
+            let node_addresses_file = fs::File::create(node_addresses_path)?;
+            let mut buf_node_addresses = BufWriter::new(node_addresses_file);
+
+            let client = reqwest::Client::new();
+            let oneml_base = "https://1ml.com/node";
+            let target_delay = 1000;
+            let mut loop_start: i64;
+            let mut loop_delay: i64;
+            let mut delay_padding: std::time::Duration;
+            for node in node_list_file.lines() {
+                loop_start = chrono::Utc::now().timestamp_millis();
+                let req_url = format!("{}/{}/json", oneml_base, node);
+                let res = client
+                    .get(req_url)
+                    .send()
+                    .await?
+                    .json::<serde_json::Value>()
+                    .await?;
+                let addrs = res["addresses"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("No addresses for {}", node))?;
+                for addr in addrs {
+                    let network_addr = addr["addr"].as_str().unwrap();
+                    let connection_info = format!("{}@{}\n", node, network_addr);
+                    buf_node_addresses.write_all(connection_info.as_bytes())?;
+                }
+                buf_node_addresses.flush()?;
+
+                // Aim for at least 1 second delay between requests.
+                loop_delay = chrono::Utc::now().timestamp_millis() - loop_start;
+                if loop_delay > target_delay {
+                    continue;
+                }
+
+                delay_padding = std::time::Duration::from_millis(1005 - (loop_delay as u64));
+                sleep(delay_padding).await;
+            }
+
+            Ok(())
+        }
         Commands::Dump { peers } => {
             let mut peers = match peers.len() {
                 0 => Vec::new(),
@@ -154,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                 node_count = current_node_count;
                 graph_size.pop_front();
                 graph_size.push_back(current_node_count);
-                sleep(check_delay);
+                sleep(check_delay).await;
             }
 
             let current_graph = node.network_graph();
