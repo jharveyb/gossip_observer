@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["gossip_collector", "gossip_analyze"]
+members = ["gossip_collector", "gossip_analyze", "gossip_archiver"]

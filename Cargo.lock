@@ -1384,6 +1384,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gossip_archiver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "bytes",
+ "chrono",
+ "flume",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "gossip_collector"
 version = "0.1.0"
 dependencies = [
