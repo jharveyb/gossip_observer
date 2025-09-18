@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-flume = { version = "0.11.1", features = ["async"] }
+flume = { version = "0.11", features = ["async"] }
 
 actix-web = "4.11.0"
 ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer" }

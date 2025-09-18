@@ -6,8 +6,11 @@
 **/ldk_node.log
 
 **/gossip_export.csv
+**/node_addresses*
 
 /target
 
 /observer_data
 /mainnet_data
+
+*.duckdb*
