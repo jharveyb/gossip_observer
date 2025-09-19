@@ -63,12 +63,22 @@ async fn graph(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().body(format!("Node #: {node_count}, Channel #: {channel_count}"))
 }
 
+#[get("/node/peers")]
+async fn node_peers(data: web::Data<AppState>) -> impl Responder {
+    let peer_info = data.node.list_peers();
+    // TODO: filter / reformat
+    HttpResponse::Ok().body(format!("{peer_info:?}"))
+}
+
 struct AppState {
     node: Arc<ldk_node::Node>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Enable tokio-console
+    console_subscriber::init();
+
     // Load configuration
     let ldk_config = NodeConfig::load_from_ini("config.ini")?;
     let server_config = ServerConfig::load_from_ini("config.ini")?;
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
                 .app_data(web::Data::new(AppState { node: node.clone() }))
                 .service(instanceid)
                 .service(node_config)
+                .service(node_peers)
                 .service(node_connect)
                 .service(graph)
         })

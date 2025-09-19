@@ -541,6 +541,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.88"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -593,6 +615,53 @@ dependencies = [
  "cmake",
  "dunce",
  "fs_extra",
+]
+
+[[package]]
+name = "axum"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
+dependencies = [
+ "async-trait",
+ "axum-core",
+ "bytes",
+ "futures-util",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustversion",
+ "serde",
+ "sync_wrapper 1.0.2",
+ "tower 0.5.2",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "rustversion",
+ "sync_wrapper 1.0.2",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -713,7 +782,7 @@ dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools",
  "lazy_static",
  "lazycell",
  "log",
@@ -1094,6 +1163,45 @@ name = "configparser"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57e3272f0190c3f1584272d613719ba5fc7df7f4942fe542e63d949cf3a649b"
+
+[[package]]
+name = "console-api"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8030735ecb0d128428b64cd379809817e620a40e5001c54465b99ec5feec2857"
+dependencies = [
+ "futures-core",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "tonic",
+ "tracing-core",
+]
+
+[[package]]
+name = "console-subscriber"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6539aa9c6a4cd31f4b1c040f860a1eac9aa80e7df6b05d506a6e7179936d6a01"
+dependencies = [
+ "console-api",
+ "crossbeam-channel",
+ "crossbeam-utils",
+ "futures-task",
+ "hdrhistogram",
+ "humantime",
+ "hyper-util",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "thread_local",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "const-oid"
@@ -1717,7 +1825,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
- "ldk-node",
+ "ldk-node 0.6.1 (git+https://github.com/jharveyb/ldk-node?branch=gossip_observer)",
  "reqwest 0.12.23",
  "serde",
  "serde_json",
@@ -1734,6 +1842,7 @@ dependencies = [
  "async-nats",
  "bytes",
  "chrono",
+ "console-subscriber",
  "flume",
  "futures",
  "tokio",
@@ -1749,9 +1858,10 @@ dependencies = [
  "bitcoin",
  "chrono",
  "configparser",
+ "console-subscriber",
  "flume",
- "ldk-node",
- "lightning",
+ "ldk-node 0.6.1 (git+https://github.com/jharveyb/ldk-node?branch=gossip_observer_no_fwd)",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "log",
  "serde",
  "tokio",
@@ -1769,7 +1879,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "http 0.2.12",
- "indexmap",
+ "indexmap 2.10.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -1788,7 +1898,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http 1.3.1",
- "indexmap",
+ "indexmap 2.10.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -1856,6 +1966,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.4",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
+dependencies = [
+ "base64 0.21.7",
+ "byteorder",
+ "flate2",
+ "nom",
+ "num-traits",
 ]
 
 [[package]]
@@ -1969,6 +2092,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+
+[[package]]
 name = "hyper"
 version = "0.14.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2005,6 +2134,7 @@ dependencies = [
  "http 1.3.1",
  "http-body 1.0.1",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -2041,6 +2171,19 @@ dependencies = [
  "tokio-rustls 0.26.2",
  "tower-service",
  "webpki-roots 1.0.2",
+]
+
+[[package]]
+name = "hyper-timeout"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
+dependencies = [
+ "hyper 1.6.0",
+ "hyper-util",
+ "pin-project-lite",
+ "tokio",
+ "tower-service",
 ]
 
 [[package]]
@@ -2224,6 +2367,16 @@ checksum = "e8a5a9a0ff0086c7a148acb942baaabeadf9504d10400b5a05645853729b9cd2"
 
 [[package]]
 name = "indexmap"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd070e393353796e801d209ad339e89596eb4c8d430d18ede6a1cced8fafbd99"
+dependencies = [
+ "autocfg",
+ "hashbrown 0.12.3",
+]
+
+[[package]]
+name = "indexmap"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe4cd85333e22411419a0bcae1297d25e58c9443848b11dc6a86fefe8c78a661"
@@ -2270,15 +2423,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
 dependencies = [
  "either",
 ]
@@ -2345,18 +2489,58 @@ dependencies = [
  "esplora-client 0.11.0",
  "esplora-client 0.12.0",
  "libc",
- "lightning",
- "lightning-background-processor",
- "lightning-block-sync",
- "lightning-invoice",
- "lightning-liquidity",
- "lightning-net-tokio",
- "lightning-persister",
- "lightning-rapid-gossip-sync",
- "lightning-transaction-sync",
- "lightning-types",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-background-processor 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-block-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-liquidity 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-net-tokio 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-persister 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-rapid-gossip-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-transaction-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
  "log",
- "prost",
+ "prost 0.11.9",
+ "rand 0.8.5",
+ "reqwest 0.12.23",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "vss-client",
+ "winapi",
+]
+
+[[package]]
+name = "ldk-node"
+version = "0.6.1"
+source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer_no_fwd#b504a8ac89bd0429d92af1871559b4eb18254b35"
+dependencies = [
+ "base64 0.22.1",
+ "bdk_chain",
+ "bdk_electrum",
+ "bdk_esplora",
+ "bdk_wallet",
+ "bip21",
+ "bip39",
+ "bitcoin",
+ "chrono",
+ "electrum-client 0.23.1",
+ "esplora-client 0.11.0",
+ "esplora-client 0.12.0",
+ "libc",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-background-processor 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-block-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-liquidity 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-net-tokio 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-persister 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-rapid-gossip-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-transaction-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "log",
+ "prost 0.11.9",
  "rand 0.8.5",
  "reqwest 0.12.23",
  "rusqlite",
@@ -2500,10 +2684,26 @@ dependencies = [
  "dnssec-prover",
  "hashbrown 0.13.2",
  "libm",
- "lightning-invoice",
- "lightning-types",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
  "musig2",
- "possiblyrandom",
+ "possiblyrandom 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+]
+
+[[package]]
+name = "lightning"
+version = "0.1.5"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "dnssec-prover",
+ "hashbrown 0.13.2",
+ "libm",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "musig2",
+ "possiblyrandom 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
 ]
 
 [[package]]
@@ -2514,8 +2714,20 @@ dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes 0.14.0",
- "lightning",
- "lightning-rapid-gossip-sync",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-rapid-gossip-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+]
+
+[[package]]
+name = "lightning-background-processor"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "bitcoin-io",
+ "bitcoin_hashes 0.14.0",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-rapid-gossip-sync 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
 ]
 
 [[package]]
@@ -2525,7 +2737,19 @@ source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#
 dependencies = [
  "bitcoin",
  "chunked_transfer",
- "lightning",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lightning-block-sync"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "chunked_transfer",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "serde_json",
  "tokio",
 ]
@@ -2537,7 +2761,18 @@ source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#
 dependencies = [
  "bech32",
  "bitcoin",
- "lightning-types",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "serde",
+]
+
+[[package]]
+name = "lightning-invoice"
+version = "0.33.2"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "serde",
 ]
 
@@ -2548,9 +2783,23 @@ source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#
 dependencies = [
  "bitcoin",
  "chrono",
- "lightning",
- "lightning-invoice",
- "lightning-types",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lightning-liquidity"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "chrono",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-invoice 0.33.2 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-types 0.2.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "serde",
  "serde_json",
 ]
@@ -2566,12 +2815,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightning-macros"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "lightning-net-tokio"
 version = "0.1.0"
 source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#8b7d4a03a1426cf05720e804fac44b7a5a4302de"
 dependencies = [
  "bitcoin",
- "lightning",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "tokio",
+]
+
+[[package]]
+name = "lightning-net-tokio"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "tokio",
 ]
 
@@ -2581,7 +2850,17 @@ version = "0.1.0"
 source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#8b7d4a03a1426cf05720e804fac44b7a5a4302de"
 dependencies = [
  "bitcoin",
- "lightning",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "lightning-persister"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
  "windows-sys 0.48.0",
 ]
 
@@ -2593,7 +2872,18 @@ dependencies = [
  "bitcoin",
  "bitcoin-io",
  "bitcoin_hashes 0.14.0",
- "lightning",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+]
+
+[[package]]
+name = "lightning-rapid-gossip-sync"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "bitcoin-io",
+ "bitcoin_hashes 0.14.0",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
 ]
 
 [[package]]
@@ -2605,14 +2895,35 @@ dependencies = [
  "electrum-client 0.21.0",
  "esplora-client 0.11.0",
  "futures",
- "lightning",
- "lightning-macros",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+ "lightning-macros 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer)",
+]
+
+[[package]]
+name = "lightning-transaction-sync"
+version = "0.1.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
+dependencies = [
+ "bitcoin",
+ "electrum-client 0.21.0",
+ "esplora-client 0.11.0",
+ "futures",
+ "lightning 0.1.5 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
+ "lightning-macros 0.1.0 (git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd)",
 ]
 
 [[package]]
 name = "lightning-types"
 version = "0.2.0"
 source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#8b7d4a03a1426cf05720e804fac44b7a5a4302de"
+dependencies = [
+ "bitcoin",
+]
+
+[[package]]
+name = "lightning-types"
+version = "0.2.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
 dependencies = [
  "bitcoin",
 ]
@@ -2673,6 +2984,21 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
+name = "matchit"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "matrixmultiply"
@@ -3027,7 +3353,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
 dependencies = [
  "fixedbitset",
- "indexmap",
+ "indexmap 2.10.0",
 ]
 
 [[package]]
@@ -3088,6 +3414,14 @@ checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
 name = "possiblyrandom"
 version = "0.2.0"
 source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer#8b7d4a03a1426cf05720e804fac44b7a5a4302de"
+dependencies = [
+ "getrandom 0.2.16",
+]
+
+[[package]]
+name = "possiblyrandom"
+version = "0.2.0"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#679ecbb9fbde3f250763f87f9f762427348d1ff6"
 dependencies = [
  "getrandom 0.2.16",
 ]
@@ -3161,7 +3495,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b82eaa1d779e9a4bc1c3217db8ffbeabaae1dca241bf70183242128d48681cd"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.11.9",
+]
+
+[[package]]
+name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
 ]
 
 [[package]]
@@ -3172,14 +3516,14 @@ checksum = "119533552c9a7ffacc21e099c24a0ac8bb19c2a2a3f363de84cd9b844feab270"
 dependencies = [
  "bytes",
  "heck 0.4.1",
- "itertools 0.10.5",
+ "itertools",
  "lazy_static",
  "log",
  "multimap",
  "petgraph",
  "prettyplease 0.1.25",
- "prost",
- "prost-types",
+ "prost 0.11.9",
+ "prost-types 0.11.9",
  "regex",
  "syn 1.0.109",
  "tempfile",
@@ -3193,10 +3537,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5d2d8d10f3c6ded6da8b05b5fb3b8a5082514344d56c9f871412d29b4e075b4"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
 ]
 
 [[package]]
@@ -3205,7 +3562,16 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "213622a1460818959ac1181aaeb2dc9c7f63df720db7d788b3e24eacd1983e13"
 dependencies = [
- "prost",
+ "prost 0.11.9",
+]
+
+[[package]]
+name = "prost-types"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
+dependencies = [
+ "prost 0.13.5",
 ]
 
 [[package]]
@@ -3508,7 +3874,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls 0.26.2",
- "tower",
+ "tower 0.5.2",
  "tower-http",
  "tower-service",
  "url",
@@ -3803,7 +4169,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
- "bitcoin_hashes 0.14.0",
+ "bitcoin_hashes 0.13.0",
  "rand 0.8.5",
  "secp256k1-sys",
  "serde",
@@ -3942,6 +4308,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -4269,6 +4644,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread_local"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "time"
 version = "0.3.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4350,6 +4734,7 @@ dependencies = [
  "slab",
  "socket2 0.6.0",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.59.0",
 ]
 
@@ -4407,6 +4792,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-stream"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4455,7 +4851,7 @@ version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2ad0b7ae9cfeef5605163839cb9221f453399f15cfb5c10be9885fcf56611f9"
 dependencies = [
- "indexmap",
+ "indexmap 2.10.0",
  "toml_datetime",
  "toml_parser",
  "winnow",
@@ -4468,6 +4864,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b551886f449aa90d4fe2bdaa9f4a2577ad2dde302c61ecf262d80b116db95c10"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "tonic"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "h2 0.4.12",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.6.0",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "prost 0.13.5",
+ "socket2 0.5.10",
+ "tokio",
+ "tokio-stream",
+ "tower 0.4.13",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tower"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "indexmap 1.9.3",
+ "pin-project",
+ "pin-project-lite",
+ "rand 0.8.5",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -4498,7 +4944,7 @@ dependencies = [
  "http-body 1.0.1",
  "iri-string",
  "pin-project-lite",
- "tower",
+ "tower 0.5.2",
  "tower-layer",
  "tower-service",
 ]
@@ -4545,6 +4991,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d12581f227e93f094d3af2ae690a574abb8a2b9b7a96e7cfe9647b2b617678"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
+dependencies = [
+ "matchers",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "thread_local",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]
@@ -4642,6 +5104,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4663,7 +5131,7 @@ dependencies = [
  "base64 0.21.7",
  "bitcoin",
  "bitcoin_hashes 0.14.0",
- "prost",
+ "prost 0.11.9",
  "prost-build",
  "rand 0.8.5",
  "reqwest 0.11.27",

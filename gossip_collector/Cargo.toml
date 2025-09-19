@@ -7,11 +7,11 @@ edition = "2024"
 flume = { version = "0.11", features = ["async"] }
 
 actix-web = "4.11.0"
-ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer" }
-tokio = { version = "1.47.0", features = ["full"] }
+ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer_no_fwd" }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 serde = { version = "1.0", features = ["derive"] }
 configparser = "3.0"
-anyhow = "1.0.98"
+anyhow = "1.0"
 bitcoin = "0.32.4"
 chrono = { version = "0.4", default-features = false, features = [
         "clock",
@@ -20,7 +20,8 @@ chrono = { version = "0.4", default-features = false, features = [
 
 log = { version = "0.4.22", default-features = false, features = ["std"] }
 
-lightning = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer", features = [
+lightning = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer_no_fwd", features = [
         "std",
 ] }
 async-nats = "0.42.0"
+console-subscriber = "0.4.1"
