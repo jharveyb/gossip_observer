@@ -25,3 +25,4 @@ lightning = { git = "https://github.com/jharveyb/rust-lightning", branch = "goss
 ] }
 async-nats = "0.42.0"
 console-subscriber = "0.4.1"
+tokio-util = { version = "0.7.16", features = ["full", "rt"] }

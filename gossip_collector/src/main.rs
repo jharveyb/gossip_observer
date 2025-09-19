@@ -8,6 +8,7 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
 
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 mod config;
 mod exporter;
 mod logger;
@@ -79,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     // Enable tokio-console
     console_subscriber::init();
 
+    println!("Starting gossip collector");
     // Load configuration
     let ldk_config = NodeConfig::load_from_ini("config.ini")?;
     let server_config = ServerConfig::load_from_ini("config.ini")?;
@@ -127,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
     let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone());
+    nats_exporter
+        .set_export_delay(server_config.startup_delay)
+        .unwrap();
     nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
 
@@ -147,6 +152,26 @@ async fn main() -> anyhow::Result<()> {
         .set_export_metadata(node.node_id().to_string())
         .map_err(anyhow::Error::msg)?;
 
+    let stop_signal = CancellationToken::new();
+    let actix_stop_signal = stop_signal.child_token();
+
+    println!("Collector runtime: {} minutes", server_config.runtime);
+    println!("Start time: {}", chrono::Utc::now().to_rfc3339());
+    let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = deadline_waiter => {
+                println!("Server runtime exceeded, shutting down");
+                stop_signal.cancel();
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Ctrl-C received, shutting down");
+                stop_signal.cancel();
+            }
+        }
+    });
+
     Ok(tokio::join!(
         HttpServer::new(move || {
             App::new()
@@ -157,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
                 .service(node_connect)
                 .service(graph)
         })
+        .shutdown_signal(actix_stop_signal.cancelled_owned())
         .bind((server_config.hostname.as_str(), server_config.port))?
         .run()
     )

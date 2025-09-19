@@ -17,6 +17,7 @@ static STATS_INTERVAL: Duration = Duration::from_secs(120);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
 static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
+static EXPORT_DELAY: OnceLock<u64> = OnceLock::new();
 
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
@@ -29,6 +30,9 @@ pub trait Exporter: Send + Sync {
 
     // Provide extra data to be included alongside each exported message.
     fn set_export_metadata(&self, meta: String) -> Result<(), String>;
+
+    // Set the global delay before exporting any messages.
+    fn set_export_delay(&self, delay: u64) -> anyhow::Result<()>;
 }
 
 pub struct StdoutExporter {}
@@ -40,6 +44,10 @@ impl Exporter for StdoutExporter {
     }
 
     fn set_export_metadata(&self, _meta: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn set_export_delay(&self, _delay: u64) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -76,6 +84,12 @@ impl Exporter for NATSExporter {
         MSG_SUFFIX.get_or_init(|| format!("{}{}", INTRA_MSG_DELIM, meta));
         Ok(())
     }
+
+    fn set_export_delay(&self, delay: u64) -> anyhow::Result<()> {
+        println!("NATS export delay: {} seconds", delay);
+        EXPORT_DELAY.get_or_init(|| delay);
+        Ok(())
+    }
 }
 
 impl NATSExporter {
@@ -108,6 +122,7 @@ impl NATSExporter {
 
     // Build connections + spawn any long-running tasks we need for export.
     pub async fn start(&mut self) -> anyhow::Result<()> {
+        println!("Starting NATS exporter");
         let export_rx = self.export_rx.clone();
         let nats_tx = self.nats_tx.clone();
         let publish_ready_tx = self.publish_ready_tx.clone();
@@ -144,7 +159,14 @@ impl NATSExporter {
         publish_ready_tx: Sender<bool>,
         publish_ack_rx: Receiver<bool>,
     ) {
+        let start_time = std::time::Instant::now();
         while let Ok(mut msg) = rx.recv_async().await {
+            // Drop any messages within the startup window.
+            // TODO: Triggger this for every new connection
+            if start_time.elapsed().as_secs() < *EXPORT_DELAY.get().unwrap() {
+                continue;
+            }
+
             if tx.is_full() {
                 publish_ready_tx.send_async(true).await.unwrap();
                 publish_ack_rx.recv_async().await.unwrap();
