@@ -1,22 +1,24 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use async_duckdb::Client as DuckClient;
 use async_duckdb::ClientBuilder as DuckClientBuilder;
-use async_nats::jetstream;
-use chrono::{DateTime, Utc};
-// use duckdb::Connection;
 use async_duckdb::duckdb::DropBehavior;
 use async_duckdb::duckdb::params;
 use async_duckdb::duckdb::types::Null as DuckNull;
-use futures::Stream;
+use async_nats::Message;
+use async_nats::jetstream;
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use std::fs;
 use tokio::time::{self};
 
 // TODO: move to some gossip_common module
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
 static TABLE_NAME: &str = "gossip_archive";
+static STATS_INTERVAL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub struct GossipMessage {
@@ -59,6 +61,10 @@ impl From<MessageType> for u8 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Enable tokio-console
+    console_subscriber::init();
+
+    // TODO: proper INI cfg
     let nats_server = "100.68.143.113:4222";
     let nats_client = async_nats::connect(nats_server).await?;
     let stream_ctx = jetstream::new(nats_client);
@@ -67,22 +73,26 @@ async fn main() -> anyhow::Result<()> {
     let msg_stream = consumer.messages().await?;
     println!("Set up NATS stream and consumer");
 
-    // TODO: unbounded feels sketch but whatevs
+    // TODO: unbounded feels sketch but whatevs; backpressure?
+    let (raw_msg_tx, raw_msg_rx) = flume::unbounded();
     let (msg_tx, msg_rx) = flume::unbounded();
 
     let db_path = "./data/mainnet/gossip_archive.duckdb";
+    if let Some(parent_dir) = Path::new(&db_path).parent() {
+        fs::create_dir_all(parent_dir)?;
+    }
     let mut db_client = DuckClientBuilder::new().path(db_path).open().await?;
     init_db(&db_client).await?;
     println!("Initialized DuckDB connection");
 
-    let nats_recv = msg_tx.clone();
+    let nats_recv = raw_msg_tx.clone();
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
-    let duckdb_handle =
-        tokio::spawn(async move { db_writer(&mut db_client, msg_rx.clone()).await });
+    let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
+    let duckdb_handle = tokio::spawn(async move { db_writer(&mut db_client, msg_rx).await });
 
-    let stats_chan = msg_tx.clone();
+    let stats_chan = raw_msg_tx.clone();
     let stats_handle = tokio::spawn(async move {
-        let mut stats_waiter = time::interval(Duration::from_secs(120));
+        let mut stats_waiter = time::interval(STATS_INTERVAL);
         loop {
             tokio::select! {
                 _ = stats_waiter.tick() => {
@@ -92,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let _ = tokio::try_join!(nats_handle, duckdb_handle, stats_handle)?;
+    let _ = tokio::try_join!(nats_handle, decode_handle, duckdb_handle, stats_handle)?;
     Ok(())
 }
 
@@ -137,13 +147,11 @@ pub async fn db_writer(
                 if db_batch.is_empty() {
                     continue;
                 }
-                // let db_batch: Vec<GossipMessage> = msg_rx.stream().take(batch_size).collect().await;
                 db_batch_write(db, db_batch).await?;
                 flush_counter += 1;
             }
             _ = buf_full_rx.recv_async() => {
                     let db_batch = db_buf_rx.clone().drain().collect::<Vec<_>>();
-                    // let db_batch: Vec<GossipMessage> = msg_rx.stream().take(batch_size).collect().await;
                     db_batch_write(db, db_batch).await?;
                     poll_counter += 1;
                     buf_ack_tx.send_async(true).await.unwrap();
@@ -184,32 +192,48 @@ pub async fn db_batch_write(db: &mut DuckClient, msgs: Vec<GossipMessage>) -> an
 
 pub async fn nats_reader(
     mut stream: jetstream::consumer::pull::Stream,
-    msg_tx: flume::Sender<GossipMessage>,
+    raw_msg_tx: flume::Sender<Message>,
 ) -> anyhow::Result<()> {
     println!("Starting NATS reader");
 
-    let mut last_recv_time = std::time::Instant::now();
     let mut msg_count = 0;
-    while let Some(message) = stream.next().await {
-        let message = message.map_err(anyhow::Error::msg)?;
-        let contents = str::from_utf8(&message.payload)?.split(INTER_MSG_DELIM);
-        for raw_msg in contents {
-            msg_tx.send_async(decode_msg(raw_msg)?).await?;
-        }
-
-        message.ack().await.map_err(anyhow::Error::msg)?;
-
-        // TODO: use select & interval instead
-        msg_count += 1;
-        if last_recv_time.elapsed().as_secs() > 120 && msg_count >= 2 {
-            println!("Avg. NATS msg/min: {}", msg_count / 2);
-            last_recv_time = std::time::Instant::now();
-            msg_count = 0;
+    let mut stats_waiter = time::interval(STATS_INTERVAL);
+    loop {
+        tokio::select! {
+            Some(message) = stream.next() => {
+                // ACK before we actually write to DB; yeet
+                let (message, ack_handle) = message.map_err(anyhow::Error::msg)?.split();
+                raw_msg_tx.send_async(message).await?;
+                ack_handle.ack().await.map_err(anyhow::Error::msg)?;
+                msg_count += 1;
+            }
+            _ = stats_waiter.tick() => {
+                if msg_count > 2 {
+                    println!("Avg. NATS msg/min: {}", msg_count / 2);
+                }
+                msg_count = 0;
+            }
         }
     }
-    Ok(())
 }
 
+pub async fn msg_decoder(
+    raw_msg_rx: flume::Receiver<Message>,
+    msg_tx: flume::Sender<GossipMessage>,
+) -> anyhow::Result<()> {
+    loop {
+        tokio::select! {
+            Ok(raw_msg) = raw_msg_rx.recv_async() => {
+                let inner_msgs = str::from_utf8(&raw_msg.payload)?.split(INTER_MSG_DELIM);
+                for raw_msg in inner_msgs {
+                    msg_tx.send_async(decode_msg(raw_msg)?).await?;
+                }
+            }
+        }
+    }
+}
+
+// TODO: rkyv or smthn cool here?
 // This should mirror whatever we're exporting to NATS
 pub fn decode_msg(msg: &str) -> anyhow::Result<GossipMessage> {
     let parts = msg.split(INTRA_MSG_DELIM).collect::<Vec<&str>>();
@@ -219,11 +243,11 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<GossipMessage> {
 
     Ok(GossipMessage {
         recv_timestamp: DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap(),
-        collector: parts[1].to_string(),
-        recv_peer: parts[2].to_string(),
-        msg_type: parts[3].parse::<MessageType>()?.into(),
-        msg_size: parts[4].parse::<u16>()?,
-        msg: parts[5].to_string(),
+        collector: parts[5].to_owned(),
+        recv_peer: parts[1].to_owned(),
+        msg_type: parts[2].parse::<MessageType>()?.into(),
+        msg_size: parts[3].parse::<u16>()?,
+        msg: parts[4].to_owned(),
     })
 }
 

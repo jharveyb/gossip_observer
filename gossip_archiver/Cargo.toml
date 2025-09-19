@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 flume = { version = "0.11", features = ["async"] }
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 
-anyhow = "1.0.98"
+anyhow = "1.0"
 
 chrono = { version = "0.4", default-features = false, features = [
         "clock",
@@ -22,3 +22,4 @@ async-duckdb = { git = "https://github.com/jharveyb/async-duckdb", branch = "bum
         "uuid",
 ] }
 bytes = { version = "1.10.1", features = ["serde"] }
+console-subscriber = "0.4.1"

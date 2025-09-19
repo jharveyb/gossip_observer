@@ -5,13 +5,18 @@ use flume::Sender;
 use ldk_node::logger::{LogRecord, LogWriter};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::sync::Notify;
+use std::time::Duration;
 use tokio::task::JoinSet;
+use tokio::time;
 
 use crate::config::NATSConfig;
 
+static INTER_MSG_DELIM: &str = ";";
+static INTRA_MSG_DELIM: &str = ",";
+static STATS_INTERVAL: Duration = Duration::from_secs(120);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
+static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
 
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
@@ -42,11 +47,14 @@ impl Exporter for StdoutExporter {
 pub struct NATSExporter {
     cfg: NATSConfig,
     runtime: Arc<tokio::runtime::Runtime>,
+    // TODO: How do we join on this later?
     pub tasks: JoinSet<()>,
     export_tx: Sender<String>,
     export_rx: Receiver<String>,
-    publish: Arc<Notify>,
-    publish_ack: Arc<Notify>,
+    publish_ready_tx: Sender<bool>,
+    publish_ready_rx: Receiver<bool>,
+    publish_ack_tx: Sender<bool>,
+    publish_ack_rx: Receiver<bool>,
     nats_tx: Sender<String>,
     nats_rx: Receiver<String>,
     // What else?
@@ -64,7 +72,8 @@ impl Exporter for NATSExporter {
     fn set_export_metadata(&self, meta: String) -> Result<(), String> {
         let stream_name = format!("{}.{}", self.cfg.stream, meta);
         NATS_SUBJECT.get_or_init(|| stream_name);
-        NODEKEY.get_or_init(|| meta);
+        NODEKEY.get_or_init(|| meta.clone());
+        MSG_SUFFIX.get_or_init(|| format!("{}{}", INTRA_MSG_DELIM, meta));
         Ok(())
     }
 }
@@ -77,7 +86,8 @@ impl NATSExporter {
         // Max. export msg size is ~500B, we could go higher here
         let (nats_tx, nats_rx) = flume::bounded(256);
         // TODO: there's probably a better sync primitive for this
-        let (publish, publish_ack) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let (publish_ready_tx, publish_ready_rx) = flume::bounded(1);
+        let (publish_ack_tx, publish_ack_rx) = flume::bounded(1);
         let tasks = JoinSet::new();
 
         Self {
@@ -86,8 +96,10 @@ impl NATSExporter {
             tasks,
             export_tx,
             export_rx,
-            publish,
-            publish_ack,
+            publish_ready_tx,
+            publish_ready_rx,
+            publish_ack_tx,
+            publish_ack_rx,
             nats_tx,
             nats_rx,
         }
@@ -98,21 +110,25 @@ impl NATSExporter {
     pub async fn start(&mut self) -> anyhow::Result<()> {
         let export_rx = self.export_rx.clone();
         let nats_tx = self.nats_tx.clone();
-        let publish = self.publish.clone();
-        let publish_ack = self.publish_ack.clone();
+        let publish_ready_tx = self.publish_ready_tx.clone();
+        let publish_ack_tx = self.publish_ack_tx.clone();
+        let publish_ready_rx = self.publish_ready_rx.clone();
+        let publish_ack_rx = self.publish_ack_rx.clone();
 
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
         self.tasks.spawn_on(
-            async move { Self::queue_exported_msg(export_rx, nats_tx, publish, publish_ack).await },
+            async move {
+                Self::queue_exported_msg(export_rx, nats_tx, publish_ready_tx, publish_ack_rx).await
+            },
             self.runtime.clone().handle(),
         );
 
         let nats_rx = self.nats_rx.clone();
-        let publish = self.publish.clone();
-        let publish_ack = self.publish_ack.clone();
         self.tasks.spawn_on(
-            async move { Self::publish_msgs(stream_ctx, nats_rx, publish, publish_ack).await },
+            async move {
+                Self::publish_msgs(stream_ctx, nats_rx, publish_ready_rx, publish_ack_tx).await
+            },
             self.runtime.clone().handle(),
         );
         Ok(())
@@ -125,17 +141,17 @@ impl NATSExporter {
     async fn queue_exported_msg(
         rx: Receiver<String>,
         tx: Sender<String>,
-        publish: Arc<Notify>,
-        publish_ack: Arc<Notify>,
+        publish_ready_tx: Sender<bool>,
+        publish_ack_rx: Receiver<bool>,
     ) {
-        while let Ok(msg) = rx.recv_async().await {
+        while let Ok(mut msg) = rx.recv_async().await {
             if tx.is_full() {
-                publish.notify_one();
-                publish_ack.notified().await;
+                publish_ready_tx.send_async(true).await.unwrap();
+                publish_ack_rx.recv_async().await.unwrap();
             }
+
             // Add our node ID to the message, after the timestamp.
-            let msg_parts = msg.split_once(',').unwrap();
-            let msg = format!("{},{},{}", msg_parts.0, NODEKEY.get().unwrap(), msg_parts.1);
+            msg.push_str(MSG_SUFFIX.get().unwrap());
             if let Err(e) = tx.send_async(msg).await {
                 // TODO: crash?
                 println!("internal exporter error: queue_exported_msg(): {e}");
@@ -147,24 +163,40 @@ impl NATSExporter {
     async fn publish_msgs(
         ctx: jetstream::Context,
         rx: Receiver<String>,
-        publish: Arc<Notify>,
-        publish_ack: Arc<Notify>,
+        publish_ready_rx: Receiver<bool>,
+        publish_ack_tx: Sender<bool>,
     ) {
+        let mut total_upload_time = 0;
+        let mut msg_send_time;
+        let mut msg_submit_interval;
+        let mut upload_count = 0;
+        let mut stats_waiter = time::interval(STATS_INTERVAL);
         loop {
-            publish.notified().await;
-
-            let msg_batch = rx.drain().collect::<Vec<_>>().join(";");
-            // TODO: err handling here
-            let msg_send_time = chrono::Utc::now().timestamp_micros();
-            let ack = ctx
-                .publish(NATS_SUBJECT.get().unwrap().as_str(), msg_batch.into())
-                .await
-                .unwrap();
-            ack.await.unwrap();
-            let msg_ack_time = chrono::Utc::now().timestamp_micros();
-            println!("NATS upload time: {}us", msg_ack_time - msg_send_time);
-
-            publish_ack.notify_one();
+            tokio::select! {
+                _ = publish_ready_rx.recv_async() => {
+                    let msg_batch = rx.drain().collect::<Vec<_>>().join(INTER_MSG_DELIM);
+                    // TODO: err handling here
+                    // TODO: Is this useful to measure?
+                    msg_send_time = std::time::Instant::now();
+                    let ack = ctx
+                        .publish(NATS_SUBJECT.get().unwrap().as_str(), msg_batch.into())
+                        .await
+                        .unwrap();
+                    ack.await.unwrap();
+                    msg_submit_interval = msg_send_time.elapsed().as_micros();
+                    total_upload_time += msg_submit_interval;
+                    upload_count += 1;
+                    publish_ack_tx.send_async(true).await.unwrap();
+                }
+                _ = stats_waiter.tick() => {
+                    if upload_count > 0 {
+                        println!(
+                            "Avg. NATS upload time: {}us",
+                            total_upload_time / upload_count
+                        );
+                    }
+                }
+            }
         }
     }
 }
