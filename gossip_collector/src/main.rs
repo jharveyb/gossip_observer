@@ -4,8 +4,10 @@ use std::{str::FromStr, sync::Arc};
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use anyhow::anyhow;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
+use rand::seq::SliceRandom;
+use std::fs::read_to_string;
+use tokio::task::JoinSet;
 
 use tokio::time::interval;
 use tokio::time::sleep;
@@ -68,13 +70,19 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Enable tokio-console
-    console_subscriber::init();
+    // console_subscriber::init();
 
     println!("Starting gossip collector");
     // Load configuration
     let ldk_config = NodeConfig::load_from_ini("config.ini")?;
     let server_config = ServerConfig::load_from_ini("config.ini")?;
     let nats_config = NATSConfig::load_from_ini("config.ini")?;
+
+    let mut rng = rand::rng();
+    let node_list = read_to_string("./node_addresses_clearnet_no_localhost.txt")?;
+    let mut node_list = node_list.lines().map(String::from).collect::<Vec<_>>();
+    node_list.shuffle(&mut rng);
+    println!("Using node list of {} nodes", node_list.len());
 
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -144,7 +152,6 @@ async fn main() -> anyhow::Result<()> {
         .set_export_metadata(node.node_id().to_string())
         .map_err(anyhow::Error::msg)?;
 
-    let stop_signal = CancellationToken::new();
     let actix_stop_signal = stop_signal.child_token();
     let bg_stats_stop_signal = stop_signal.child_token();
 
@@ -153,6 +160,61 @@ async fn main() -> anyhow::Result<()> {
     let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
 
     let node_handle = node.clone();
+
+    let mut node_connect_init = JoinSet::new();
+    let mut task_id = 0;
+    let max_tasks = 25;
+
+    let total_tasks = node_list.len();
+    let connect_update_delay = Duration::from_millis(500);
+
+    let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();
+    for _ in 0..max_tasks {
+        let next_peer = peers.pop().unwrap();
+        let node_handle = node_handle.clone();
+        // TODO: Why do so many connections fail? Is this a missing feature bit with LDK / rust-lighning?
+        node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));
+        task_id += 1;
+        sleep(connect_update_delay).await;
+    }
+    println!(
+        "Scheduled {} of {} initial connections",
+        task_id, total_tasks
+    );
+
+    let init_connections = tokio::spawn(async move {
+        while let Some(res) = node_connect_init.join_next().await {
+            match res {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Tokio: init connect task failed: {:#?}", e);
+                }
+            }
+
+            if task_id < total_tasks {
+                if task_id % 100 == 0 {
+                    println!(
+                        "Scheduled {} of {} initial connections",
+                        task_id, total_tasks
+                    );
+                }
+                if task_id % 500 == 0 {
+                    println!("Pausing to prune graph");
+                    match node_manager::graph_prune(node_handle.clone()).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("Failed to prune graph: {e}");
+                        }
+                    }
+                }
+                let next_peer = peers.pop().unwrap();
+                let node_handle = node_handle.clone();
+                node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));
+                task_id += 1;
+                sleep(connect_update_delay).await;
+            }
+        }
+    });
 
     let mut stats_waiter = interval(exporter::STATS_INTERVAL);
     let node_stats_handle = node.clone();
