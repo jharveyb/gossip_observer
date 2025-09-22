@@ -62,7 +62,7 @@ impl From<MessageType> for u8 {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Enable tokio-console
-    console_subscriber::init();
+    // console_subscriber::init();
 
     // TODO: proper INI cfg
     let nats_server = "100.68.143.113:4222";
@@ -76,8 +76,9 @@ async fn main() -> anyhow::Result<()> {
     // TODO: unbounded feels sketch but whatevs; backpressure?
     let (raw_msg_tx, raw_msg_rx) = flume::unbounded();
     let (msg_tx, msg_rx) = flume::unbounded();
+    let now = chrono::Utc::now().format("%m%dT%H%M%S");
 
-    let db_path = "./data/mainnet/gossip_archive.duckdb";
+    let db_path = format!("{}{}", "./data/mainnet/gossip_archive.duckdb", now);
     if let Some(parent_dir) = Path::new(&db_path).parent() {
         fs::create_dir_all(parent_dir)?;
     }
