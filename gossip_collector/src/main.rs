@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 mod config;
 mod exporter;
 mod logger;
+mod node_manager;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
 use config::{NATSConfig, NodeConfig, ServerConfig};
@@ -34,26 +35,14 @@ async fn node_config(data: web::Data<AppState>) -> impl Responder {
 async fn node_connect(data: web::Data<AppState>, body: String) -> impl Responder {
     let connection_string = body.trim();
 
-    // Parse connection string format: pubkey@host:port
-    if let Some((pubkey_str, address)) = connection_string.split_once('@') {
-        let addr = match SocketAddress::from_str(address) {
-            Ok(addr) => addr,
-            Err(e) => {
-                return HttpResponse::BadRequest().body(format!("Invalid address format: {e}"));
-            }
-        };
-        let pubkey = ldk_node::bitcoin::secp256k1::PublicKey::from_str(pubkey_str).unwrap();
+    if let Err(e) = node_manager::parse_peer_specifier(connection_string) {
+        return HttpResponse::BadRequest().body(e.to_string());
+    };
 
-        let node = data.node.clone();
-        match tokio::task::spawn_blocking(move || node.connect(pubkey, addr, false)).await {
-            Ok(Ok(_)) => HttpResponse::Ok().body("Connected successfully"),
-            Ok(Err(e)) => {
-                HttpResponse::InternalServerError().body(format!("Connection failed: {e}"))
-            }
-            Err(e) => HttpResponse::InternalServerError().body(format!("Task failed: {e}")),
-        }
-    } else {
-        HttpResponse::BadRequest().body("Invalid connection string format")
+    let node = data.node.clone();
+    match node_manager::node_peer_connect(node, connection_string.to_owned()).await {
+        Ok(_) => HttpResponse::Ok().body("Connected successfully"),
+        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
     }
 }
 
