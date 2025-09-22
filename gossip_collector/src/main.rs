@@ -7,6 +7,7 @@ use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::logger::LogLevel;
 
+use tokio::time::interval;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 mod config;
@@ -80,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             .enable_all()
             .build()?,
     );
+    let stop_signal = CancellationToken::new();
 
     // Spawn LDK node; use longer sync intervals for chain watching.
     let mut builder = ldk_node::Builder::new();
@@ -117,7 +119,8 @@ async fn main() -> anyhow::Result<()> {
     let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
-    let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone());
+    let exporter_stop_signal = stop_signal.child_token();
+    let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone(), exporter_stop_signal);
     nats_exporter
         .set_export_delay(server_config.startup_delay)
         .unwrap();
@@ -143,25 +146,59 @@ async fn main() -> anyhow::Result<()> {
 
     let stop_signal = CancellationToken::new();
     let actix_stop_signal = stop_signal.child_token();
+    let bg_stats_stop_signal = stop_signal.child_token();
 
     println!("Collector runtime: {} minutes", server_config.runtime);
     println!("Start time: {}", chrono::Utc::now().to_rfc3339());
     let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
 
-    tokio::spawn(async move {
+    let node_handle = node.clone();
+
+    let mut stats_waiter = interval(exporter::STATS_INTERVAL);
+    let node_stats_handle = node.clone();
+    let bg_stats = tokio::spawn(async move {
+        let mut peer_count = 0;
+        loop {
+            tokio::select! {
+                _ = stats_waiter.tick() => {
+                    let peer_info = node_stats_handle.list_peers();
+                    let new_peer_count = peer_info.len();
+
+                    println!("Peer count: {}", new_peer_count);
+                    let delta = (new_peer_count as i64) - (peer_count as i64);
+                    println!("Delta over {:?}: {}", exporter::STATS_INTERVAL, delta);
+                    peer_count = new_peer_count;
+                }
+                _ = bg_stats_stop_signal.cancelled() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // TODO: what do we want to dump from node before shutdown?
+    // nodelist, channel list, peer list, etc.
+    let node_shutdown_handle = node.clone();
+    let deadline = tokio::spawn(async move {
         tokio::select! {
             _ = deadline_waiter => {
                 println!("Server runtime exceeded, shutting down");
                 stop_signal.cancel();
+                // TODO: conflict?
+                let _ = node_shutdown_handle.stop();
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("Ctrl-C received, shutting down");
                 stop_signal.cancel();
+                let _ = node_shutdown_handle.stop();
             }
         }
     });
 
     Ok(tokio::join!(
+        bg_stats,
+        init_connections,
+        deadline,
         HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(AppState { node: node.clone() }))

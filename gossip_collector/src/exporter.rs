@@ -8,12 +8,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::NATSConfig;
 
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-static STATS_INTERVAL: Duration = Duration::from_secs(120);
+pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(120);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
 static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
@@ -65,7 +66,7 @@ pub struct NATSExporter {
     publish_ack_rx: Receiver<bool>,
     nats_tx: Sender<String>,
     nats_rx: Receiver<String>,
-    // What else?
+    stop_signal: CancellationToken,
 }
 
 impl Exporter for NATSExporter {
@@ -93,7 +94,11 @@ impl Exporter for NATSExporter {
 }
 
 impl NATSExporter {
-    pub fn new(cfg: NATSConfig, runtime: Arc<tokio::runtime::Runtime>) -> Self {
+    pub fn new(
+        cfg: NATSConfig,
+        runtime: Arc<tokio::runtime::Runtime>,
+        stop_signal: CancellationToken,
+    ) -> Self {
         // Use flume channels to bridge sync -> async, and as a ring buffer.
         let (export_tx, export_rx) = flume::unbounded();
         // TODO: dynamic buffer size here; needs to stay below NATS msg_size limit
@@ -116,8 +121,8 @@ impl NATSExporter {
             publish_ack_rx,
             nats_tx,
             nats_rx,
+            stop_signal,
         }
-        // TODO: How do we handle NATS error? iunno, cancellation tokens I guess
     }
 
     // Build connections + spawn any long-running tasks we need for export.
@@ -132,9 +137,19 @@ impl NATSExporter {
 
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
+
+        let queue_stop_signal = self.stop_signal.child_token();
+        let export_stop_signal = self.stop_signal.child_token();
         self.tasks.spawn_on(
             async move {
-                Self::queue_exported_msg(export_rx, nats_tx, publish_ready_tx, publish_ack_rx).await
+                Self::queue_exported_msg(
+                    export_rx,
+                    nats_tx,
+                    publish_ready_tx,
+                    publish_ack_rx,
+                    queue_stop_signal,
+                )
+                .await
             },
             self.runtime.clone().handle(),
         );
@@ -142,7 +157,14 @@ impl NATSExporter {
         let nats_rx = self.nats_rx.clone();
         self.tasks.spawn_on(
             async move {
-                Self::publish_msgs(stream_ctx, nats_rx, publish_ready_rx, publish_ack_tx).await
+                Self::publish_msgs(
+                    stream_ctx,
+                    nats_rx,
+                    publish_ready_rx,
+                    publish_ack_tx,
+                    export_stop_signal,
+                )
+                .await
             },
             self.runtime.clone().handle(),
         );
@@ -158,26 +180,35 @@ impl NATSExporter {
         tx: Sender<String>,
         publish_ready_tx: Sender<bool>,
         publish_ack_rx: Receiver<bool>,
+        stop_signal: CancellationToken,
     ) {
         let start_time = std::time::Instant::now();
-        while let Ok(mut msg) = rx.recv_async().await {
-            // Drop any messages within the startup window.
-            // TODO: Triggger this for every new connection
-            if start_time.elapsed().as_secs() < *EXPORT_DELAY.get().unwrap() {
-                continue;
-            }
+        loop {
+            tokio::select! {
+                Ok(mut msg) = rx.recv_async() => {
+                    // Drop any messages within the startup window.
+                    // TODO: Triggger this for every new connection vs. globally
+                    if start_time.elapsed().as_secs() < *EXPORT_DELAY.get().unwrap() {
+                        continue;
+                    }
 
-            if tx.is_full() {
-                publish_ready_tx.send_async(true).await.unwrap();
-                publish_ack_rx.recv_async().await.unwrap();
-            }
+                    // Drain msgs to NATS
+                    if tx.is_full() {
+                        publish_ready_tx.send_async(true).await.unwrap();
+                        publish_ack_rx.recv_async().await.unwrap();
+                    }
 
-            // Add our node ID to the message, after the timestamp.
-            msg.push_str(MSG_SUFFIX.get().unwrap());
-            if let Err(e) = tx.send_async(msg).await {
-                // TODO: crash?
-                println!("internal exporter error: queue_exported_msg(): {e}");
-            }
+                    // Add our node ID to the message, after the timestamp.
+                    msg.push_str(MSG_SUFFIX.get().unwrap());
+                    if let Err(e) = tx.send_async(msg).await {
+                        // TODO: crash?
+                        println!("internal exporter error: queue_exported_msg(): {e}");
+                    }
+                }
+                _ = stop_signal.cancelled() => {
+                    break;
+                }
+            };
         }
     }
 
@@ -187,6 +218,7 @@ impl NATSExporter {
         rx: Receiver<String>,
         publish_ready_rx: Receiver<bool>,
         publish_ack_tx: Sender<bool>,
+        stop_signal: CancellationToken,
     ) {
         let mut total_upload_time = 0;
         let mut msg_send_time;
@@ -217,6 +249,9 @@ impl NATSExporter {
                             total_upload_time / upload_count
                         );
                     }
+                }
+                _ = stop_signal.cancelled() => {
+                    break;
                 }
             }
         }
