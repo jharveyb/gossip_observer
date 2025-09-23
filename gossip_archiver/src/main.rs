@@ -1,12 +1,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use async_duckdb::Client as DuckClient;
 use async_duckdb::ClientBuilder as DuckClientBuilder;
 use async_duckdb::duckdb::DropBehavior;
+use async_duckdb::duckdb::Error as DuckError;
 use async_duckdb::duckdb::params;
-use async_duckdb::duckdb::types::Null as DuckNull;
 use async_nats::Message;
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
@@ -19,6 +18,7 @@ static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
 static TABLE_NAME: &str = "gossip_archive";
 static STATS_INTERVAL: Duration = Duration::from_secs(120);
+static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct GossipMessage {
@@ -78,6 +78,13 @@ async fn main() -> anyhow::Result<()> {
     let (msg_tx, msg_rx) = flume::unbounded();
     let now = chrono::Utc::now().format("%m%dT%H%M%S");
 
+    // Adjust this based on observed ingest rate
+    // Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
+    let batch_size = 25_000;
+    let (db_buf_tx, db_buf_rx) = flume::bounded(batch_size);
+    let (buf_tick_tx, buf_tick_rx) = flume::bounded(1);
+    let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
+
     let db_path = format!("{}{}", "./data/mainnet/gossip_archive.duckdb", now);
     if let Some(parent_dir) = Path::new(&db_path).parent() {
         fs::create_dir_all(parent_dir)?;
@@ -89,7 +96,13 @@ async fn main() -> anyhow::Result<()> {
     let nats_recv = raw_msg_tx.clone();
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
-    let duckdb_handle = tokio::spawn(async move { db_writer(&mut db_client, msg_rx).await });
+    let duckdb_handle = tokio::spawn(async move {
+        db_write_handler(&mut db_client, db_buf_rx, buf_tick_rx, buf_ack_tx).await
+    });
+    let db_write_ticker_handle =
+        tokio::spawn(
+            async move { db_write_ticker(msg_rx, db_buf_tx, buf_tick_tx, buf_ack_rx).await },
+        );
 
     let stats_chan = raw_msg_tx.clone();
     let stats_handle = tokio::spawn(async move {
@@ -103,92 +116,112 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let _ = tokio::try_join!(nats_handle, decode_handle, duckdb_handle, stats_handle)?;
+    let _ = tokio::try_join!(
+        nats_handle,
+        decode_handle,
+        duckdb_handle,
+        db_write_ticker_handle,
+        stats_handle
+    )?;
     Ok(())
 }
 
-pub async fn db_writer(
-    db: &mut DuckClient,
+pub async fn db_write_ticker(
     msg_rx: flume::Receiver<GossipMessage>,
+    db_buf_tx: flume::Sender<GossipMessage>,
+    buf_tick_tx: flume::Sender<()>,
+    buf_ack_rx: flume::Receiver<()>,
 ) -> anyhow::Result<()> {
-    // Pick this based on observed ingest rate?
-    let batch_size = 10_000;
-    let flush_interval = Duration::from_secs(5);
+    let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
+    let mut stats_waiter = time::interval(STATS_INTERVAL);
 
-    let mut flush_waiter = time::interval(flush_interval);
-    let mut stats_waiter = time::interval(Duration::from_secs(120));
-
-    let (db_buf_tx, db_buf_rx) = flume::bounded(batch_size);
-    let (buf_full_tx, buf_full_rx) = flume::bounded(1);
-    let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
-
-    // TODO: join / return two join handles?
-    let _buf_fill = tokio::spawn(async move {
-        while let Ok(msg) = msg_rx.recv_async().await {
-            if db_buf_tx.is_full() {
-                // Block on DB write
-                buf_full_tx.send_async(true).await.unwrap();
-                buf_ack_rx.recv_async().await.unwrap();
-            }
-
-            if let Err(e) = db_buf_tx.send_async(msg).await {
-                // TODO: crash?
-                println!("internal archiver error: db_writer(): {e}");
-            }
-        }
-    });
-
-    let mut flush_counter = 0;
     let mut poll_counter = 0;
-    println!("Starting DB writer");
+    let mut full_counter = 0;
+
+    println!("Starting DB write ticker");
+    println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
+    println!("Stats interval: {STATS_INTERVAL:?}");
     loop {
         tokio::select! {
-            _ = flush_waiter.tick() => {
-                let db_batch = db_buf_rx.clone().drain().collect::<Vec<_>>();
-                if db_batch.is_empty() {
-                    continue;
-                }
-                db_batch_write(db, db_batch).await?;
-                flush_counter += 1;
-            }
-            _ = buf_full_rx.recv_async() => {
-                    let db_batch = db_buf_rx.clone().drain().collect::<Vec<_>>();
-                    db_batch_write(db, db_batch).await?;
-                    poll_counter += 1;
-                    buf_ack_tx.send_async(true).await.unwrap();
-            }
             _ = stats_waiter.tick() => {
-                println!("Flush count: {flush_counter}, Poll count: {poll_counter}");
-                flush_counter = 0;
+                println!("Flush count: {poll_counter}, Full buffer count: {full_counter}");
                 poll_counter = 0;
+                full_counter = 0;
+            }
+            _ = flush_waiter.tick() => {
+                buf_tick_tx.send_async(()).await.unwrap();
+                buf_ack_rx.recv_async().await.unwrap();
+                poll_counter += 1;
+            }
+            Ok(msg) = msg_rx.recv_async() => {
+                if db_buf_tx.is_full() {
+                    buf_tick_tx.send_async(()).await.unwrap();
+                    buf_ack_rx.recv_async().await.unwrap();
+                    full_counter += 1;
+                }
+
+                if let Err(e) = db_buf_tx.send_async(msg).await {
+                    // TODO: crash?
+                    println!("internal archiver error: db_writer(): {e}");
+                }
             }
         };
     }
 }
 
-pub async fn db_batch_write(db: &mut DuckClient, msgs: Vec<GossipMessage>) -> anyhow::Result<()> {
-    db.conn_mut(|c| {
-        let mut tx = c.transaction()?;
-        tx.set_drop_behavior(DropBehavior::Commit);
-        let mut append = tx.appender(TABLE_NAME)?;
-        for msg in msgs {
-            // We need a NULL placeholder here for the autoincrement column,
-            // otherwise our number of columns won't match the table schema
-            // and all appends will fail.
-            append.append_row(params![
-                DuckNull,
-                msg.recv_timestamp,
-                msg.collector,
-                msg.recv_peer,
-                msg.msg_type,
-                msg.msg_size,
-                msg.msg
-            ])?;
-        }
-        append.flush()
-    })
-    .await?;
-    Ok(())
+pub async fn db_write_handler(
+    db: &mut DuckClient,
+    db_buf_rx: flume::Receiver<GossipMessage>,
+    buf_tick_rx: flume::Receiver<()>,
+    buf_ack_tx: flume::Sender<()>,
+) -> anyhow::Result<()> {
+    println!("Starting DB writer");
+
+    let mut row_idx = 0;
+    loop {
+        tokio::select! {
+            _ = buf_tick_rx.recv_async() => {
+                let db_batch = db_buf_rx.clone().drain().collect::<Vec<_>>();
+                if db_batch.is_empty() {
+                    buf_ack_tx.send_async(()).await.unwrap();
+                    continue;
+                } else {
+                    row_idx = db_batch_write(db, db_batch, row_idx).await?;
+                    buf_ack_tx.send_async(()).await.unwrap();
+                }
+            }
+        };
+    }
+}
+
+pub async fn db_batch_write(
+    db: &mut DuckClient,
+    msgs: Vec<GossipMessage>,
+    row_idx: u64,
+) -> anyhow::Result<u64> {
+    let mut inner_idx = row_idx;
+    let end_idx = db
+        .conn_mut(move |c| -> Result<u64, DuckError> {
+            let mut tx = c.transaction()?;
+            tx.set_drop_behavior(DropBehavior::Commit);
+            let mut append = tx.appender(TABLE_NAME)?;
+            for msg in msgs {
+                append.append_row(params![
+                    inner_idx,
+                    msg.recv_timestamp,
+                    msg.collector,
+                    msg.recv_peer,
+                    msg.msg_type,
+                    msg.msg_size,
+                    msg.msg
+                ])?;
+                inner_idx += 1;
+            }
+            append.flush()?;
+            Ok(inner_idx)
+        })
+        .await?;
+    Ok(end_idx)
 }
 
 pub async fn nats_reader(
@@ -234,7 +267,7 @@ pub async fn msg_decoder(
     }
 }
 
-// TODO: rkyv or smthn cool here?
+// TODO: rkyv or smthn cool here? Jk this is fine on release builds
 // This should mirror whatever we're exporting to NATS
 pub fn decode_msg(msg: &str) -> anyhow::Result<GossipMessage> {
     let parts = msg.split(INTRA_MSG_DELIM).collect::<Vec<&str>>();
@@ -286,12 +319,9 @@ pub async fn upsert_consumer(
 }
 
 pub async fn init_db(db: &DuckClient) -> anyhow::Result<()> {
-    let create_autoinc_sql = "
-        CREATE SEQUENCE IF NOT EXISTS id_seq START 1;
-    ";
     let create_table_sql = "
     CREATE TABLE IF NOT EXISTS gossip_archive (
-        msg_id BIGINT DEFAULT nextval('id_seq'),
+        msg_id UBIGINT NOT NULL,
         recv_ts TIMESTAMPTZ NOT NULL,
         collector VARCHAR NOT NULL,
         recv_peer VARCHAR NOT NULL,
@@ -299,7 +329,6 @@ pub async fn init_db(db: &DuckClient) -> anyhow::Result<()> {
         msg_size UINT16 NOT NULL,
         msg VARCHAR
     );";
-    db.conn(|c| c.execute_batch(create_autoinc_sql)).await?;
     db.conn(|c| c.execute_batch(create_table_sql)).await?;
     Ok(())
 }
