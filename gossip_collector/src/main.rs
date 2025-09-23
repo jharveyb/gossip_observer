@@ -269,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
                 .service(node_connect)
                 .service(graph)
         })
+        .workers(2)
         .shutdown_signal(actix_stop_signal.cancelled_owned())
         .bind((server_config.hostname.as_str(), server_config.port))?
         .run()
