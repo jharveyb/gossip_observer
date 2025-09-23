@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "lightning"
 version = "0.1.5"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -2655,7 +2655,7 @@ dependencies = [
 [[package]]
 name = "lightning-background-processor"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
@@ -2667,7 +2667,7 @@ dependencies = [
 [[package]]
 name = "lightning-block-sync"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "chunked_transfer",
@@ -2679,7 +2679,7 @@ dependencies = [
 [[package]]
 name = "lightning-invoice"
 version = "0.33.2"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -2690,7 +2690,7 @@ dependencies = [
 [[package]]
 name = "lightning-liquidity"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "chrono",
@@ -2704,7 +2704,7 @@ dependencies = [
 [[package]]
 name = "lightning-macros"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2714,7 +2714,7 @@ dependencies = [
 [[package]]
 name = "lightning-net-tokio"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -2724,7 +2724,7 @@ dependencies = [
 [[package]]
 name = "lightning-persister"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "lightning",
@@ -2734,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "lightning-rapid-gossip-sync"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "bitcoin-io",
@@ -2745,7 +2745,7 @@ dependencies = [
 [[package]]
 name = "lightning-transaction-sync"
 version = "0.1.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
  "electrum-client 0.21.0",
@@ -2758,7 +2758,7 @@ dependencies = [
 [[package]]
 name = "lightning-types"
 version = "0.2.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "bitcoin",
 ]
@@ -3248,7 +3248,7 @@ checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
 [[package]]
 name = "possiblyrandom"
 version = "0.2.0"
-source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#44361a0822194a0a98c757b560e2b6e2ecb02052"
+source = "git+https://github.com/jharveyb/rust-lightning?branch=gossip_observer_no_fwd#c58e1e29f350f23c269a29142dca599a9fb9c5fe"
 dependencies = [
  "getrandom 0.2.16",
 ]
