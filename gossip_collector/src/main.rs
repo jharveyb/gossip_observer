@@ -148,6 +148,12 @@ async fn main() -> anyhow::Result<()> {
     println!("Waiting for node startup");
     sleep(Duration::from_secs(5)).await;
 
+    println!("Pausing to prune graph");
+    let node_handle = node.clone();
+    if let Err(e) = node_manager::graph_prune(node_handle.clone()).await {
+        println!("Failed to prune graph: {e}");
+    }
+
     nats_exporter
         .set_export_metadata(node.node_id().to_string())
         .map_err(anyhow::Error::msg)?;
@@ -158,8 +164,6 @@ async fn main() -> anyhow::Result<()> {
     println!("Collector runtime: {} minutes", server_config.runtime);
     println!("Start time: {}", chrono::Utc::now().to_rfc3339());
     let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
-
-    let node_handle = node.clone();
 
     let mut node_connect_init = JoinSet::new();
     let mut task_id = 0;
@@ -184,11 +188,8 @@ async fn main() -> anyhow::Result<()> {
 
     let init_connections = tokio::spawn(async move {
         while let Some(res) = node_connect_init.join_next().await {
-            match res {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Tokio: init connect task failed: {:#?}", e);
-                }
+            if let Err(e) = res {
+                println!("Tokio: init connect task failed: {:#?}", e);
             }
 
             if task_id < total_tasks {
@@ -200,11 +201,8 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if task_id % 500 == 0 {
                     println!("Pausing to prune graph");
-                    match node_manager::graph_prune(node_handle.clone()).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            println!("Failed to prune graph: {e}");
-                        }
+                    if let Err(e) = node_manager::graph_prune(node_handle.clone()).await {
+                        println!("Failed to prune graph: {e}");
                     }
                 }
                 let next_peer = peers.pop().unwrap();
@@ -214,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
                 sleep(connect_update_delay).await;
             }
         }
+        println!("Finished adding peers: {}", chrono::Utc::now().to_rfc3339());
     });
 
     let mut stats_waiter = interval(exporter::STATS_INTERVAL);
