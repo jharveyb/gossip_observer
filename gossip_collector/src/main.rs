@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let mut task_id = 0;
     let max_tasks = 25;
 
-    let total_tasks = node_list.len();
+    let total_tasks = 1000;
     let connect_update_delay = Duration::from_millis(500);
 
     let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();
