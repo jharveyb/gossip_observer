@@ -4,17 +4,17 @@ use chrono::Utc;
 use log::Level as LogFacadeLevel;
 use log::Record as LogFacadeRecord;
 
-use std::fs;
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // TODO: Do we need to have this duplicated from ldk-node at all?
 /// Defines a writer for [`Logger`].
 pub(crate) enum Writer {
     /// Writes logs to the file system.
     FileWriter {
-        file_path: String,
+        file: Arc<Mutex<File>>,
         max_log_level: LogLevel,
     },
     /// Forwards logs to the `log` facade.
@@ -27,7 +27,7 @@ impl LogWriter for Writer {
     fn log(&self, record: LogRecord) {
         match self {
             Writer::FileWriter {
-                file_path,
+                file,
                 max_log_level,
             } => {
                 if record.level < *max_log_level {
@@ -43,13 +43,11 @@ impl LogWriter for Writer {
                     record.args
                 );
 
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(file_path)
-                    .expect("Failed to open log file")
-                    .write_all(log.as_bytes())
-                    .expect("Failed to write to log file")
+                if let Ok(mut file_guard) = file.lock() {
+                    file_guard
+                        .write_all(log.as_bytes())
+                        .expect("Failed to write to log file");
+                }
             }
             Writer::LogFacadeWriter => {
                 let mut builder = LogFacadeRecord::builder();
@@ -80,19 +78,18 @@ impl Writer {
     /// are the path to the log file, and the log level.
     pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Writer, ()> {
         if let Some(parent_dir) = Path::new(&file_path).parent() {
-            fs::create_dir_all(parent_dir)
+            create_dir_all(parent_dir)
                 .map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {e}"))?;
-
-            // make sure the file exists.
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&file_path)
-                .map_err(|e| eprintln!("ERROR: Failed to open log file: {e}"))?;
         }
 
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(|e| eprintln!("ERROR: Failed to open log file: {e}"))?;
+
         Ok(Writer::FileWriter {
-            file_path,
+            file: Arc::new(Mutex::new(file)),
             max_log_level,
         })
     }
