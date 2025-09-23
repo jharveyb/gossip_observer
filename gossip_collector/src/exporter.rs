@@ -101,9 +101,9 @@ impl NATSExporter {
     ) -> Self {
         // Use flume channels to bridge sync -> async, and as a ring buffer.
         let (export_tx, export_rx) = flume::unbounded();
-        // TODO: dynamic buffer size here; needs to stay below NATS msg_size limit
+        // TODO: adjust buffer size here; needs to stay below NATS msg_size limit; default 1 MB
         // Max. export msg size is ~500B, we could go higher here
-        let (nats_tx, nats_rx) = flume::bounded(256);
+        let (nats_tx, nats_rx) = flume::bounded(1024);
         // TODO: there's probably a better sync primitive for this
         let (publish_ready_tx, publish_ready_rx) = flume::bounded(1);
         let (publish_ack_tx, publish_ack_rx) = flume::bounded(1);
