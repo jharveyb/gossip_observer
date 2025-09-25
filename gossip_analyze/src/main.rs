@@ -37,7 +37,15 @@ enum Commands {
         #[arg(help = "List of peers to sync gossip from", required = false)]
         peers: Vec<String>,
     },
-    FetchAddresses {},
+    FetchAddresses {
+        #[arg(
+            long,
+            help = "Include node_announcement timestamp",
+            required = false,
+            default_value_t = false
+        )]
+        include_timestamp: bool,
+    },
     ParseAddresses {},
 }
 
@@ -46,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::FetchAddresses {} => {
+        Commands::FetchAddresses { include_timestamp } => {
             // load node pubkey list
             let datadir = "./gossip_dump";
             let node_list_path = format!("{}/{}", datadir, "node_list.csv");
@@ -79,7 +87,14 @@ async fn main() -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow!("No addresses for {}", node))?;
                 for addr in addrs {
                     let network_addr = addr["addr"].as_str().unwrap();
-                    let connection_info = format!("{}@{},{}\n", node, network_addr, last_msg);
+                    let connection_info = match include_timestamp {
+                        true => {
+                            format!("{}@{},{}\n", node, network_addr, last_msg)
+                        }
+                        false => {
+                            format!("{}@{}\n", node, network_addr)
+                        }
+                    };
                     buf_node_addresses.write_all(connection_info.as_bytes())?;
                 }
                 buf_node_addresses.flush()?;
@@ -103,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
             let datadir = "./gossip_dump";
             let node_addresses_path = format!("{}/{}", datadir, "node_addresses.txt");
             let node_addresses_file = fs::read_to_string(node_addresses_path)?;
-            let mut node_addresses = node_addresses_file
+            let node_addresses = node_addresses_file
                 .lines()
                 .map(String::from)
                 .collect::<Vec<_>>();
@@ -224,7 +239,9 @@ async fn main() -> anyhow::Result<()> {
 
             for peer in peers {
                 println!("Connecting to peer: {peer:?}");
-                node.clone().connect(peer.0, peer.1, false)?;
+                if let Err(e) = node.clone().connect(peer.0, peer.1, false) {
+                    println!("Error connecting to peer: {e}");
+                }
             }
 
             let queue_size = 5;

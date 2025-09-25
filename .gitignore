@@ -5,13 +5,11 @@
 **/keys_seed
 **/ldk_node.log
 
-**/gossip_export.csv
-**/node_addresses*
-
 /target
 
 /observer_data
 /mainnet_data
+/gossip_dump
 
 *.duckdb*
 **/archiver_logs*
