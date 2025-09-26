@@ -23,3 +23,5 @@ async-duckdb = { git = "https://github.com/jharveyb/async-duckdb", branch = "bum
 ] }
 bytes = { version = "1.10.1", features = ["serde"] }
 console-subscriber = "0.4.1"
+twox-hash = { version = "2.1.2", features = ["std", "xxhash3_64"] }
+ahash = "0.8.12"

@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use ahash::AHashMap;
+use ahash::AHashSet;
 use async_duckdb::Client as DuckClient;
 use async_duckdb::ClientBuilder as DuckClientBuilder;
 use async_duckdb::duckdb::DropBehavior;
@@ -12,23 +14,84 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use std::fs;
 use tokio::time::{self};
+use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 // TODO: move to some gossip_common module
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-static TABLE_NAME: &str = "gossip_archive";
+static MSG_TABLE: &str = "messages";
+static TIMING_TABLE: &str = "timings";
+static META_TABLE: &str = "metadata";
 static STATS_INTERVAL: Duration = Duration::from_secs(120);
 static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+static MSG_DRAIN_INTERVAL: Duration = Duration::from_secs(2);
 
+// Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
+// ldk-node/src/logger.rs#L272, LdkLogger.export()
 #[derive(Debug, Clone)]
-pub struct GossipMessage {
+pub struct ExportedGossip {
+    // timestamps
     pub recv_timestamp: DateTime<Utc>,
+    pub orig_timestamp: Option<DateTime<Utc>>,
     // node pubkeys
     pub collector: String,
     pub recv_peer: String,
+    pub recv_peer_hash: u64,
+    pub orig_node: Option<String>,
+    // metadata
     pub msg_type: u8,
     pub msg_size: u16,
+    pub scid: Option<u64>,
+    // full message
     pub msg: String,
+    pub msg_hash: u64,
+}
+
+pub struct RawMessage {
+    pub msg_hash: u64,
+    pub msg: String,
+}
+
+pub struct MessageNodeTimings {
+    pub msg_hash: u64,
+    pub collector: String,
+    pub recv_peer: String,
+    pub recv_peer_hash: u64,
+    pub recv_timestamp: DateTime<Utc>,
+    pub orig_timestamp: Option<DateTime<Utc>>,
+}
+
+pub struct MessageMetadata {
+    pub msg_hash: u64,
+    pub msg_type: u8,
+    pub msg_size: u16,
+    pub orig_node: Option<String>,
+    pub scid: Option<u64>,
+}
+
+pub fn split_exported_gossip(
+    msg: ExportedGossip,
+) -> (RawMessage, MessageNodeTimings, MessageMetadata) {
+    let raw = RawMessage {
+        msg_hash: msg.msg_hash,
+        msg: msg.msg,
+    };
+    let timings = MessageNodeTimings {
+        msg_hash: msg.msg_hash,
+        collector: msg.collector,
+        recv_peer: msg.recv_peer,
+        recv_peer_hash: msg.recv_peer_hash,
+        recv_timestamp: msg.recv_timestamp,
+        orig_timestamp: msg.orig_timestamp,
+    };
+    let metadata = MessageMetadata {
+        msg_hash: msg.msg_hash,
+        msg_type: msg.msg_type,
+        msg_size: msg.msg_size,
+        orig_node: msg.orig_node,
+        scid: msg.scid,
+    };
+    (raw, timings, metadata)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +125,7 @@ impl From<MessageType> for u8 {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Enable tokio-console
-    // console_subscriber::init();
+    console_subscriber::init();
 
     // TODO: proper INI cfg
     let nats_server = "100.68.143.113:4222";
@@ -80,12 +143,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Adjust this based on observed ingest rate
     // Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
-    let batch_size = 25_000;
-    let (db_buf_tx, db_buf_rx) = flume::bounded(batch_size);
+    let batch_size = 10_000;
+    let (buf_raw_tx, buf_raw_rx) = flume::bounded(batch_size);
+    let (buf_timings_tx, buf_timings_rx) = flume::bounded(batch_size);
+    let (buf_meta_tx, buf_meta_rx) = flume::bounded(batch_size);
     let (buf_tick_tx, buf_tick_rx) = flume::bounded(1);
     let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
 
-    let db_path = format!("{}{}", "./data/mainnet/gossip_archive.duckdb", now);
+    let db_path = format!("{}{}{}", "./data/mainnet/gossip_archive_", now, ".duckdb");
     if let Some(parent_dir) = Path::new(&db_path).parent() {
         fs::create_dir_all(parent_dir)?;
     }
@@ -97,12 +162,27 @@ async fn main() -> anyhow::Result<()> {
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
     let duckdb_handle = tokio::spawn(async move {
-        db_write_handler(&mut db_client, db_buf_rx, buf_tick_rx, buf_ack_tx).await
+        db_write_handler(
+            &mut db_client,
+            buf_raw_rx,
+            buf_timings_rx,
+            buf_meta_rx,
+            buf_tick_rx,
+            buf_ack_tx,
+        )
+        .await
     });
-    let db_write_ticker_handle =
-        tokio::spawn(
-            async move { db_write_ticker(msg_rx, db_buf_tx, buf_tick_tx, buf_ack_rx).await },
-        );
+    let db_write_ticker_handle = tokio::spawn(async move {
+        db_write_ticker(
+            msg_rx,
+            buf_raw_tx,
+            buf_timings_tx,
+            buf_meta_tx,
+            buf_tick_tx,
+            buf_ack_rx,
+        )
+        .await
+    });
 
     let stats_chan = raw_msg_tx.clone();
     let stats_handle = tokio::spawn(async move {
@@ -116,27 +196,38 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let _ = tokio::try_join!(
+    match tokio::try_join!(
         nats_handle,
         decode_handle,
         duckdb_handle,
         db_write_ticker_handle,
         stats_handle
-    )?;
-    Ok(())
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            println!("Join error: {e}");
+            Err(e.into())
+        }
+    }
 }
 
 pub async fn db_write_ticker(
-    msg_rx: flume::Receiver<GossipMessage>,
-    db_buf_tx: flume::Sender<GossipMessage>,
+    msg_rx: flume::Receiver<ExportedGossip>,
+    buf_raw_tx: flume::Sender<RawMessage>,
+    buf_timings_tx: flume::Sender<MessageNodeTimings>,
+    buf_meta_tx: flume::Sender<MessageMetadata>,
     buf_tick_tx: flume::Sender<()>,
     buf_ack_rx: flume::Receiver<()>,
 ) -> anyhow::Result<()> {
+    let mut msg_drain_waiter = time::interval(MSG_DRAIN_INTERVAL);
     let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
     let mut stats_waiter = time::interval(STATS_INTERVAL);
 
     let mut poll_counter = 0;
     let mut full_counter = 0;
+
+    // Concurrency issue mb?
+    let mut dupe_tracker = AHashMap::new();
 
     println!("Starting DB write ticker");
     println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
@@ -153,40 +244,94 @@ pub async fn db_write_ticker(
                 buf_ack_rx.recv_async().await.unwrap();
                 poll_counter += 1;
             }
+
+            // Filter received messages by if they require a DB insertion.
+            // Batch all this?
             Ok(msg) = msg_rx.recv_async() => {
-                if db_buf_tx.is_full() {
+                if buf_timings_tx.is_full() {
                     buf_tick_tx.send_async(()).await.unwrap();
                     buf_ack_rx.recv_async().await.unwrap();
                     full_counter += 1;
                 }
 
-                if let Err(e) = db_buf_tx.send_async(msg).await {
-                    // TODO: crash?
-                    println!("internal archiver error: db_writer(): {e}");
-                }
-            }
+                // Split our gossip message, and enforce that (msg_hash, hash(recv_peer)) is unique.
+                let (msg_entry, timings_entry, meta_entry) = db_write_splitter(&mut dupe_tracker, msg);
+
+                // TODO: crash on err?
+                if let Some(msg) = msg_entry
+                    && let Err(e) = buf_raw_tx.send_async(msg).await {
+                        println!("internal archiver error: db_writer(): {e}");
+                    }
+                if let Some(timings) = timings_entry
+                    && let Err(e) = buf_timings_tx.send_async(timings).await {
+                        println!("internal archiver error: db_writer(): {e}");
+                    }
+                if let Some(metadata) = meta_entry
+                    && let Err(e) = buf_meta_tx.send_async(metadata).await {
+                        println!("internal archiver error: db_writer(): {e}");
+                    }
+        }
         };
+    }
+}
+
+pub fn db_write_splitter(
+    dupe_tracker: &mut AHashMap<u64, AHashSet<u64>>,
+    msg: ExportedGossip,
+) -> (
+    Option<RawMessage>,
+    Option<MessageNodeTimings>,
+    Option<MessageMetadata>,
+) {
+    // Split our gossip message.
+    let (raw_msg, timings, metadata) = split_exported_gossip(msg);
+
+    // Enforce that (msg_hash, hash(recv_peer)) is unique.
+    match dupe_tracker.get_mut(&raw_msg.msg_hash) {
+        // New message, so we need an entry on all tables.
+        None => {
+            let mut seen_peers = AHashSet::new();
+            seen_peers.insert(timings.recv_peer_hash);
+            dupe_tracker.insert(timings.msg_hash, seen_peers);
+            (Some(raw_msg), Some(timings), Some(metadata))
+        }
+        // Seen message, we may need to update our timestamp table.
+        Some(seen_peers) => {
+            match seen_peers.insert(timings.recv_peer_hash) {
+                // Duplicate value, no DB update needed.
+                false => (None, None, None),
+                true => (None, Some(timings), None),
+            }
+        }
     }
 }
 
 pub async fn db_write_handler(
     db: &mut DuckClient,
-    db_buf_rx: flume::Receiver<GossipMessage>,
+    buf_raw_rx: flume::Receiver<RawMessage>,
+    buf_timings_rx: flume::Receiver<MessageNodeTimings>,
+    buf_meta_rx: flume::Receiver<MessageMetadata>,
     buf_tick_rx: flume::Receiver<()>,
     buf_ack_tx: flume::Sender<()>,
 ) -> anyhow::Result<()> {
     println!("Starting DB writer");
 
-    let mut row_idx = 0;
     loop {
         tokio::select! {
             _ = buf_tick_rx.recv_async() => {
-                let db_batch = db_buf_rx.clone().drain().collect::<Vec<_>>();
-                if db_batch.is_empty() {
+                let raw_batch = buf_raw_rx.clone().drain().collect::<Vec<_>>();
+                let mut timing_batch = buf_timings_rx.clone().drain().collect::<Vec<_>>();
+                let meta_batch = buf_meta_rx.clone().drain().collect::<Vec<_>>();
+
+                // We will always have more timing entries than any other table.
+                if timing_batch.is_empty() {
                     buf_ack_tx.send_async(()).await.unwrap();
                     continue;
                 } else {
-                    row_idx = db_batch_write(db, db_batch, row_idx).await?;
+                    // Sort our 'time-series' data to improve DB behavior.
+                    // Sort could hang things?
+                    timing_batch.sort_by_key(|x| x.recv_timestamp);
+                    db_batch_write(db, raw_batch, timing_batch, meta_batch).await?;
                     buf_ack_tx.send_async(()).await.unwrap();
                 }
             }
@@ -196,32 +341,63 @@ pub async fn db_write_handler(
 
 pub async fn db_batch_write(
     db: &mut DuckClient,
-    msgs: Vec<GossipMessage>,
-    row_idx: u64,
-) -> anyhow::Result<u64> {
-    let mut inner_idx = row_idx;
-    let end_idx = db
-        .conn_mut(move |c| -> Result<u64, DuckError> {
-            let mut tx = c.transaction()?;
-            tx.set_drop_behavior(DropBehavior::Commit);
-            let mut append = tx.appender(TABLE_NAME)?;
-            for msg in msgs {
-                append.append_row(params![
-                    inner_idx,
-                    msg.recv_timestamp,
+    raws: Vec<RawMessage>,
+    timings: Vec<MessageNodeTimings>,
+    metas: Vec<MessageMetadata>,
+) -> anyhow::Result<()> {
+    // Appenders are created per-table.
+    db.conn_mut(move |c| -> Result<(), DuckError> {
+        let mut raws_tx = c.transaction()?;
+        raws_tx.set_drop_behavior(DropBehavior::Commit);
+        let mut raw_append = raws_tx.appender(MSG_TABLE)?;
+        for msg in raws {
+            raw_append.append_row(params![msg.msg_hash, msg.msg])?;
+        }
+        raw_append.flush()?;
+        Ok(())
+    })
+    .await?;
+    db.conn_mut(move |c| -> Result<(), DuckError> {
+        if !timings.is_empty() {
+            let mut timings_tx = c.transaction()?;
+            timings_tx.set_drop_behavior(DropBehavior::Commit);
+            let mut timings_append = timings_tx.appender(TIMING_TABLE)?;
+            for msg in timings {
+                timings_append.append_row(params![
+                    msg.msg_hash,
                     msg.collector,
                     msg.recv_peer,
+                    msg.recv_peer_hash,
+                    msg.recv_timestamp,
+                    msg.orig_timestamp,
+                ])?;
+            }
+            timings_append.flush()?;
+        }
+        Ok(())
+    })
+    .await?;
+    db.conn_mut(move |c| -> Result<(), DuckError> {
+        if !metas.is_empty() {
+            let mut metas_tx = c.transaction()?;
+            metas_tx.set_drop_behavior(DropBehavior::Commit);
+            let mut meta_append = metas_tx.appender(META_TABLE)?;
+            for msg in metas {
+                meta_append.append_row(params![
+                    msg.msg_hash,
                     msg.msg_type,
                     msg.msg_size,
-                    msg.msg
+                    msg.orig_node,
+                    msg.scid,
                 ])?;
-                inner_idx += 1;
             }
-            append.flush()?;
-            Ok(inner_idx)
-        })
-        .await?;
-    Ok(end_idx)
+            meta_append.flush()?;
+        }
+
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
 pub async fn nats_reader(
@@ -253,7 +429,7 @@ pub async fn nats_reader(
 
 pub async fn msg_decoder(
     raw_msg_rx: flume::Receiver<Message>,
-    msg_tx: flume::Sender<GossipMessage>,
+    msg_tx: flume::Sender<ExportedGossip>,
 ) -> anyhow::Result<()> {
     loop {
         tokio::select! {
@@ -269,24 +445,50 @@ pub async fn msg_decoder(
 
 // TODO: rkyv or smthn cool here? Jk this is fine on release builds
 // This should mirror whatever we're exporting to NATS
-pub fn decode_msg(msg: &str) -> anyhow::Result<GossipMessage> {
+pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
     let parts = msg.split(INTRA_MSG_DELIM).collect::<Vec<&str>>();
-    if parts.len() != 6 {
+    // None values will be "", but we'll always have 9 fields.
+    if parts.len() != 9 {
         anyhow::bail!("Invalid message from collector: {msg}")
     }
 
-    Ok(GossipMessage {
-        recv_timestamp: DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap(),
-        collector: parts[5].to_owned(),
-        recv_peer: parts[1].to_owned(),
-        msg_type: parts[2].parse::<MessageType>()?.into(),
-        msg_size: parts[3].parse::<u16>()?,
-        msg: parts[4].to_owned(),
+    // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
+    // ldk-node/src/logger.rs#L272, LdkLogger.export()
+    let recv_timestamp = DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap();
+    let recv_peer = parts[1].to_owned();
+    let recv_peer_hash = XX3Hasher::oneshot(recv_peer.as_bytes());
+    let msg_type = parts[2].parse::<MessageType>()?.into();
+    let msg_size = parts[3].parse::<u16>()?;
+    let msg = parts[4].to_owned();
+    let msg_hash = XX3Hasher::oneshot(msg.as_bytes());
+    let orig_timestamp = (!parts[5].is_empty())
+        .then(|| parts[5].parse::<i64>())
+        .transpose()?
+        .and_then(DateTime::from_timestamp_micros);
+    let orig_node = (!parts[6].is_empty()).then(|| parts[6].to_owned());
+    let scid = (!parts[7].is_empty())
+        .then(|| parts[7].parse::<u64>())
+        .transpose()?;
+    let collector = parts[8].to_owned();
+
+    Ok(ExportedGossip {
+        recv_timestamp,
+        orig_timestamp,
+        collector,
+        recv_peer,
+        recv_peer_hash,
+        orig_node,
+        msg_type,
+        msg_size,
+        scid,
+        msg,
+        msg_hash,
     })
 }
 
 pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream::stream::Stream> {
     let stream_name = "main";
+    let _ = ctx.delete_stream(&stream_name).await;
     let stream = ctx
         .get_or_create_stream(jetstream::stream::Config {
             name: stream_name.to_string(),
@@ -303,6 +505,7 @@ pub async fn upsert_consumer(
     ctx: jetstream::stream::Stream,
 ) -> anyhow::Result<jetstream::consumer::PullConsumer> {
     let cons_name = "gossip_recv";
+    let _ = ctx.delete_consumer(cons_name).await;
     let consumer = ctx
         .get_or_create_consumer(
             cons_name,
@@ -319,16 +522,48 @@ pub async fn upsert_consumer(
 }
 
 pub async fn init_db(db: &DuckClient) -> anyhow::Result<()> {
-    let create_table_sql = "
-    CREATE TABLE IF NOT EXISTS gossip_archive (
-        msg_id UBIGINT NOT NULL,
-        recv_ts TIMESTAMPTZ NOT NULL,
+    let create_raw_table = "
+    CREATE TABLE IF NOT EXISTS messages (
+        hash UBIGINT NOT NULL,
+        raw VARCHAR NOT NULL
+    );";
+    let create_timings_table = "
+    CREATE TABLE IF NOT EXISTS timings (
+        hash UBIGINT NOT NULL,
         collector VARCHAR NOT NULL,
         recv_peer VARCHAR NOT NULL,
-        msg_type UINT8 NOT NULL,
-        msg_size UINT16 NOT NULL,
-        msg VARCHAR
+        recv_peer_hash UBIGINT NOT NULL,
+        recv_timestamp TIMESTAMPTZ NOT NULL,
+        orig_timestamp TIMESTAMPTZ,
     );";
-    db.conn(|c| c.execute_batch(create_table_sql)).await?;
+    let create_metadata_table = "
+    CREATE TABLE IF NOT EXISTS metadata (
+        hash UBIGINT NOT NULL,
+        type UINT8 NOT NULL,
+        size UINT16 NOT NULL,
+        orig_node VARCHAR,
+        scid UBIGINT
+    );";
+    let relax_ordering = "
+    SET preserve_insertion_order = false;
+    ";
+    // # of physical cores, not threads
+    let threads = "
+    SET threads = 8;
+    ";
+    let memory = "
+    SET memory_limit = '16GB';
+    ";
+    let db_setup_sql = [
+        create_raw_table,
+        create_timings_table,
+        create_metadata_table,
+        relax_ordering,
+        threads,
+        memory,
+    ];
+    for sql in db_setup_sql {
+        db.conn(|c| c.execute_batch(sql)).await?;
+    }
     Ok(())
 }
