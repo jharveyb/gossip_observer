@@ -2462,7 +2462,7 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 [[package]]
 name = "ldk-node"
 version = "0.6.1"
-source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer_no_fwd#ef6f0ebd46220e3d3b995bdbf9a4ff5b1aabdeff"
+source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer_no_fwd#53084c62d13d5292befc8b71af211ec17d9d1b7f"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",
@@ -4757,6 +4757,15 @@ checksum = "9fe58ebd5edd976e0fe0f8a14d2a04b7c81ef153ea9a54eebc42e67c2c23b4e5"
 dependencies = [
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
+dependencies = [
+ "rand 0.9.2",
 ]
 
 [[package]]
