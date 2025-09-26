@@ -1,5 +1,5 @@
+use std::sync::Arc;
 use std::time::Duration;
-use std::{str::FromStr, sync::Arc};
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use anyhow::anyhow;
@@ -70,7 +70,7 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Enable tokio-console
-    // console_subscriber::init();
+    console_subscriber::init();
 
     println!("Starting gossip collector");
     // Load configuration
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     let nats_config = NATSConfig::load_from_ini("config.ini")?;
 
     let mut rng = rand::rng();
-    let node_list = read_to_string("./node_addresses_clearnet_no_localhost.txt")?;
+    let node_list = read_to_string("./node_addrs_clearnet.txt")?;
     let mut node_list = node_list.lines().map(String::from).collect::<Vec<_>>();
     node_list.shuffle(&mut rng);
     println!("Using node list of {} nodes", node_list.len());

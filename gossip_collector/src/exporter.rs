@@ -198,7 +198,7 @@ impl NATSExporter {
                         publish_ack_rx.recv_async().await.unwrap();
                     }
 
-                    // Add our node ID to the message, after the timestamp.
+                    // Add our node ID to the message.
                     msg.push_str(MSG_SUFFIX.get().unwrap());
                     if let Err(e) = tx.send_async(msg).await {
                         // TODO: crash?
@@ -277,8 +277,6 @@ impl LogWriter for LogWriterExporter {
     fn log(&self, record: LogRecord) {
         match record.module_path {
             "custom::gossip_collector" => {
-                // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg}")
-                // ldk-node/src/logger.rs#L248, LdkLogger.export()
                 let msg = record.args.to_string();
                 self.exporter.export(msg);
             }
