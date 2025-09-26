@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     let (buf_tick_tx, buf_tick_rx) = flume::bounded(1);
     let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
 
-    let db_path = format!("{}{}{}", "./data/mainnet/gossip_archive_", now, ".duckdb");
+    let db_path = format!("{}{}{}", "./data/mainnet/gossip_archives/", now, ".duckdb");
     if let Some(parent_dir) = Path::new(&db_path).parent() {
         fs::create_dir_all(parent_dir)?;
     }
