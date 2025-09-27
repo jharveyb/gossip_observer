@@ -1,0 +1,5 @@
+metric,value
+Total SCIDs,22510
+SCIDs with multiple updates,10840
+Avg messages per SCID,3.75
+Max updates for single SCID,391

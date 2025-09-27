@@ -1,0 +1,4 @@
+type,unique_count,percentage_of_total,type_name
+3,251298,60.34623115215872,channel_update
+2,125155,30.054487341118612,node_announcement
+1,39974,9.599281506722667,channel_announcement
