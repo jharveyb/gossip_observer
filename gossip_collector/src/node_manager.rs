@@ -1,7 +1,7 @@
 use anyhow::anyhow;
-use ldk_node::NodeError;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
+use ldk_node::{NodeError, PeerDetails};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -46,6 +46,11 @@ pub async fn node_peer_connect(
             Err(e.into())
         }
     }
+}
+
+pub async fn current_peers(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Vec<PeerDetails>> {
+    let peers = tokio::task::spawn_blocking(move || node_copy.list_peers()).await?;
+    Ok(peers)
 }
 
 pub async fn graph_prune(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<()> {

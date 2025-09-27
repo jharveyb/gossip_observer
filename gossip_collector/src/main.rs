@@ -213,6 +213,19 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         println!("Finished adding peers: {}", chrono::Utc::now().to_rfc3339());
+        println!("Starting peers:");
+        let peers = node_manager::current_peers(node_handle.clone())
+            .await
+            .unwrap();
+        let peers = peers
+            .iter()
+            .filter(|p| p.is_connected)
+            .map(|p| format!("{}@{}", p.node_id, p.address))
+            .collect::<Vec<_>>();
+        for peer in peers {
+            println!("{peer}");
+        }
+        println!("Starting peers:");
     });
 
     let mut stats_waiter = interval(exporter::STATS_INTERVAL);
@@ -244,8 +257,18 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = deadline_waiter => {
                 println!("Server runtime exceeded, shutting down");
+                println!("Ending peers:");
+                let peers = node_manager::current_peers(node_shutdown_handle.clone()).await.unwrap();
+                let peers = peers
+                    .iter()
+                    .filter(|p| p.is_connected)
+                    .map(|p| format!("{}@{}\n", p.node_id, p.address))
+                    .collect::<Vec<_>>();
+                for peer in peers {
+                    println!("{peer}");
+                }
+                println!("Ending peers:");
                 stop_signal.cancel();
-                // TODO: conflict?
                 let _ = node_shutdown_handle.stop();
             }
             _ = tokio::signal::ctrl_c() => {
