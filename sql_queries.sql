@@ -1,15 +1,17 @@
 -- Convergence delay percentiles:
 WITH message_propagation AS (
+  -- Collect the hash, recv_timestamp, # of peers who sent a message, and first seen timestamp
   SELECT t.hash,
     t.recv_timestamp,
     COUNT(*) OVER (PARTITION BY t.hash) as total_peers,
     MIN(t.recv_timestamp) OVER (PARTITION BY t.hash) as first_seen
-  FROM timings t
+  FROM timings t -- Only include messages that were seen by some minimum # of peers
   WHERE t.hash IN (
       SELECT hash
       FROM timings
       GROUP BY hash
       HAVING COUNT(*) >= (
+          -- This can be a fixed number instead of a percentage
           SELECT COUNT(DISTINCT recv_peer_hash) * 0.5
           FROM timings
         )
@@ -17,9 +19,10 @@ WITH message_propagation AS (
 ),
 percentile_results AS (
   SELECT hash,
+    -- These don't need to be MAX; all values are the same here
     MAX(total_peers) as total_peers,
     MAX(first_seen) as first_seen,
-    -- Calculate all percentiles at once
+    -- Calculate percentiles over the received timestamps per message
     QUANTILE_CONT(
       recv_timestamp,
       [0.0001, 0.05, 0.25, 0.50, 0.75, 0.95, 1.0]
@@ -27,6 +30,8 @@ percentile_results AS (
   FROM message_propagation
   GROUP BY hash
 ),
+-- Calculate delay as (recvieved time percentile - first time seen)
+-- We don't know when the message was first sent by the source
 delay_calculations AS (
   SELECT total_peers,
     percentiles [1] - first_seen as delay_to_0pct,
@@ -41,17 +46,17 @@ delay_calculations AS (
 SELECT 'SUMMARY' as summary_type,
   COUNT(*) as message_count,
   AVG(total_peers) as avg_total_peers,
-  -- Convert to milliseconds for easier reading
-  avg(epoch(delay_to_0pct)) as avg_delay_to_0pct_ms,
-  avg(epoch(delay_to_5pct)) as avg_delay_to_5pct_ms,
-  AVG(epoch(delay_to_25pct)) as avg_delay_to_25pct_ms,
-  AVG(epoch(delay_to_50pct)) as avg_delay_to_50pct_ms,
-  AVG(epoch(delay_to_75pct)) as avg_delay_to_75pct_ms,
-  AVG(epoch(delay_to_95pct)) as avg_delay_to_95pct_ms,
-  AVG(epoch(delay_to_100pct)) as avg_delay_to_100pct_ms
+  -- Convert to seconds for easier reading
+  avg(epoch(delay_to_0pct)) as avg_delay_to_0pct,
+  avg(epoch(delay_to_5pct)) as avg_delay_to_5pct,
+  AVG(epoch(delay_to_25pct)) as avg_delay_to_25pct,
+  AVG(epoch(delay_to_50pct)) as avg_delay_to_50pct,
+  AVG(epoch(delay_to_75pct)) as avg_delay_to_75pct,
+  AVG(epoch(delay_to_95pct)) as avg_delay_to_95pct,
+  AVG(epoch(delay_to_100pct)) as avg_delay_to_100pct
 FROM delay_calculations;
 
--- Average msg size, total # of peers:
+-- Total (unique) msg size, max # of peers:
 WITH total_peers AS (
   SELECT COUNT(DISTINCT recv_peer_hash) as max_peers
   FROM timings
@@ -65,8 +70,7 @@ SELECT ts.total_size,
   FROM total_size ts
   CROSS JOIN total_peers tp;
 
-
--- Message type distribution:
+-- Proportion of message total for each message type:
 WITH unique_messages_per_type AS (
   SELECT m.type,
     COUNT(DISTINCT m.hash) as unique_count
@@ -80,7 +84,6 @@ total_unique AS (
 SELECT umpt.type,
   umpt.unique_count,
   (umpt.unique_count * 100.0 / tu.total) as percentage_of_total,
-  -- Optional: Add type names if you have a mapping
   CASE
     umpt.type
     WHEN 1 THEN 'channel_announcement'
@@ -92,7 +95,7 @@ FROM unique_messages_per_type umpt
   CROSS JOIN total_unique tu
 ORDER BY umpt.unique_count DESC;
 
--- Uniqueness stats:
+-- # of unique msgs, total run duration and unique msg arrival rate:
 WITH stats as (
   SELECT COUNT(DISTINCT t.hash) as total_unique_messages,
     MIN(t.recv_timestamp) as start_time,
@@ -107,3 +110,138 @@ SELECT total_unique_messages,
   start_time,
   end_time
 FROM stats;
+
+-- How many peers sent us each message?
+WITH peer_counts AS (
+  SELECT hash,
+    COUNT(*) as peers_per_message
+  FROM timings
+  GROUP BY hash
+) -- Add other metrics, like total count and percentage
+SELECT peers_per_message,
+  COUNT(*) as message_count,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) as percentage
+FROM peer_counts
+GROUP BY peers_per_message
+ORDER BY peers_per_message;
+
+-- SCIDs ordered by how many channel_updates referenced them:
+-- Top 25 most frequent SCIDs
+SELECT scid,
+  COUNT(*) as message_count,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) as percentage_of_total
+FROM metadata
+WHERE scid IS NOT NULL
+GROUP BY scid
+ORDER BY message_count DESC;
+-- add a LIMIT here for top N
+--
+-- SCID updates summary: Total # of SCIDs seen, # with more than N updates,
+-- Avg. # of messages per SCID, Max. # of updates per SCID
+WITH scid_update_counts AS (
+  SELECT m.scid,
+    COUNT(DISTINCT t.hash) as message_count,
+    COUNT(DISTINCT t.orig_timestamp) as unique_orig_timestamps,
+    MIN(t.orig_timestamp) as first_orig_timestamp,
+    MAX(t.orig_timestamp) as last_orig_timestamp,
+    MAX(t.orig_timestamp) - MIN(t.orig_timestamp) as update_timespan
+  FROM timings t
+    INNER JOIN metadata m ON t.hash = m.hash
+  WHERE m.type = 3
+    AND m.scid IS NOT NULL
+    AND t.orig_timestamp IS NOT NULL
+  GROUP BY m.scid
+)
+SELECT 'Total SCIDs' as metric,
+  COUNT(*)::VARCHAR as value
+FROM scid_update_counts
+UNION ALL
+SELECT 'SCIDs with multiple updates',
+  COUNT(*)::VARCHAR
+FROM scid_update_counts
+WHERE unique_orig_timestamps > 1
+UNION ALL
+SELECT 'Avg messages per SCID',
+  ROUND(AVG(message_count), 2)::VARCHAR
+FROM scid_update_counts
+UNION ALL
+SELECT 'Max updates for single SCID',
+  MAX(unique_orig_timestamps)::VARCHAR
+FROM scid_update_counts;
+
+-- Node pubkeys ordered by how often they appear in node_annoucement msgs:
+SELECT orig_node,
+  COUNT(*) as message_count,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) as percentage_of_total
+FROM metadata
+WHERE orig_node IS NOT NULL
+GROUP BY orig_node
+ORDER BY message_count DESC;
+-- add a LIMIT here for top N
+--
+-- Message totals and arrival rates by message type:
+WITH time_bounds AS (
+  SELECT MIN(recv_timestamp) as start_time,
+    MAX(recv_timestamp) as end_time,
+    EXTRACT(
+      EPOCH
+      FROM (MAX(recv_timestamp) - MIN(recv_timestamp))
+    ) as duration_seconds
+  FROM timings
+),
+type_counts AS (
+  SELECT m.type,
+    COUNT(*) as total_messages,
+    COUNT(DISTINCT t.hash) as unique_messages,
+    -- Optional: Add type names
+    CASE
+      m.type
+      WHEN 1 THEN 'channel_announcement'
+      WHEN 2 THEN 'node_announcement'
+      WHEN 3 THEN 'channel_update'
+      ELSE 'other'
+    END as type_name
+  FROM timings t
+    INNER JOIN metadata m ON t.hash = m.hash
+  GROUP BY m.type
+)
+SELECT tc.type,
+  tc.type_name,
+  tc.total_messages,
+  tc.unique_messages,
+  tb.duration_seconds / 3600.0 as duration_hours,
+  -- Total message rate (including duplicates from multiple peers)
+  tc.total_messages / (tb.duration_seconds / 3600.0) as total_messages_per_hour,
+  tc.total_messages / (tb.duration_seconds / 60.0) as total_messages_per_minute,
+  -- Unique message rate (new messages only)
+  tc.unique_messages / (tb.duration_seconds / 3600.0) as unique_messages_per_hour,
+  tc.unique_messages / (tb.duration_seconds / 60.0) as unique_messages_per_minute
+FROM type_counts tc
+  CROSS JOIN time_bounds tb
+ORDER BY tc.total_messages DESC;
+--
+-- Connected peers per (15-minute) interval:
+WITH peer_activity_intervals AS (
+  SELECT -- Truncate to 15-minute intervals
+    DATE_TRUNC('hour', recv_timestamp) + INTERVAL '15 minutes' * FLOOR(
+      EXTRACT(
+        minute
+        FROM recv_timestamp
+      ) / 15
+    ) as interval_start,
+    recv_peer_hash
+  FROM timings
+  GROUP BY DATE_TRUNC('hour', recv_timestamp) + INTERVAL '15 minutes' * FLOOR(
+      EXTRACT(
+        minute
+        FROM recv_timestamp
+      ) / 15
+    ),
+    recv_peer_hash
+)
+SELECT interval_start,
+  interval_start + INTERVAL '15 minutes' as interval_end,
+  COUNT(*) as active_peers
+FROM peer_activity_intervals
+GROUP BY interval_start
+ORDER BY interval_start;
