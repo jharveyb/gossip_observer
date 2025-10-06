@@ -167,9 +167,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut node_connect_init = JoinSet::new();
     let mut task_id = 0;
-    let max_tasks = 25;
+    let max_tasks = 50;
 
-    let total_tasks = 1000;
+    let total_tasks = 4000;
     let connect_update_delay = Duration::from_millis(500);
 
     let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();

@@ -245,8 +245,8 @@ pub async fn db_write_ticker(
                 poll_counter += 1;
             }
 
+            // TODO: move this onto a timer + batched on a blocking task
             // Filter received messages by if they require a DB insertion.
-            // Batch all this?
             Ok(msg) = msg_rx.recv_async() => {
                 if buf_timings_tx.is_full() {
                     buf_tick_tx.send_async(()).await.unwrap();
@@ -254,6 +254,7 @@ pub async fn db_write_ticker(
                     full_counter += 1;
                 }
 
+                // Move map management to a separate task?
                 // Split our gossip message, and enforce that (msg_hash, hash(recv_peer)) is unique.
                 let (msg_entry, timings_entry, meta_entry) = db_write_splitter(&mut dupe_tracker, msg);
 
@@ -443,6 +444,7 @@ pub async fn msg_decoder(
     }
 }
 
+// TODO: add unit test
 // TODO: rkyv or smthn cool here? Jk this is fine on release builds
 // This should mirror whatever we're exporting to NATS
 pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
