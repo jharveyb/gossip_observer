@@ -25,7 +25,7 @@ percentile_results AS (
     -- Calculate percentiles over the received timestamps per message
     QUANTILE_CONT(
       recv_timestamp,
-      [0.0001, 0.05, 0.25, 0.50, 0.75, 0.95, 1.0]
+      [0.001, 0.05, 0.25, 0.50, 0.75, 0.95, 0.999]
     ) as percentiles
   FROM message_propagation
   GROUP BY hash

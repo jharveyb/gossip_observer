@@ -1,2 +1,2 @@
-summary_type,message_count,avg_total_peers,avg_delay_to_0pct_ms,avg_delay_to_5pct_ms,avg_delay_to_25pct_ms,avg_delay_to_50pct_ms,avg_delay_to_75pct_ms,avg_delay_to_95pct_ms,avg_delay_to_100pct_ms
-SUMMARY,205337,692.9998831189703,5.526635247539513,47.492354679921384,117.73816097960129,174.95443462557023,236.30619260841326,340.20894688930537,1438.009623399362
+summary_type,message_count,avg_total_peers,avg_delay_to_0pct,avg_delay_to_5pct,avg_delay_to_25pct,avg_delay_to_50pct,avg_delay_to_75pct,avg_delay_to_95pct,avg_delay_to_100pct
+SUMMARY,232772,662.4026987782036,5.736078242035189,48.73311086055476,121.82160648431713,181.7093800582728,246.7856217183043,356.1928784448357,1401.9952432607681
