@@ -1,6 +1,6 @@
 # Gossip Observer
 
-A WIP project to collect LN gossip traffic and compute useful metrics to inform a set-reconciliation based protocol (Erlay-like) to replace message flooding.
+A project to collect LN gossip traffic and compute useful metrics to inform a set-reconciliation based protocol (Erlay-like) to replace message flooding.
 
 ## Architecture
 
@@ -27,9 +27,9 @@ graph TB
     N -->|Tailscale| A
     A --> D
     
-    style C1 fill:#f9a
-    style N fill:#bbf
-    style D fill:#bfb
+    style C1 fill:#f9a,color:#fff
+    style N fill:#bbf,color:#fff
+    style D fill:#bfb,color:#fff
 ```
 
 - The collector is a daemon that runs a forked version of ldk-node which does not forward gossip
@@ -45,7 +45,10 @@ be started before the collector.
 - Once data is collected, the DuckDB built-in UI can be used to run queries:
 
 ```bash
+# This will grow the DB file by ~5x, but should speed up queries.
 ./db_build_indices.sh $DB_FILENAME
+
+# The DuckDB UI can be resource-hungry; add limits to not affect other processes.
 systemd-run --scope -p MemoryMax=16G -p CPUQuota=50% --user duckdb -ui
 ```
 
@@ -59,14 +62,35 @@ gossip_collector/ - Explained above.
 
 gossip_dump/ - Output dir for lists of node keys, channels, etc.
 
-query_results/ - SQL queries for analysis, CSV output of queries, and chart generators.
+sql_queries.sql - SQL queries used in the DuckDB UI to analyze collected data. CSVs were exported manually from the UI.
+
+query_results/ - CSV output of queries, and a small script to generate charts.
 
 Just is used to apply build config for Toki console, though this is only needed for debugging
 async issues IMO.
 
 ## Results
 
-Check out the presentation or charts in `query_results/`.
+Check out the presentation or charted results in `query_results/`.
+Here are some highlights from the latest collection run, which was 23.5 hours long with a peak of ~900 peers:
+
+#### How long did it take some percentage of the nodes we're connected to, to send us a message?
+
+![Convergence Delay](query_results/0926T195046/conv_delay_plot.png)
+
+#### How many peers sent us the same message?
+
+![Message Sender Distribution](query_results/0926T195046/peers_per_message_plot.png)
+
+#### For all SCIDs, how many channel updates were related to that SCID?
+
+![Updates per SCID](query_results/0926T195046/scid_frequency_plot.png)
+
+### Raw Data
+
+The data from that latest run is on the `exported_data` branch, in `data/mainnet/gossip_archives/dump_0926T195046/`.
+
+You should be able to [import](https://duckdb.org/docs/stable/sql/statements/export#import-database) the data into a new DuckDB instance if you want to perform your own analysis.
 
 ## TODOs
 
