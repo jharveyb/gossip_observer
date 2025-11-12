@@ -487,7 +487,8 @@ dependencies = [
 [[package]]
 name = "async-duckdb"
 version = "0.3.0"
-source = "git+https://github.com/jharveyb/async-duckdb?branch=bump_to_1_4_0#c28d159bce56a3e4591d99b87f4675502e531f33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15ac13a352e64a018472d3966242aa0ad0232b5e0b02a6a043eae74b55746c30"
 dependencies = [
  "crossbeam-channel",
  "duckdb",
