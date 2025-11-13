@@ -55,7 +55,6 @@ impl Exporter for StdoutExporter {
 
 pub struct NATSExporter {
     cfg: NATSConfig,
-    runtime: Arc<tokio::runtime::Runtime>,
     // TODO: How do we join on this later?
     pub tasks: JoinSet<()>,
     export_tx: Sender<String>,
@@ -94,11 +93,7 @@ impl Exporter for NATSExporter {
 }
 
 impl NATSExporter {
-    pub fn new(
-        cfg: NATSConfig,
-        runtime: Arc<tokio::runtime::Runtime>,
-        stop_signal: CancellationToken,
-    ) -> Self {
+    pub fn new(cfg: NATSConfig, stop_signal: CancellationToken) -> Self {
         // Use flume channels to bridge sync -> async, and as a ring buffer.
         let (export_tx, export_rx) = flume::unbounded();
         // TODO: adjust buffer size here; needs to stay below NATS msg_size limit; default 1 MB
@@ -111,7 +106,6 @@ impl NATSExporter {
 
         Self {
             cfg,
-            runtime,
             tasks,
             export_tx,
             export_rx,
@@ -140,34 +134,28 @@ impl NATSExporter {
 
         let queue_stop_signal = self.stop_signal.child_token();
         let export_stop_signal = self.stop_signal.child_token();
-        self.tasks.spawn_on(
-            async move {
-                Self::queue_exported_msg(
-                    export_rx,
-                    nats_tx,
-                    publish_ready_tx,
-                    publish_ack_rx,
-                    queue_stop_signal,
-                )
-                .await
-            },
-            self.runtime.clone().handle(),
-        );
+        self.tasks.spawn(async move {
+            Self::queue_exported_msg(
+                export_rx,
+                nats_tx,
+                publish_ready_tx,
+                publish_ack_rx,
+                queue_stop_signal,
+            )
+            .await
+        });
 
         let nats_rx = self.nats_rx.clone();
-        self.tasks.spawn_on(
-            async move {
-                Self::publish_msgs(
-                    stream_ctx,
-                    nats_rx,
-                    publish_ready_rx,
-                    publish_ack_tx,
-                    export_stop_signal,
-                )
-                .await
-            },
-            self.runtime.clone().handle(),
-        );
+        self.tasks.spawn(async move {
+            Self::publish_msgs(
+                stream_ctx,
+                nats_rx,
+                publish_ready_rx,
+                publish_ack_tx,
+                export_stop_signal,
+            )
+            .await
+        });
         Ok(())
     }
 

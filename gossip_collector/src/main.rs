@@ -84,11 +84,6 @@ async fn main() -> anyhow::Result<()> {
     node_list.shuffle(&mut rng);
     println!("Using node list of {} nodes", node_list.len());
 
-    let runtime = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?,
-    );
     let stop_signal = CancellationToken::new();
 
     // Spawn LDK node; use longer sync intervals for chain watching.
@@ -128,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
     let exporter_stop_signal = stop_signal.child_token();
-    let mut nats_exporter = NATSExporter::new(nats_config, runtime.clone(), exporter_stop_signal);
+    let mut nats_exporter = NATSExporter::new(nats_config, exporter_stop_signal);
     nats_exporter
         .set_export_delay(server_config.startup_delay)
         .unwrap();
@@ -143,16 +138,10 @@ async fn main() -> anyhow::Result<()> {
     builder.set_storage_dir_path(ldk_config.storage_dir_path);
 
     let node = Arc::new(builder.build()?);
-    node.start_with_runtime(runtime)?;
+    node.start()?;
 
     println!("Waiting for node startup");
     sleep(Duration::from_secs(5)).await;
-
-    println!("Pausing to prune graph");
-    let node_handle = node.clone();
-    if let Err(e) = node_manager::graph_prune(node_handle.clone()).await {
-        println!("Failed to prune graph: {e}");
-    }
 
     nats_exporter
         .set_export_metadata(node.node_id().to_string())
@@ -175,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
     let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();
     for _ in 0..max_tasks {
         let next_peer = peers.pop().unwrap();
-        let node_handle = node_handle.clone();
+        let node_handle = node.clone();
         // TODO: Why do so many connections fail? Is this a missing feature bit with LDK / rust-lighning?
         node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));
         task_id += 1;
@@ -186,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         task_id, total_tasks
     );
 
+    let node_handle = node.clone();
     let init_connections = tokio::spawn(async move {
         while let Some(res) = node_connect_init.join_next().await {
             if let Err(e) = res {
@@ -199,12 +189,7 @@ async fn main() -> anyhow::Result<()> {
                         task_id, total_tasks
                     );
                 }
-                if task_id % 500 == 0 {
-                    println!("Pausing to prune graph");
-                    if let Err(e) = node_manager::graph_prune(node_handle.clone()).await {
-                        println!("Failed to prune graph: {e}");
-                    }
-                }
+
                 let next_peer = peers.pop().unwrap();
                 let node_handle = node_handle.clone();
                 node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));

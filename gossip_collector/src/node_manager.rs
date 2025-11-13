@@ -52,26 +52,3 @@ pub async fn current_peers(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Vec
     let peers = tokio::task::spawn_blocking(move || node_copy.list_peers()).await?;
     Ok(peers)
 }
-
-pub async fn graph_prune(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<()> {
-    {
-        let current_graph = node_copy.network_graph();
-        println!("Current graph stats:");
-        println!("Nodes: {:?}", current_graph.list_nodes().len());
-        println!("Channels: {:?}", current_graph.list_channels().len());
-    }
-    let node_prune_task = node_copy.clone();
-    match tokio::task::spawn_blocking(move || node_prune_task.network_graph().prune()).await {
-        Ok(_) => {
-            let current_graph = node_copy.network_graph();
-            println!("Pruned graph, stats:");
-            println!("Nodes: {:?}", current_graph.list_nodes().len());
-            println!("Channels: {:?}", current_graph.list_channels().len());
-            Ok(())
-        }
-        Err(e) => {
-            println!("Tokio: graph_prune: {:#?}", e);
-            Err(e.into())
-        }
-    }
-}

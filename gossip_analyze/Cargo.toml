@@ -10,7 +10,7 @@ clap = { version = "4.0", features = ["derive"] }
 csv = "1.3.1"
 serde = { version = "1", features = ["derive"] }
 
-ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer_no_fwd" }
+ldk-node = { version = "0.7" }
 
 tokio = { version = "1.47.0", features = ["full"] }
 reqwest = { version = "0.12.23", features = ["json"] }

@@ -1,3 +1,21 @@
 [workspace]
 resolver = "3"
 members = ["gossip_collector", "gossip_analyze", "gossip_archiver"]
+
+# Cargo patching has to be done at the workspace root, and patch directives
+# in the Cargo.toml of a dependency are not applied when building the dependent.
+# So to use our branch of ldk-node and rust-lightning, we apply these patch
+# directives.
+[patch.crates-io]
+ldk-node = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer-0.2.0-rc1" }
+lightning = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-types = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-invoice = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-net-tokio = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-persister = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-background-processor = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-rapid-gossip-sync = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-block-sync = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-transaction-sync = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-liquidity = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+lightning-macros = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }

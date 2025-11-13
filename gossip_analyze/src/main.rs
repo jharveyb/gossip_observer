@@ -268,9 +268,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Nodes: {:?}", current_graph.list_nodes().len());
             println!("Channels: {:?}", current_graph.list_channels().len());
 
-            // I think this won't prune one side of a channel that's offline? weird
-            current_graph.prune();
-
             println!("Final graph stats after pruning:");
             println!("Nodes: {:?}", current_graph.list_nodes().len());
             println!("Channels: {:?}", current_graph.list_channels().len());
