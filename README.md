@@ -2,6 +2,8 @@
 
 A project to collect LN gossip traffic and compute useful metrics to inform a set-reconciliation based protocol (Erlay-like) to replace message flooding.
 
+This project is inspired by [earlier work](https://arxiv.org/abs/2205.12737v1) on measuring properties of the LN gossip network, and [more recent work](https://endothermic.dev/p/magical-minisketch) on adapting Minisketch for LN gossip messages.
+
 ## Architecture
 
 ```mermaid
@@ -66,13 +68,15 @@ sql_queries.sql - SQL queries used in the DuckDB UI to analyze collected data. C
 
 query_results/ - CSV output of queries, and a small script to generate charts.
 
-Just is used to apply build config for Toki console, though this is only needed for debugging
+Just is used to apply build config for Tokio console, though this is only needed for debugging
 async issues IMO.
 
 ## Results
 
 Check out the presentation or charted results in `query_results/`.
 Here are some highlights from the latest collection run, which was 23.5 hours long with a peak of ~900 peers:
+
+We received a total of 416427 unique gossip messages, for a rate of ~295 messages/minute and a total size of ~103.2 MB (including signatures).
 
 #### How long did it take some percentage of the nodes we're connected to, to send us a message?
 
@@ -88,7 +92,9 @@ Here are some highlights from the latest collection run, which was 23.5 hours lo
 
 ### Raw Data
 
-The data from that latest run is on the `exported_data` branch, in `data/mainnet/gossip_archives/dump_0926T195046/`.
+The data from that latest run is available on the `exported_data` branch, in the `data` folder:
+
+<https://github.com/jharveyb/gossip_observer/tree/exported_data/data/mainnet/gossip_archives/dump_0926T195046>
 
 You should be able to [import](https://duckdb.org/docs/stable/sql/statements/export#import-database) the data into a new DuckDB instance if you want to perform your own analysis.
 
