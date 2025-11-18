@@ -10,117 +10,20 @@ use async_duckdb::duckdb::Error as DuckError;
 use async_duckdb::duckdb::params;
 use async_nats::Message;
 use async_nats::jetstream;
-use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use gossip_archiver::INTER_MSG_DELIM;
+use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
+use gossip_archiver::{decode_msg, split_exported_gossip};
 use std::fs;
 use tokio::time::{self};
-use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 // TODO: move to some gossip_common module
-static INTER_MSG_DELIM: &str = ";";
-static INTRA_MSG_DELIM: &str = ",";
 static MSG_TABLE: &str = "messages";
 static TIMING_TABLE: &str = "timings";
 static META_TABLE: &str = "metadata";
 static STATS_INTERVAL: Duration = Duration::from_secs(120);
 static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 static MSG_DRAIN_INTERVAL: Duration = Duration::from_secs(2);
-
-// Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
-// ldk-node/src/logger.rs#L272, LdkLogger.export()
-#[derive(Debug, Clone)]
-pub struct ExportedGossip {
-    // timestamps
-    pub recv_timestamp: DateTime<Utc>,
-    pub orig_timestamp: Option<DateTime<Utc>>,
-    // node pubkeys
-    pub collector: String,
-    pub recv_peer: String,
-    pub recv_peer_hash: u64,
-    pub orig_node: Option<String>,
-    // metadata
-    pub msg_type: u8,
-    pub msg_size: u16,
-    pub scid: Option<u64>,
-    // full message
-    pub msg: String,
-    pub msg_hash: u64,
-}
-
-pub struct RawMessage {
-    pub msg_hash: u64,
-    pub msg: String,
-}
-
-pub struct MessageNodeTimings {
-    pub msg_hash: u64,
-    pub collector: String,
-    pub recv_peer: String,
-    pub recv_peer_hash: u64,
-    pub recv_timestamp: DateTime<Utc>,
-    pub orig_timestamp: Option<DateTime<Utc>>,
-}
-
-pub struct MessageMetadata {
-    pub msg_hash: u64,
-    pub msg_type: u8,
-    pub msg_size: u16,
-    pub orig_node: Option<String>,
-    pub scid: Option<u64>,
-}
-
-pub fn split_exported_gossip(
-    msg: ExportedGossip,
-) -> (RawMessage, MessageNodeTimings, MessageMetadata) {
-    let raw = RawMessage {
-        msg_hash: msg.msg_hash,
-        msg: msg.msg,
-    };
-    let timings = MessageNodeTimings {
-        msg_hash: msg.msg_hash,
-        collector: msg.collector,
-        recv_peer: msg.recv_peer,
-        recv_peer_hash: msg.recv_peer_hash,
-        recv_timestamp: msg.recv_timestamp,
-        orig_timestamp: msg.orig_timestamp,
-    };
-    let metadata = MessageMetadata {
-        msg_hash: msg.msg_hash,
-        msg_type: msg.msg_type,
-        msg_size: msg.msg_size,
-        orig_node: msg.orig_node,
-        scid: msg.scid,
-    };
-    (raw, timings, metadata)
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u8)]
-pub enum MessageType {
-    Unknown,
-    ChannelAnnouncement,
-    NodeAnnouncement,
-    ChannelUpdate,
-}
-
-impl std::str::FromStr for MessageType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "ca" => Ok(Self::ChannelAnnouncement),
-            "na" => Ok(Self::NodeAnnouncement),
-            "cu" => Ok(Self::ChannelUpdate),
-            _ => Err(anyhow::Error::msg("Invalid message type")),
-        }
-    }
-}
-
-impl From<MessageType> for u8 {
-    fn from(msg_type: MessageType) -> Self {
-        msg_type as u8
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -442,50 +345,6 @@ pub async fn msg_decoder(
             }
         }
     }
-}
-
-// TODO: add unit test
-// TODO: rkyv or smthn cool here? Jk this is fine on release builds
-// This should mirror whatever we're exporting to NATS
-pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
-    let parts = msg.split(INTRA_MSG_DELIM).collect::<Vec<&str>>();
-    // None values will be "", but we'll always have 9 fields.
-    if parts.len() != 9 {
-        anyhow::bail!("Invalid message from collector: {msg}")
-    }
-
-    // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
-    // ldk-node/src/logger.rs#L272, LdkLogger.export()
-    let recv_timestamp = DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap();
-    let recv_peer = parts[1].to_owned();
-    let recv_peer_hash = XX3Hasher::oneshot(recv_peer.as_bytes());
-    let msg_type = parts[2].parse::<MessageType>()?.into();
-    let msg_size = parts[3].parse::<u16>()?;
-    let msg = parts[4].to_owned();
-    let msg_hash = XX3Hasher::oneshot(msg.as_bytes());
-    let orig_timestamp = (!parts[5].is_empty())
-        .then(|| parts[5].parse::<i64>())
-        .transpose()?
-        .and_then(DateTime::from_timestamp_micros);
-    let orig_node = (!parts[6].is_empty()).then(|| parts[6].to_owned());
-    let scid = (!parts[7].is_empty())
-        .then(|| parts[7].parse::<u64>())
-        .transpose()?;
-    let collector = parts[8].to_owned();
-
-    Ok(ExportedGossip {
-        recv_timestamp,
-        orig_timestamp,
-        collector,
-        recv_peer,
-        recv_peer_hash,
-        orig_node,
-        msg_type,
-        msg_size,
-        scid,
-        msg,
-        msg_hash,
-    })
 }
 
 pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream::stream::Stream> {
