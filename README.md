@@ -98,6 +98,27 @@ The data from that latest run is available on the `exported_data` branch, in the
 
 You should be able to [import](https://duckdb.org/docs/stable/sql/statements/export#import-database) the data into a new DuckDB instance if you want to perform your own analysis.
 
+### Usage
+
+- Install NATS: <https://docs.nats.io/running-a-nats-service/introduction/installation>
+
+- Update the NATS config, then start the NATS server:
+
+`nats-server -c nats_server.conf`
+
+You can monitor the server with nats-top, a different [CLI tool](https://docs.nats.io/using-nats/nats-tools), or the built-in [monitoring server](https://docs.nats.io/running-a-nats-service/nats_admin/monitoring).
+
+- Update the archiver settings in `gossip_archiver/src/main.rs`, rebuild, and start the archiver:
+
+`./target/debug/gossip_archiver`
+
+- Update the collector config in `config.ini` and start a collector:
+
+`./target/debug/gossip_collector`
+
+Once the collector shuts down, you should be able to safely shut down the archiver and NATS server and have a DuckDB
+file on disk with the collected data.
+
 ## TODOs
 
 - Add some support for using Core Lightning or LND as collectors.
