@@ -1,11 +1,10 @@
 use crate::logger::Writer;
 use async_nats::jetstream;
-use flume::Receiver;
-use flume::Sender;
 use ldk_node::logger::{LogRecord, LogWriter};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -14,7 +13,10 @@ use crate::config::NATSConfig;
 
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(120);
+// Max. export msg size is ~500B, we could go higher here
+// TODO: adjust buffer size here; needs to stay below NATS msg_size limit; default 1 MB
+static NATS_BATCH_SIZE: usize = 1024;
+pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
 static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
@@ -57,20 +59,15 @@ pub struct NATSExporter {
     cfg: NATSConfig,
     // TODO: How do we join on this later?
     pub tasks: JoinSet<()>,
-    export_tx: Sender<String>,
-    export_rx: Receiver<String>,
-    publish_ready_tx: Sender<bool>,
-    publish_ready_rx: Receiver<bool>,
-    publish_ack_tx: Sender<bool>,
-    publish_ack_rx: Receiver<bool>,
-    nats_tx: Sender<String>,
-    nats_rx: Receiver<String>,
+    export_tx: UnboundedSender<String>,
+    export_rx: Option<UnboundedReceiver<String>>,
     stop_signal: CancellationToken,
 }
 
 impl Exporter for NATSExporter {
     fn export(&self, msg: String) {
         // Non-blocking send, so we don't hang the node.
+        // TODO: handle a closed channel (who would close it?)
         if let Err(e) = self.export_tx.send(msg) {
             // TODO: crash?
             println!("internal exporter error: export(): {e}");
@@ -94,27 +91,15 @@ impl Exporter for NATSExporter {
 
 impl NATSExporter {
     pub fn new(cfg: NATSConfig, stop_signal: CancellationToken) -> Self {
-        // Use flume channels to bridge sync -> async, and as a ring buffer.
-        let (export_tx, export_rx) = flume::unbounded();
-        // TODO: adjust buffer size here; needs to stay below NATS msg_size limit; default 1 MB
-        // Max. export msg size is ~500B, we could go higher here
-        let (nats_tx, nats_rx) = flume::bounded(1024);
-        // TODO: there's probably a better sync primitive for this
-        let (publish_ready_tx, publish_ready_rx) = flume::bounded(1);
-        let (publish_ack_tx, publish_ack_rx) = flume::bounded(1);
+        // Bridge sync -> async, since a sync send won't block for an unbounded channel.
+        let (export_tx, export_rx) = tokio::sync::mpsc::unbounded_channel();
         let tasks = JoinSet::new();
 
         Self {
             cfg,
             tasks,
             export_tx,
-            export_rx,
-            publish_ready_tx,
-            publish_ready_rx,
-            publish_ack_tx,
-            publish_ack_rx,
-            nats_tx,
-            nats_rx,
+            export_rx: Some(export_rx),
             stop_signal,
         }
     }
@@ -122,90 +107,82 @@ impl NATSExporter {
     // Build connections + spawn any long-running tasks we need for export.
     pub async fn start(&mut self) -> anyhow::Result<()> {
         println!("Starting NATS exporter");
-        let export_rx = self.export_rx.clone();
-        let nats_tx = self.nats_tx.clone();
-        let publish_ready_tx = self.publish_ready_tx.clone();
-        let publish_ack_tx = self.publish_ack_tx.clone();
-        let publish_ready_rx = self.publish_ready_rx.clone();
-        let publish_ack_rx = self.publish_ack_rx.clone();
 
+        let export_rx = self.export_rx.take().unwrap();
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
 
-        let queue_stop_signal = self.stop_signal.child_token();
-        let export_stop_signal = self.stop_signal.child_token();
-        self.tasks.spawn(async move {
-            Self::queue_exported_msg(
-                export_rx,
-                nats_tx,
-                publish_ready_tx,
-                publish_ack_rx,
-                queue_stop_signal,
-            )
-            .await
-        });
-
-        let nats_rx = self.nats_rx.clone();
-        self.tasks.spawn(async move {
-            Self::publish_msgs(
-                stream_ctx,
-                nats_rx,
-                publish_ready_rx,
-                publish_ack_tx,
-                export_stop_signal,
-            )
-            .await
-        });
+        let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(NATS_BATCH_SIZE);
+        {
+            let queue_stop_signal = self.stop_signal.child_token();
+            self.tasks.spawn(async move {
+                Self::queue_exported_msg(export_rx, nats_tx, queue_stop_signal).await
+            });
+        }
+        {
+            let export_stop_signal = self.stop_signal.child_token();
+            self.tasks.spawn(async move {
+                Self::publish_msgs(stream_ctx, nats_rx, export_stop_signal).await
+            });
+        }
         Ok(())
     }
 
-    // Move msg from our unbounded buffer fed by ldk-node, to our ring buffer.
-    // If the ring buffer is full, signal another task to drain it. This pauses
-    // msg shuffling, but that's ok since our input buffer is unbounded.
+    // Move msg from our unbounded buffer fed by ldk-node, to our fixed-size buffer.
+    // If the ring buffer is full, wait for another task to drain it. This should
+    // be fine, since our input buffer is unbounded.
     // TODO: track backpressure here?
     async fn queue_exported_msg(
-        rx: Receiver<String>,
+        mut rx: UnboundedReceiver<String>,
         tx: Sender<String>,
-        publish_ready_tx: Sender<bool>,
-        publish_ack_rx: Receiver<bool>,
         stop_signal: CancellationToken,
     ) {
         let start_time = std::time::Instant::now();
         loop {
-            tokio::select! {
-                Ok(mut msg) = rx.recv_async() => {
+            let msg = match tokio::select! {
+                rx_msg = rx.recv() => rx_msg,
+                _ = stop_signal.cancelled() => {
+                    break;
+                }
+            } {
+                Some(mut rx_msg) => {
                     // Drop any messages within the startup window.
                     // TODO: Triggger this for every new connection vs. globally
                     if start_time.elapsed().as_secs() < *EXPORT_DELAY.get().unwrap() {
                         continue;
                     }
 
-                    // Drain msgs to NATS
-                    if tx.is_full() {
-                        publish_ready_tx.send_async(true).await.unwrap();
-                        publish_ack_rx.recv_async().await.unwrap();
-                    }
-
                     // Add our node ID to the message.
-                    msg.push_str(MSG_SUFFIX.get().unwrap());
-                    if let Err(e) = tx.send_async(msg).await {
-                        // TODO: crash?
-                        println!("internal exporter error: queue_exported_msg(): {e}");
+                    rx_msg.push_str(MSG_SUFFIX.get().unwrap());
+                    rx_msg
+                }
+                None => {
+                    println!("internal: queue_exported_msg: rx chan closed");
+                    break;
+                }
+            };
+
+            tokio::select! {
+                tx_permit = tx.reserve() => {
+                    match tx_permit {
+                        Ok(permit) => permit.send(msg),
+                        Err(e) => {
+                            println!("internal: queue_exported_msg: tx chan error: {e}");
+                            break;
+                        }
                     }
                 }
                 _ = stop_signal.cancelled() => {
                     break;
                 }
-            };
+            }
         }
     }
 
-    // Drain our ring buffer of msgs by publishing to NATS.
+    // Drain our fixed-size buffer of msgs by publishing to NATS.
     async fn publish_msgs(
         ctx: jetstream::Context,
-        rx: Receiver<String>,
-        publish_ready_rx: Receiver<bool>,
-        publish_ack_tx: Sender<bool>,
+        mut rx: Receiver<String>,
         stop_signal: CancellationToken,
     ) {
         let mut total_upload_time = 0;
@@ -213,22 +190,18 @@ impl NATSExporter {
         let mut msg_submit_interval;
         let mut upload_count = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
+        let mut msg_batch = Vec::with_capacity(NATS_BATCH_SIZE);
         loop {
             tokio::select! {
-                _ = publish_ready_rx.recv_async() => {
-                    let msg_batch = rx.drain().collect::<Vec<_>>().join(INTER_MSG_DELIM);
-                    // TODO: err handling here
-                    // TODO: Is this useful to measure?
-                    msg_send_time = std::time::Instant::now();
-                    let ack = ctx
-                        .publish(NATS_SUBJECT.get().unwrap().as_str(), msg_batch.into())
-                        .await
-                        .unwrap();
-                    ack.await.unwrap();
-                    msg_submit_interval = msg_send_time.elapsed().as_micros();
-                    total_upload_time += msg_submit_interval;
-                    upload_count += 1;
-                    publish_ack_tx.send_async(true).await.unwrap();
+                // Do we want recv_many here?
+                rx_msg = rx.recv() => {
+                    match rx_msg {
+                        Some(msg) => msg_batch.push(msg),
+                        None => {
+                            println!("internal: publish_msgs: rx stream closed");
+                            break;
+                        }
+                    }
                 }
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
@@ -241,6 +214,34 @@ impl NATSExporter {
                 _ = stop_signal.cancelled() => {
                     break;
                 }
+            }
+
+            if msg_batch.len() >= NATS_BATCH_SIZE {
+                // Our vec should have the same capacity after being drained.
+                // std intersperse is nightly-only for now: https://github.com/rust-lang/rust/issues/79524
+                let batch_output =
+                    itertools::Itertools::join(&mut msg_batch.drain(..), INTER_MSG_DELIM);
+                msg_send_time = std::time::Instant::now();
+                let ack = ctx
+                    .publish(NATS_SUBJECT.get().unwrap().as_str(), batch_output.into())
+                    .await
+                    .unwrap();
+                // Wait for explicit ACK from collector.
+                tokio::select! {
+                    // TODO: propagate errors here, add timeout, etc.
+                    // The timeout (or something else) is important to be able
+                    // to handle a collector restart.
+                    ack_res = ack => {
+                        ack_res.unwrap()
+                    }
+                    _ = stop_signal.cancelled() => {
+                        break;
+                    }
+                };
+
+                msg_submit_interval = msg_send_time.elapsed().as_micros();
+                total_upload_time += msg_submit_interval;
+                upload_count += 1;
             }
         }
     }
