@@ -2271,7 +2271,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "ldk-node"
 version = "0.7.0+git"
-source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-0.2.0-rc1#64165a98c6e4e33c7c2b30bdc55f2f36b2f12ec8"
+source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-0.2.0-rc1#611d466fca21b5fe70c690a5ef887647785c53df"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",
