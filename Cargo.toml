@@ -19,3 +19,6 @@ lightning-block-sync = { git = "https://github.com/jharveyb/rust-lightning", bra
 lightning-transaction-sync = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
 lightning-liquidity = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
 lightning-macros = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+
+[profile.dev.package.sqlx-macros]
+opt-level = 3

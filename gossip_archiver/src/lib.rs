@@ -36,6 +36,12 @@ pub struct RawMessage {
     pub msg: String,
 }
 
+impl RawMessage {
+    pub fn unroll(m: RawMessage) -> (Vec<u8>, String) {
+        (m.msg_hash.to_le_bytes().to_vec(), m.msg)
+    }
+}
+
 pub struct MessageNodeTimings {
     pub msg_hash: u64,
     pub collector: String,
@@ -45,12 +51,47 @@ pub struct MessageNodeTimings {
     pub orig_timestamp: Option<DateTime<Utc>>,
 }
 
+impl MessageNodeTimings {
+    #[allow(clippy::type_complexity)]
+    pub fn unroll(
+        m: MessageNodeTimings,
+    ) -> (
+        Vec<u8>,
+        String,
+        String,
+        Vec<u8>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+    ) {
+        (
+            m.msg_hash.to_le_bytes().to_vec(),
+            m.collector,
+            m.recv_peer,
+            m.recv_peer_hash.to_le_bytes().to_vec(),
+            m.recv_timestamp,
+            m.orig_timestamp,
+        )
+    }
+}
+
 pub struct MessageMetadata {
     pub msg_hash: u64,
     pub msg_type: u8,
     pub msg_size: u16,
     pub orig_node: Option<String>,
     pub scid: Option<u64>,
+}
+
+impl MessageMetadata {
+    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i32, Option<String>, Option<Vec<u8>>) {
+        (
+            m.msg_hash.to_le_bytes().to_vec(),
+            m.msg_type.into(),
+            m.msg_size.into(),
+            m.orig_node,
+            m.scid.map(|s| s.to_le_bytes().to_vec()),
+        )
+    }
 }
 
 pub fn split_exported_gossip(

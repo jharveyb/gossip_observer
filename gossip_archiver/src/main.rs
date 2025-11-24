@@ -1,32 +1,27 @@
-use std::path::Path;
 use std::time::Duration;
 
 use ahash::AHashMap;
 use ahash::AHashSet;
-use async_duckdb::Client as DuckClient;
-use async_duckdb::ClientBuilder as DuckClientBuilder;
-use async_duckdb::duckdb::DropBehavior;
-use async_duckdb::duckdb::Error as DuckError;
-use async_duckdb::duckdb::params;
 use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
 use gossip_archiver::INTER_MSG_DELIM;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
-use std::fs;
+use itertools::Itertools;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::time::{self};
 
 // TODO: move to some gossip_common module
-static MSG_TABLE: &str = "messages";
-static TIMING_TABLE: &str = "timings";
-static META_TABLE: &str = "metadata";
-static STATS_INTERVAL: Duration = Duration::from_secs(120);
+static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-static MSG_DRAIN_INTERVAL: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // TODO: decide how we want to load connection strings
+    // for now, load from .env
+    dotenvy::dotenv()?;
+
     // Enable tokio-console
     console_subscriber::init();
 
@@ -42,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     // TODO: unbounded feels sketch but whatevs; backpressure?
     let (raw_msg_tx, raw_msg_rx) = flume::unbounded();
     let (msg_tx, msg_rx) = flume::unbounded();
-    let now = chrono::Utc::now().format("%m%dT%H%M%S");
 
     // Adjust this based on observed ingest rate
     // Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
@@ -53,20 +47,24 @@ async fn main() -> anyhow::Result<()> {
     let (buf_tick_tx, buf_tick_rx) = flume::bounded(1);
     let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
 
-    let db_path = format!("{}{}{}", "./data/mainnet/gossip_archives/", now, ".duckdb");
-    if let Some(parent_dir) = Path::new(&db_path).parent() {
-        fs::create_dir_all(parent_dir)?;
-    }
-    let mut db_client = DuckClientBuilder::new().path(db_path).open().await?;
-    init_db(&db_client).await?;
-    println!("Initialized DuckDB connection");
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/gossip_observer".to_string());
+
+    // Ensure database exists
+    ensure_database_exists(&database_url).await?;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&database_url)
+        .await?;
+    println!("Initialized TimescaleDB connection");
 
     let nats_recv = raw_msg_tx.clone();
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
-    let duckdb_handle = tokio::spawn(async move {
+    let db_handle = tokio::spawn(async move {
         db_write_handler(
-            &mut db_client,
+            pool,
             buf_raw_rx,
             buf_timings_rx,
             buf_meta_rx,
@@ -102,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     match tokio::try_join!(
         nats_handle,
         decode_handle,
-        duckdb_handle,
+        db_handle,
         db_write_ticker_handle,
         stats_handle
     ) {
@@ -122,7 +120,6 @@ pub async fn db_write_ticker(
     buf_tick_tx: flume::Sender<()>,
     buf_ack_rx: flume::Receiver<()>,
 ) -> anyhow::Result<()> {
-    let mut msg_drain_waiter = time::interval(MSG_DRAIN_INTERVAL);
     let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
     let mut stats_waiter = time::interval(STATS_INTERVAL);
 
@@ -211,7 +208,7 @@ pub fn db_write_splitter(
 }
 
 pub async fn db_write_handler(
-    db: &mut DuckClient,
+    pool: PgPool,
     buf_raw_rx: flume::Receiver<RawMessage>,
     buf_timings_rx: flume::Receiver<MessageNodeTimings>,
     buf_meta_rx: flume::Receiver<MessageMetadata>,
@@ -223,9 +220,9 @@ pub async fn db_write_handler(
     loop {
         tokio::select! {
             _ = buf_tick_rx.recv_async() => {
-                let raw_batch = buf_raw_rx.clone().drain().collect::<Vec<_>>();
-                let mut timing_batch = buf_timings_rx.clone().drain().collect::<Vec<_>>();
-                let meta_batch = buf_meta_rx.clone().drain().collect::<Vec<_>>();
+                let raw_batch = buf_raw_rx.drain().collect::<Vec<_>>();
+                let mut timing_batch = buf_timings_rx.drain().collect::<Vec<_>>();
+                let meta_batch = buf_meta_rx.drain().collect::<Vec<_>>();
 
                 // We will always have more timing entries than any other table.
                 if timing_batch.is_empty() {
@@ -235,7 +232,7 @@ pub async fn db_write_handler(
                     // Sort our 'time-series' data to improve DB behavior.
                     // Sort could hang things?
                     timing_batch.sort_by_key(|x| x.recv_timestamp);
-                    db_batch_write(db, raw_batch, timing_batch, meta_batch).await?;
+                    db_batch_write(&pool, raw_batch, timing_batch, meta_batch).await?;
                     buf_ack_tx.send_async(()).await.unwrap();
                 }
             }
@@ -244,63 +241,75 @@ pub async fn db_write_handler(
 }
 
 pub async fn db_batch_write(
-    db: &mut DuckClient,
+    pool: &PgPool,
     raws: Vec<RawMessage>,
     timings: Vec<MessageNodeTimings>,
     metas: Vec<MessageMetadata>,
 ) -> anyhow::Result<()> {
-    // Appenders are created per-table.
-    db.conn_mut(move |c| -> Result<(), DuckError> {
-        let mut raws_tx = c.transaction()?;
-        raws_tx.set_drop_behavior(DropBehavior::Commit);
-        let mut raw_append = raws_tx.appender(MSG_TABLE)?;
-        for msg in raws {
-            raw_append.append_row(params![msg.msg_hash, msg.msg])?;
-        }
-        raw_append.flush()?;
-        Ok(())
-    })
-    .await?;
-    db.conn_mut(move |c| -> Result<(), DuckError> {
-        if !timings.is_empty() {
-            let mut timings_tx = c.transaction()?;
-            timings_tx.set_drop_behavior(DropBehavior::Commit);
-            let mut timings_append = timings_tx.appender(TIMING_TABLE)?;
-            for msg in timings {
-                timings_append.append_row(params![
-                    msg.msg_hash,
-                    msg.collector,
-                    msg.recv_peer,
-                    msg.recv_peer_hash,
-                    msg.recv_timestamp,
-                    msg.orig_timestamp,
-                ])?;
-            }
-            timings_append.flush()?;
-        }
-        Ok(())
-    })
-    .await?;
-    db.conn_mut(move |c| -> Result<(), DuckError> {
-        if !metas.is_empty() {
-            let mut metas_tx = c.transaction()?;
-            metas_tx.set_drop_behavior(DropBehavior::Commit);
-            let mut meta_append = metas_tx.appender(META_TABLE)?;
-            for msg in metas {
-                meta_append.append_row(params![
-                    msg.msg_hash,
-                    msg.msg_type,
-                    msg.msg_size,
-                    msg.orig_node,
-                    msg.scid,
-                ])?;
-            }
-            meta_append.flush()?;
-        }
+    // UNNEST is the recommended way to do batch insertions with query!:
+    // https://github.com/launchbadge/sqlx/blob/main/FAQ.md#how-can-i-bind-an-array-to-a-values-clause-how-can-i-do-bulk-inserts
 
-        Ok(())
-    })
-    .await?;
+    // Insert raw messages
+    if !raws.is_empty() {
+        let (hashes, raw_msgs): (Vec<_>, Vec<_>) =
+            raws.into_iter().map(RawMessage::unroll).multiunzip();
+
+        sqlx::query!(
+            "INSERT INTO messages (hash, raw)
+             SELECT * FROM UNNEST($1::bytea[], $2::text[])",
+            &hashes,
+            &raw_msgs
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Insert timings (time-series data)
+    if !timings.is_empty() {
+        let (hashes, collectors, recv_peers, recv_peer_hashes, recv_timestamps, orig_timestamps): (
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+        ) = timings
+            .into_iter()
+            .map(MessageNodeTimings::unroll)
+            .multiunzip();
+
+        sqlx::query!(
+            "INSERT INTO timings (hash, collector, recv_peer, recv_peer_hash, recv_timestamp, orig_timestamp)
+             SELECT * FROM UNNEST($1::bytea[], $2::text[], $3::text[], $4::bytea[], $5::timestamptz[], $6::timestamptz[])",
+            &hashes,
+            &collectors,
+            &recv_peers,
+            &recv_peer_hashes,
+            &recv_timestamps,
+            &orig_timestamps as &[Option<chrono::DateTime<chrono::Utc>>]
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Insert metadata
+    if !metas.is_empty() {
+        let (hashes, types, sizes, orig_nodes, scids): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
+            metas.into_iter().map(MessageMetadata::unroll).multiunzip();
+
+        sqlx::query!(
+            "INSERT INTO metadata (hash, type, size, orig_node, scid)
+             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])",
+            &hashes,
+            &types,
+            &sizes,
+            &orig_nodes as &[Option<String>],
+            &scids as &[Option<Vec<u8>>]
+        )
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -382,49 +391,36 @@ pub async fn upsert_consumer(
     Ok(consumer)
 }
 
-pub async fn init_db(db: &DuckClient) -> anyhow::Result<()> {
-    let create_raw_table = "
-    CREATE TABLE IF NOT EXISTS messages (
-        hash UBIGINT NOT NULL,
-        raw VARCHAR NOT NULL
-    );";
-    let create_timings_table = "
-    CREATE TABLE IF NOT EXISTS timings (
-        hash UBIGINT NOT NULL,
-        collector VARCHAR NOT NULL,
-        recv_peer VARCHAR NOT NULL,
-        recv_peer_hash UBIGINT NOT NULL,
-        recv_timestamp TIMESTAMPTZ NOT NULL,
-        orig_timestamp TIMESTAMPTZ,
-    );";
-    let create_metadata_table = "
-    CREATE TABLE IF NOT EXISTS metadata (
-        hash UBIGINT NOT NULL,
-        type UINT8 NOT NULL,
-        size UINT16 NOT NULL,
-        orig_node VARCHAR,
-        scid UBIGINT
-    );";
-    let relax_ordering = "
-    SET preserve_insertion_order = false;
-    ";
-    // # of physical cores, not threads
-    let threads = "
-    SET threads = 8;
-    ";
-    let memory = "
-    SET memory_limit = '16GB';
-    ";
-    let db_setup_sql = [
-        create_raw_table,
-        create_timings_table,
-        create_metadata_table,
-        relax_ordering,
-        threads,
-        memory,
-    ];
-    for sql in db_setup_sql {
-        db.conn(|c| c.execute_batch(sql)).await?;
+pub async fn ensure_database_exists(database_url: &str) -> anyhow::Result<()> {
+    // Parse the database URL to extract database name and construct a URL to 'postgres' db
+    // TODO: proper validation
+    let db_name = database_url.rsplit('/').next().unwrap_or("gossip_observer");
+
+    let postgres_url = database_url
+        .rsplit_once('/')
+        .map(|x| x.0)
+        .unwrap_or("postgres://postgres:postgres@localhost");
+    let postgres_url = format!("{}/postgres", postgres_url);
+
+    // Connect to the default 'postgres' database
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&postgres_url)
+        .await?;
+
+    // Check if our database exists
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(db_name)
+            .fetch_one(&pool)
+            .await?;
+    pool.close().await;
+
+    if !exists {
+        println!("Database '{}' does not exist", db_name);
+        Err(anyhow::Error::msg("Database does not exist"))
+    } else {
+        println!("Database '{}' already exists", db_name);
+        Ok(())
     }
-    Ok(())
 }

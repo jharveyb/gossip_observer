@@ -23,37 +23,45 @@ percentile_results AS (
     MAX(total_peers) as total_peers,
     MAX(first_seen) as first_seen,
     -- Calculate percentiles over the received timestamps per message
-    QUANTILE_CONT(
-      recv_timestamp,
-      [0.001, 0.05, 0.25, 0.50, 0.75, 0.95, 0.999]
+    approx_percentile_array(
+      array [0.001, 0.05, 0.25, 0.50, 0.75, 0.95, 0.999],
+      -- Our input here has to be double precision; compute the interval from
+      -- first_seen to recv_timestamp, and then convert to 'fractional seconds',
+      -- which preserves microseond precision.
+      -- https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
+      -- This intverval will always be an underestimate, since we don't know
+      -- when the message was actually sent.
+      percentile_agg(
+        EXTRACT(
+          EPOCH
+          FROM (recv_timestamp - first_seen)
+        )
+      )
     ) as percentiles
   FROM message_propagation
   GROUP BY hash
 ),
--- Calculate delay as (recvieved time percentile - first time seen)
--- We don't know when the message was first sent by the source
 delay_calculations AS (
   SELECT total_peers,
-    percentiles [1] - first_seen as delay_to_0pct,
-    percentiles [2] - first_seen as delay_to_5pct,
-    percentiles [3] - first_seen as delay_to_25pct,
-    percentiles [4] - first_seen as delay_to_50pct,
-    percentiles [5] - first_seen as delay_to_75pct,
-    percentiles [6] - first_seen as delay_to_95pct,
-    percentiles [7] - first_seen as delay_to_100pct
+    percentiles [1] as delay_to_0pct,
+    percentiles [2] as delay_to_5pct,
+    percentiles [3] as delay_to_25pct,
+    percentiles [4] as delay_to_50pct,
+    percentiles [5] as delay_to_75pct,
+    percentiles [6] as delay_to_95pct,
+    percentiles [7] as delay_to_100pct
   FROM percentile_results
 )
 SELECT 'SUMMARY' as summary_type,
   COUNT(*) as message_count,
   AVG(total_peers) as avg_total_peers,
-  -- Convert to seconds for easier reading
-  avg(epoch(delay_to_0pct)) as avg_delay_to_0pct,
-  avg(epoch(delay_to_5pct)) as avg_delay_to_5pct,
-  AVG(epoch(delay_to_25pct)) as avg_delay_to_25pct,
-  AVG(epoch(delay_to_50pct)) as avg_delay_to_50pct,
-  AVG(epoch(delay_to_75pct)) as avg_delay_to_75pct,
-  AVG(epoch(delay_to_95pct)) as avg_delay_to_95pct,
-  AVG(epoch(delay_to_100pct)) as avg_delay_to_100pct
+  AVG(delay_to_0pct) as avg_delay_to_0pct,
+  AVG(delay_to_5pct) as avg_delay_to_5pct,
+  AVG(delay_to_25pct) as avg_delay_to_25pct,
+  AVG(delay_to_50pct) as avg_delay_to_50pct,
+  AVG(delay_to_75pct) as avg_delay_to_75pct,
+  AVG(delay_to_95pct) as avg_delay_to_95pct,
+  AVG(delay_to_100pct) as avg_delay_to_100pct
 FROM delay_calculations;
 
 -- Total (unique) msg size, max # of peers:
@@ -66,8 +74,8 @@ total_size AS (
   FROM metadata m
 )
 SELECT ts.total_size,
-  tp.max_peers,
-  FROM total_size ts
+  tp.max_peers
+FROM total_size ts
   CROSS JOIN total_peers tp;
 
 -- Proportion of message total for each message type:
@@ -100,13 +108,23 @@ WITH stats as (
   SELECT COUNT(DISTINCT t.hash) as total_unique_messages,
     MIN(t.recv_timestamp) as start_time,
     MAX(t.recv_timestamp) as end_time,
-    epoch(MAX(t.recv_timestamp) - MIN(t.recv_timestamp)) as duration_seconds
+    (MAX(t.recv_timestamp) - MIN(t.recv_timestamp)) as duration_seconds
   FROM timings t
 )
 SELECT total_unique_messages,
   duration_seconds / 3600.0 as duration_hours,
-  total_unique_messages / (duration_seconds / 3600.0) as unique_messages_per_hour,
-  total_unique_messages / (duration_seconds / 60.0) as unique_messages_per_minute,
+  total_unique_messages / (
+    EXTRACT (
+      EPOCH
+      FROM(duration_seconds / 3600.0)
+    )
+  ) as unique_messages_per_hour,
+  total_unique_messages / (
+    EXTRACT (
+      EPOCH
+      FROM (duration_seconds / 60.0)
+    )
+  ) as unique_messages_per_minute,
   start_time,
   end_time
 FROM stats;
@@ -134,6 +152,7 @@ FROM metadata
 WHERE scid IS NOT NULL
 GROUP BY scid
 ORDER BY message_count DESC;
+
 -- add a LIMIT here for top N
 --
 -- SCID updates summary: Total # of SCIDs seen, # with more than N updates,
@@ -177,6 +196,7 @@ FROM metadata
 WHERE orig_node IS NOT NULL
 GROUP BY orig_node
 ORDER BY message_count DESC;
+
 -- add a LIMIT here for top N
 --
 -- Message totals and arrival rates by message type:
@@ -219,6 +239,7 @@ SELECT tc.type,
 FROM type_counts tc
   CROSS JOIN time_bounds tb
 ORDER BY tc.total_messages DESC;
+
 --
 -- Connected peers per (15-minute) interval:
 WITH peer_activity_intervals AS (

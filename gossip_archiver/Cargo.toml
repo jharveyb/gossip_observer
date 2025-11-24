@@ -14,11 +14,20 @@ chrono = { version = "0.4", default-features = false, features = [
         "serde",
 ] }
 
-async-nats = "0.42.0"
+async-nats = "0.44.0"
 futures = "0.3.31"
 
-async-duckdb = { version = "0.3.0", features = ["chrono", "uuid"] }
+sqlx = { version = "0.8.0", features = [
+        "runtime-tokio",
+        "tls-rustls",
+        "postgres",
+        "chrono",
+        "macros",
+        "derive",
+] }
 bytes = { version = "1.10.1", features = ["serde"] }
 console-subscriber = "0.5.0"
 twox-hash = { version = "2.1.2", features = ["std", "xxhash3_64"] }
 ahash = "0.8.12"
+itertools = "0.14"
+dotenvy = "0.15.7"

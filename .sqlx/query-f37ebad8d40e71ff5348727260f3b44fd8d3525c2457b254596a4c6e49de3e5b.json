@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO timings (hash, collector, recv_peer, recv_peer_hash, recv_timestamp, orig_timestamp)\n             SELECT * FROM UNNEST($1::bytea[], $2::text[], $3::text[], $4::bytea[], $5::timestamptz[], $6::timestamptz[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "ByteaArray",
+        "TextArray",
+        "TextArray",
+        "ByteaArray",
+        "TimestamptzArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f37ebad8d40e71ff5348727260f3b44fd8d3525c2457b254596a4c6e49de3e5b"
+}

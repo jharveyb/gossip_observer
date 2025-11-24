@@ -8,6 +8,7 @@ date_suffix := `date -u +%b%dT%H%M%S`
 log_suffix := date_suffix + ".txt"
 log_prefix := "| " + stamped_logging + " | " + log_datadir
 
+export SQLX_OFFLINE := "true"
 export RUSTFLAGS := "--cfg tokio_unstable"
 
 build:
