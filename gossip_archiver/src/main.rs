@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use ahash::AHashMap;
-use ahash::AHashSet;
 use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
@@ -126,9 +124,6 @@ pub async fn db_write_ticker(
     let mut poll_counter = 0;
     let mut full_counter = 0;
 
-    // Concurrency issue mb?
-    let mut dupe_tracker = AHashMap::new();
-
     println!("Starting DB write ticker");
     println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
     println!("Stats interval: {STATS_INTERVAL:?}");
@@ -154,40 +149,21 @@ pub async fn db_write_ticker(
                     full_counter += 1;
                 }
 
-                // Move map management to a separate task?
-                // Split our gossip message, and enforce that (msg_hash, hash(recv_peer)) is unique.
-                let (msg_entry, timings_entry, meta_entry) = db_write_splitter(&mut dupe_tracker, msg);
+                let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
 
                 // TODO: crash on err?
-                if let Some(msg) = msg_entry
-                    && let Err(e) = buf_raw_tx.send_async(msg).await {
+                if let Err(e) = buf_raw_tx.send_async(msg_entry).await {
                         println!("internal archiver error: db_writer(): {e}");
                     }
-                if let Some(timings) = timings_entry
-                    && let Err(e) = buf_timings_tx.send_async(timings).await {
-                        println!("internal archiver error: db_writer(): {e}");
-                    }
-                if let Some(metadata) = meta_entry
-                    && let Err(e) = buf_meta_tx.send_async(metadata).await {
-                        println!("internal archiver error: db_writer(): {e}");
-                    }
+                if let Err(e) = buf_timings_tx.send_async(timings_entry).await {
+                    println!("internal archiver error: db_writer(): {e}");
+                }
+                if let Err(e) = buf_meta_tx.send_async(meta_entry).await {
+                    println!("internal archiver error: db_writer(): {e}");
+                }
         }
         };
     }
-}
-
-// TODO: remove dupe tracker now that we have better DB constraints
-pub fn db_write_splitter(
-    dupe_tracker: &mut AHashMap<u64, AHashSet<u64>>,
-    msg: ExportedGossip,
-) -> (
-    Option<RawMessage>,
-    Option<MessageNodeTimings>,
-    Option<MessageMetadata>,
-) {
-    // Split our gossip message.
-    let (raw_msg, timings, metadata) = split_exported_gossip(msg);
-    (Some(raw_msg), Some(timings), Some(metadata))
 }
 
 pub async fn db_write_handler(
