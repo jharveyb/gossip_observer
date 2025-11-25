@@ -247,21 +247,19 @@ async fn main() -> anyhow::Result<()> {
                 let peers = peers
                     .iter()
                     .filter(|p| p.is_connected)
-                    .map(|p| format!("{}@{}\n", p.node_id, p.address))
+                    .map(|p| format!("{}@{}", p.node_id, p.address))
                     .collect::<Vec<_>>();
                 for peer in peers {
                     println!("{peer}");
                 }
                 println!("Ending peers:");
-                stop_signal.cancel();
-                let _ = node_shutdown_handle.stop();
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("Ctrl-C received, shutting down");
-                stop_signal.cancel();
-                let _ = node_shutdown_handle.stop();
             }
         }
+        let _ = node_shutdown_handle.stop();
+        stop_signal.cancel();
     });
 
     Ok(tokio::join!(
