@@ -386,9 +386,6 @@ pub async fn msg_decoder(
 
 pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream::stream::Stream> {
     let stream_name = "main";
-    // TODO: don't delete streams on start, that would drop msgs,
-    // maybe break collectors
-    let _ = ctx.delete_stream(&stream_name).await;
     let stream = ctx
         .get_or_create_stream(jetstream::stream::Config {
             name: stream_name.to_string(),
@@ -404,9 +401,8 @@ pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream:
 pub async fn upsert_consumer(
     ctx: jetstream::stream::Stream,
 ) -> anyhow::Result<jetstream::consumer::PullConsumer> {
-    // TODO: check if this is safe
+    // TODO: review ack policy, behavior if collector is down for maintenance
     let cons_name = "gossip_recv";
-    let _ = ctx.delete_consumer(cons_name).await;
     let consumer = ctx
         .get_or_create_consumer(
             cons_name,
