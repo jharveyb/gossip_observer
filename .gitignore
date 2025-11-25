@@ -7,10 +7,11 @@
 
 /target
 
-/observer_data
 /mainnet_data
 /gossip_dump
 
 *.duckdb*
 **/archiver_logs*
 **/collector_logs*
+
+.env

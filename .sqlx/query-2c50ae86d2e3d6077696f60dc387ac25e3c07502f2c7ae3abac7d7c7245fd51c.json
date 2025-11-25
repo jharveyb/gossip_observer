@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO messages (hash, raw)\n             SELECT * FROM UNNEST($1::bytea[], $2::text[])\n             ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "ByteaArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c50ae86d2e3d6077696f60dc387ac25e3c07502f2c7ae3abac7d7c7245fd51c"
+}

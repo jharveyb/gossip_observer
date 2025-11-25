@@ -176,6 +176,7 @@ pub async fn db_write_ticker(
     }
 }
 
+// TODO: remove dupe tracker now that we have better DB constraints
 pub fn db_write_splitter(
     dupe_tracker: &mut AHashMap<u64, AHashSet<u64>>,
     msg: ExportedGossip,
@@ -186,25 +187,7 @@ pub fn db_write_splitter(
 ) {
     // Split our gossip message.
     let (raw_msg, timings, metadata) = split_exported_gossip(msg);
-
-    // Enforce that (msg_hash, hash(recv_peer)) is unique.
-    match dupe_tracker.get_mut(&raw_msg.msg_hash) {
-        // New message, so we need an entry on all tables.
-        None => {
-            let mut seen_peers = AHashSet::new();
-            seen_peers.insert(timings.recv_peer_hash);
-            dupe_tracker.insert(timings.msg_hash, seen_peers);
-            (Some(raw_msg), Some(timings), Some(metadata))
-        }
-        // Seen message, we may need to update our timestamp table.
-        Some(seen_peers) => {
-            match seen_peers.insert(timings.recv_peer_hash) {
-                // Duplicate value, no DB update needed.
-                false => (None, None, None),
-                true => (None, Some(timings), None),
-            }
-        }
-    }
+    (Some(raw_msg), Some(timings), Some(metadata))
 }
 
 pub async fn db_write_handler(
@@ -256,7 +239,8 @@ pub async fn db_batch_write(
 
         sqlx::query!(
             "INSERT INTO messages (hash, raw)
-             SELECT * FROM UNNEST($1::bytea[], $2::text[])",
+             SELECT * FROM UNNEST($1::bytea[], $2::text[])
+             ON CONFLICT DO NOTHING",
             &hashes,
             &raw_msgs
         )
@@ -299,7 +283,8 @@ pub async fn db_batch_write(
 
         sqlx::query!(
             "INSERT INTO metadata (hash, type, size, orig_node, scid)
-             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])",
+             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])
+             ON CONFLICT DO NOTHING",
             &hashes,
             &types,
             &sizes,

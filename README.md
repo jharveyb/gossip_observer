@@ -108,7 +108,14 @@ You should be able to [import](https://duckdb.org/docs/stable/sql/statements/exp
 
 You can monitor the server with nats-top, a different [CLI tool](https://docs.nats.io/using-nats/nats-tools), or the built-in [monitoring server](https://docs.nats.io/running-a-nats-service/nats_admin/monitoring).
 
-- Update the archiver settings in `gossip_archiver/src/main.rs`, rebuild, and start the archiver:
+- Install TimescaleDB: <https://www.tigerdata.com/docs/self-hosted/latest/install>
+
+Set a password for the `postgres` user, set `$DATABASE_URL` in an `.env` file pointing to your TimescaleDB instance,
+and then create the database:
+
+`sqlx database setup`
+
+- Update the archiver settings in `gossip_archiver/src/main.rs`, rebuild, and start the archiver with the `.env` file present:
 
 `./target/debug/gossip_archiver`
 
@@ -116,8 +123,7 @@ You can monitor the server with nats-top, a different [CLI tool](https://docs.na
 
 `./target/debug/gossip_collector`
 
-Once the collector shuts down, you should be able to safely shut down the archiver and NATS server and have a DuckDB
-file on disk with the collected data.
+Once the collector shuts down, you should be able to safely shut down the archiver and NATS server.
 
 ## TODOs
 

@@ -28,6 +28,12 @@ clean-archiver-state:
 test_log_filename:
     echo "yeet" {{log_prefix}}{{collector_subdir}}{{log_suffix}}
 
+gen-sql:
+    cargo sqlx prepare --workspace
+
+check-sql:
+    cargo sqlx prepare --workspace --check
+
 tracing-collector-prod: build-prod
     TOKIO_CONSOLE_BIND=127.0.0.1:6969 ./target/release/gossip_collector {{log_prefix}}{{collector_subdir}}{{log_suffix}}
 
