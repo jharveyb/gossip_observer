@@ -31,6 +31,7 @@ pub struct ExportedGossip {
     pub msg_hash: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct RawMessage {
     pub msg_hash: u64,
     pub msg: String,
@@ -42,6 +43,7 @@ impl RawMessage {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MessageNodeTimings {
     pub msg_hash: u64,
     pub collector: String,
@@ -74,6 +76,7 @@ impl MessageNodeTimings {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MessageMetadata {
     pub msg_hash: u64,
     pub msg_type: u8,

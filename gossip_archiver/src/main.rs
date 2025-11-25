@@ -8,11 +8,14 @@ use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMe
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use tokio::sync::mpsc::channel as tokio_channel;
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
 
 // TODO: move to some gossip_common module
 static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+static DB_WRITE_BATCH_SIZE: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,17 +36,15 @@ async fn main() -> anyhow::Result<()> {
     println!("Set up NATS stream and consumer");
 
     // TODO: unbounded feels sketch but whatevs; backpressure?
-    let (raw_msg_tx, raw_msg_rx) = flume::unbounded();
-    let (msg_tx, msg_rx) = flume::unbounded();
+    let (raw_msg_tx, raw_msg_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Adjust this based on observed ingest rate
     // Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
-    let batch_size = 10_000;
-    let (buf_raw_tx, buf_raw_rx) = flume::bounded(batch_size);
-    let (buf_timings_tx, buf_timings_rx) = flume::bounded(batch_size);
-    let (buf_meta_tx, buf_meta_rx) = flume::bounded(batch_size);
-    let (buf_tick_tx, buf_tick_rx) = flume::bounded(1);
-    let (buf_ack_tx, buf_ack_rx) = flume::bounded(1);
+    let (buf_raw_tx, buf_raw_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
+    let (buf_timings_tx, buf_timings_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
+    let (buf_meta_tx, buf_meta_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
+    let (buf_tick_tx, buf_tick_rx) = tokio_channel(1);
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/gossip_observer".to_string());
@@ -61,38 +62,10 @@ async fn main() -> anyhow::Result<()> {
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
     let db_handle = tokio::spawn(async move {
-        db_write_handler(
-            pool,
-            buf_raw_rx,
-            buf_timings_rx,
-            buf_meta_rx,
-            buf_tick_rx,
-            buf_ack_tx,
-        )
-        .await
+        db_write_handler(pool, buf_raw_rx, buf_timings_rx, buf_meta_rx, buf_tick_rx).await
     });
     let db_write_ticker_handle = tokio::spawn(async move {
-        db_write_ticker(
-            msg_rx,
-            buf_raw_tx,
-            buf_timings_tx,
-            buf_meta_tx,
-            buf_tick_tx,
-            buf_ack_rx,
-        )
-        .await
-    });
-
-    let stats_chan = raw_msg_tx.clone();
-    let stats_handle = tokio::spawn(async move {
-        let mut stats_waiter = time::interval(STATS_INTERVAL);
-        loop {
-            tokio::select! {
-                _ = stats_waiter.tick() => {
-                    println!("NATS buffer size: {}", stats_chan.clone().len());
-                }
-            }
-        }
+        db_write_ticker(msg_rx, buf_raw_tx, buf_timings_tx, buf_meta_tx, buf_tick_tx).await
     });
 
     match tokio::try_join!(
@@ -100,7 +73,6 @@ async fn main() -> anyhow::Result<()> {
         decode_handle,
         db_handle,
         db_write_ticker_handle,
-        stats_handle
     ) {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -111,12 +83,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub async fn db_write_ticker(
-    msg_rx: flume::Receiver<ExportedGossip>,
-    buf_raw_tx: flume::Sender<RawMessage>,
-    buf_timings_tx: flume::Sender<MessageNodeTimings>,
-    buf_meta_tx: flume::Sender<MessageMetadata>,
-    buf_tick_tx: flume::Sender<()>,
-    buf_ack_rx: flume::Receiver<()>,
+    mut msg_rx: UnboundedReceiver<ExportedGossip>,
+    buf_raw_tx: Sender<RawMessage>,
+    buf_timings_tx: Sender<MessageNodeTimings>,
+    buf_meta_tx: Sender<MessageMetadata>,
+    buf_tick_tx: Sender<()>,
 ) -> anyhow::Result<()> {
     let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
     let mut stats_waiter = time::interval(STATS_INTERVAL);
@@ -124,78 +95,145 @@ pub async fn db_write_ticker(
     let mut poll_counter = 0;
     let mut full_counter = 0;
 
+    // Signal another task to write buffered values to the DB.
+    let signal_flush = async || -> anyhow::Result<()> {
+        let tick_permit = buf_tick_tx.reserve().await?;
+        tick_permit.send(());
+        Ok(())
+    };
+
     println!("Starting DB write ticker");
     println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
     println!("Stats interval: {STATS_INTERVAL:?}");
     loop {
+        let mut gossip_msg = None;
+        let mut flush_tick = false;
+
+        // Receive a new message, or perform a scheduled flush of values to the
+        // DB. We should never end up trying to do both in the same loop iteration.
         tokio::select! {
+            // TODO: we could probably put this on a timer and use recv_many
+            msg = msg_rx.recv() => {
+                match msg {
+                    Some(msg) => gossip_msg = Some(msg),
+                    None => {
+                        // TODO: crash?
+                        println!("internal: db_write_ticker: decoded msg chan closed");
+                        return Ok(());
+                    }
+                }
+            }
             _ = stats_waiter.tick() => {
                 println!("Flush count: {poll_counter}, Full buffer count: {full_counter}");
                 poll_counter = 0;
                 full_counter = 0;
             }
             _ = flush_waiter.tick() => {
-                buf_tick_tx.send_async(()).await.unwrap();
-                buf_ack_rx.recv_async().await.unwrap();
-                poll_counter += 1;
+                flush_tick = true;
+            }
+        };
+
+        if flush_tick {
+            signal_flush().await?;
+            poll_counter += 1;
+        }
+
+        if let Some(msg) = gossip_msg {
+            let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
+
+            // Reserve capcity to be able to submit a message to the DB write queue.
+            // This will only complete if all DB write queues have capacity.
+            // If a chan. capacity is 0 after we acquire a permit, then we know
+            // a chan. has filled and we can signal the writer.
+            let (msg_permit, timings_permit, meta_permit) = (
+                buf_raw_tx.reserve(),
+                buf_timings_tx.reserve(),
+                buf_meta_tx.reserve(),
+            );
+            let (msg_permit, timings_permit, meta_permit) =
+                tokio::try_join!(msg_permit, timings_permit, meta_permit)?;
+
+            let buf_full = buf_raw_tx.capacity() == 0
+                || buf_timings_tx.capacity() == 0
+                || buf_meta_tx.capacity() == 0;
+            if buf_full {
+                signal_flush().await?;
+                full_counter += 1;
             }
 
-            // TODO: move this onto a timer + batched on a blocking task
-            // Filter received messages by if they require a DB insertion.
-            Ok(msg) = msg_rx.recv_async() => {
-                if buf_timings_tx.is_full() {
-                    buf_tick_tx.send_async(()).await.unwrap();
-                    buf_ack_rx.recv_async().await.unwrap();
-                    full_counter += 1;
-                }
-
-                let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
-
-                // TODO: crash on err?
-                if let Err(e) = buf_raw_tx.send_async(msg_entry).await {
-                        println!("internal archiver error: db_writer(): {e}");
-                    }
-                if let Err(e) = buf_timings_tx.send_async(timings_entry).await {
-                    println!("internal archiver error: db_writer(): {e}");
-                }
-                if let Err(e) = buf_meta_tx.send_async(meta_entry).await {
-                    println!("internal archiver error: db_writer(): {e}");
-                }
+            msg_permit.send(msg_entry);
+            timings_permit.send(timings_entry);
+            meta_permit.send(meta_entry);
         }
-        };
     }
 }
 
 pub async fn db_write_handler(
     pool: PgPool,
-    buf_raw_rx: flume::Receiver<RawMessage>,
-    buf_timings_rx: flume::Receiver<MessageNodeTimings>,
-    buf_meta_rx: flume::Receiver<MessageMetadata>,
-    buf_tick_rx: flume::Receiver<()>,
-    buf_ack_tx: flume::Sender<()>,
+    mut buf_raw_rx: Receiver<RawMessage>,
+    mut buf_timings_rx: Receiver<MessageNodeTimings>,
+    mut buf_meta_rx: Receiver<MessageMetadata>,
+    mut buf_tick_rx: Receiver<()>,
 ) -> anyhow::Result<()> {
     println!("Starting DB writer");
-
+    let mut raw_msgs = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
+    let mut timings = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
+    let mut metas = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
     loop {
+        let mut should_flush = false;
+        // TODO: clean up our closed chan. handling
         tokio::select! {
-            _ = buf_tick_rx.recv_async() => {
-                let raw_batch = buf_raw_rx.drain().collect::<Vec<_>>();
-                let mut timing_batch = buf_timings_rx.drain().collect::<Vec<_>>();
-                let meta_batch = buf_meta_rx.drain().collect::<Vec<_>>();
-
-                // We will always have more timing entries than any other table.
-                if timing_batch.is_empty() {
-                    buf_ack_tx.send_async(()).await.unwrap();
-                    continue;
-                } else {
-                    // Sort our 'time-series' data to improve DB behavior.
-                    // Sort could hang things?
-                    timing_batch.sort_by_key(|x| x.recv_timestamp);
-                    db_batch_write(&pool, raw_batch, timing_batch, meta_batch).await?;
-                    buf_ack_tx.send_async(()).await.unwrap();
+            raw_msg = buf_raw_rx.recv() => {
+                match raw_msg {
+                    Some(msg) => raw_msgs.push(msg),
+                    None => {
+                        println!("internal: db_write_handler: raw msg chan closed");
+                        return Ok(());
+                    }
                 }
             }
+            timings_msg = buf_timings_rx.recv() => {
+                match timings_msg {
+                    Some(msg) => timings.push(msg),
+                    None => {
+                        println!("internal: db_write_handler: timings msg chan closed");
+                        return Ok(());
+                    }
+                }
+            }
+            meta_msg = buf_meta_rx.recv() => {
+                match meta_msg {
+                    Some(msg) => metas.push(msg),
+                    None => {
+                        println!("internal: db_write_handler: meta msg chan closed");
+                        return Ok(());
+                    }
+                }
+            }
+            _ = buf_tick_rx.recv() => {
+                should_flush = true;
+            }
         };
+
+        // Another task will signal us to actually write to the DB.
+        if should_flush {
+            // Sometimes that signal is from a timer, and we haven't received
+            // any messages.
+            if timings.is_empty() {
+                continue;
+            }
+
+            // Sort our 'time-series' data to improve DB behavior.
+            // TODO: move sort to spawn_blocking? not sure if worth
+            timings.sort_by_key(|x| x.recv_timestamp);
+            let (db_raws, db_timings, db_metas) =
+                (raw_msgs.clone(), timings.clone(), metas.clone());
+            db_batch_write(&pool, db_raws, db_timings, db_metas).await?;
+
+            raw_msgs.clear();
+            timings.clear();
+            metas.clear();
+        }
     }
 }
 
@@ -274,51 +312,82 @@ pub async fn db_batch_write(
     Ok(())
 }
 
+// pull msgs from NATS, and ACK the sender / collector so they can continue
 pub async fn nats_reader(
     mut stream: jetstream::consumer::pull::Stream,
-    raw_msg_tx: flume::Sender<Message>,
+    raw_msg_tx: UnboundedSender<Message>,
 ) -> anyhow::Result<()> {
     println!("Starting NATS reader");
 
     let mut msg_count = 0;
     let mut stats_waiter = time::interval(STATS_INTERVAL);
     loop {
+        let mut msg_ack_pair = None;
         tokio::select! {
-            Some(message) = stream.next() => {
-                // ACK before we actually write to DB; yeet
-                let (message, ack_handle) = message.map_err(anyhow::Error::msg)?.split();
-                raw_msg_tx.send_async(message).await?;
-                ack_handle.ack().await.map_err(anyhow::Error::msg)?;
-                msg_count += 1;
+            nats_msg = stream.next() => {
+                match nats_msg {
+                    Some(msg) => {
+                        // TODO: if we crash while holding an ACK handle, will
+                        // that hang the collector? I think so, with the current
+                        // stream policy
+                        msg_ack_pair = Some(msg.map_err(anyhow::Error::msg)?.split());
+                    }
+                    None => {
+                        // TODO: crash?
+                        println!("internal: nats_reader: NATS stream closed");
+                        return Ok(());
+                    }
+                }
             }
             _ = stats_waiter.tick() => {
-                if msg_count > 2 {
-                    println!("Avg. NATS msg/min: {}", msg_count / 2);
-                }
+                println!("Avg. NATS msg/min: {}", msg_count);
                 msg_count = 0;
             }
+        };
+
+        // ACK before we actually write to DB; yeet
+        if let Some((message, ack_handle)) = msg_ack_pair {
+            raw_msg_tx.send(message)?;
+            ack_handle.ack().await.map_err(anyhow::Error::msg)?;
+            msg_count += 1;
         }
     }
 }
 
+// split a big NATS msg into multiple decoded msgs
 pub async fn msg_decoder(
-    raw_msg_rx: flume::Receiver<Message>,
-    msg_tx: flume::Sender<ExportedGossip>,
+    mut raw_msg_rx: UnboundedReceiver<Message>,
+    msg_tx: UnboundedSender<ExportedGossip>,
 ) -> anyhow::Result<()> {
+    let mut stats_waiter = time::interval(STATS_INTERVAL);
     loop {
+        // TODO: add graceful shutdown, some other branch?
         tokio::select! {
-            Ok(raw_msg) = raw_msg_rx.recv_async() => {
-                let inner_msgs = str::from_utf8(&raw_msg.payload)?.split(INTER_MSG_DELIM);
-                for raw_msg in inner_msgs {
-                    msg_tx.send_async(decode_msg(raw_msg)?).await?;
+            rx_msg = raw_msg_rx.recv() => {
+                match rx_msg {
+                    Some(raw_msg) => {
+                        let inner_msgs = str::from_utf8(&raw_msg.payload)?.split(INTER_MSG_DELIM);
+                        for raw_msg in inner_msgs {
+                            msg_tx.send(decode_msg(raw_msg)?)?;
+                        }
+                    }
+                    None => {
+                        println!("internal: msg_decoder: rx chan closed");
+                        return Ok(());
+                    }
                 }
             }
-        }
+            _ = stats_waiter.tick() => {
+                println!("NATS pull queue size: {}", raw_msg_rx.len());
+            }
+        };
     }
 }
 
 pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream::stream::Stream> {
     let stream_name = "main";
+    // TODO: don't delete streams on start, that would drop msgs,
+    // maybe break collectors
     let _ = ctx.delete_stream(&stream_name).await;
     let stream = ctx
         .get_or_create_stream(jetstream::stream::Config {
@@ -335,6 +404,7 @@ pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream:
 pub async fn upsert_consumer(
     ctx: jetstream::stream::Stream,
 ) -> anyhow::Result<jetstream::consumer::PullConsumer> {
+    // TODO: check if this is safe
     let cons_name = "gossip_recv";
     let _ = ctx.delete_consumer(cons_name).await;
     let consumer = ctx
