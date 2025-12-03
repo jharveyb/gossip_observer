@@ -22,3 +22,28 @@ lightning-macros = { git = "https://github.com/jharveyb/rust-lightning", branch 
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3
+
+# Apply the import settings from the default release profile.
+[profile.dev.package.ldk-node]
+opt-level = 3
+debug = true
+debug-assertions = false
+overflow-checks = false
+incremental = false
+codegen-units = 16
+
+[profile.dev.package.lightning]
+opt-level = 3
+debug = true
+debug-assertions = false
+overflow-checks = false
+incremental = false
+codegen-units = 16
+
+# Add oil
+[profile.dev]
+opt-level = 1
+
+# Remove oil
+[profile.release]
+debug = true
