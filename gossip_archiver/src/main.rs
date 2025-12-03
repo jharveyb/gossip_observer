@@ -8,13 +8,18 @@ use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMe
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc::channel as tokio_channel;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
 
 // TODO: move to some gossip_common module
 static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+// Adjust this based on observed ingest rate
+// Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
 static DB_WRITE_BATCH_SIZE: usize = 10_000;
 
 #[tokio::main]
@@ -35,15 +40,13 @@ async fn main() -> anyhow::Result<()> {
     let msg_stream = consumer.messages().await?;
     println!("Set up NATS stream and consumer");
 
-    // TODO: unbounded feels sketch but whatevs; backpressure?
-    let (raw_msg_tx, raw_msg_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
+    // TODO: are unbounded chans a risk? we can enforce mem. limits with systemd, etc.
+    let (raw_msg_tx, raw_msg_rx) = unbounded_channel();
+    let (msg_tx, msg_rx) = unbounded_channel();
 
-    // Adjust this based on observed ingest rate
-    // Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
-    let (buf_raw_tx, buf_raw_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
-    let (buf_timings_tx, buf_timings_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
-    let (buf_meta_tx, buf_meta_rx) = tokio_channel(DB_WRITE_BATCH_SIZE);
+    let (buf_raw_tx, buf_raw_rx) = unbounded_channel();
+    let (buf_timings_tx, buf_timings_rx) = unbounded_channel();
+    let (buf_meta_tx, buf_meta_rx) = unbounded_channel();
     let (buf_tick_tx, buf_tick_rx) = tokio_channel(1);
 
     let database_url = std::env::var("DATABASE_URL")
@@ -60,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
 
     let nats_recv = raw_msg_tx.clone();
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
-    let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
+    let decode_handle = tokio::task::spawn_blocking({
+        let handle = Handle::current();
+        move || handle.block_on(async move { msg_decoder(raw_msg_rx, msg_tx).await })
+    });
     let db_handle = tokio::spawn(async move {
         db_write_handler(pool, buf_raw_rx, buf_timings_rx, buf_meta_rx, buf_tick_rx).await
     });
@@ -84,9 +90,9 @@ async fn main() -> anyhow::Result<()> {
 
 pub async fn db_write_ticker(
     mut msg_rx: UnboundedReceiver<ExportedGossip>,
-    buf_raw_tx: Sender<RawMessage>,
-    buf_timings_tx: Sender<MessageNodeTimings>,
-    buf_meta_tx: Sender<MessageMetadata>,
+    buf_raw_tx: UnboundedSender<RawMessage>,
+    buf_timings_tx: UnboundedSender<MessageNodeTimings>,
+    buf_meta_tx: UnboundedSender<MessageMetadata>,
     buf_tick_tx: Sender<()>,
 ) -> anyhow::Result<()> {
     let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
@@ -94,21 +100,22 @@ pub async fn db_write_ticker(
 
     let mut poll_counter = 0;
     let mut full_counter = 0;
+    let mut msg_counter = 0;
 
     // Signal another task to write buffered values to the DB.
-    let signal_flush = async || -> anyhow::Result<()> {
+    let signal_flush = async || -> anyhow::Result<usize> {
         let tick_permit = buf_tick_tx.reserve().await?;
         tick_permit.send(());
-        Ok(())
+        Ok(0)
     };
 
     println!("Starting DB write ticker");
     println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
     println!("Stats interval: {STATS_INTERVAL:?}");
-    loop {
-        let mut gossip_msg = None;
-        let mut flush_tick = false;
 
+    let mut gossip_msg = None;
+    let mut flush_tick = false;
+    loop {
         // Receive a new message, or perform a scheduled flush of values to the
         // DB. We should never end up trying to do both in the same loop iteration.
         tokio::select! {
@@ -134,53 +141,43 @@ pub async fn db_write_ticker(
         };
 
         if flush_tick {
-            signal_flush().await?;
+            flush_tick = false;
+            msg_counter = signal_flush().await?;
             poll_counter += 1;
         }
 
         if let Some(msg) = gossip_msg {
-            let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
-
-            // Reserve capcity to be able to submit a message to the DB write queue.
-            // This will only complete if all DB write queues have capacity.
-            // If a chan. capacity is 0 after we acquire a permit, then we know
-            // a chan. has filled and we can signal the writer.
-            let (msg_permit, timings_permit, meta_permit) = (
-                buf_raw_tx.reserve(),
-                buf_timings_tx.reserve(),
-                buf_meta_tx.reserve(),
-            );
-            let (msg_permit, timings_permit, meta_permit) =
-                tokio::try_join!(msg_permit, timings_permit, meta_permit)?;
-
-            let buf_full = buf_raw_tx.capacity() == 0
-                || buf_timings_tx.capacity() == 0
-                || buf_meta_tx.capacity() == 0;
-            if buf_full {
-                signal_flush().await?;
+            // Check if we've received enough messages to fill a batch since the
+            // last flush.
+            if msg_counter >= DB_WRITE_BATCH_SIZE {
+                msg_counter = signal_flush().await?;
                 full_counter += 1;
             }
 
-            msg_permit.send(msg_entry);
-            timings_permit.send(timings_entry);
-            meta_permit.send(meta_entry);
+            msg_counter += 1;
+            let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
+
+            buf_raw_tx.send(msg_entry)?;
+            buf_timings_tx.send(timings_entry)?;
+            buf_meta_tx.send(meta_entry)?;
+            gossip_msg = None;
         }
     }
 }
 
 pub async fn db_write_handler(
     pool: PgPool,
-    mut buf_raw_rx: Receiver<RawMessage>,
-    mut buf_timings_rx: Receiver<MessageNodeTimings>,
-    mut buf_meta_rx: Receiver<MessageMetadata>,
+    mut buf_raw_rx: UnboundedReceiver<RawMessage>,
+    mut buf_timings_rx: UnboundedReceiver<MessageNodeTimings>,
+    mut buf_meta_rx: UnboundedReceiver<MessageMetadata>,
     mut buf_tick_rx: Receiver<()>,
 ) -> anyhow::Result<()> {
     println!("Starting DB writer");
     let mut raw_msgs = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
     let mut timings = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
     let mut metas = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
+    let mut should_flush = false;
     loop {
-        let mut should_flush = false;
         // TODO: clean up our closed chan. handling
         tokio::select! {
             raw_msg = buf_raw_rx.recv() => {
@@ -219,6 +216,7 @@ pub async fn db_write_handler(
         if should_flush {
             // Sometimes that signal is from a timer, and we haven't received
             // any messages.
+            should_flush = false;
             if timings.is_empty() {
                 continue;
             }
@@ -226,13 +224,14 @@ pub async fn db_write_handler(
             // Sort our 'time-series' data to improve DB behavior.
             // TODO: move sort to spawn_blocking? not sure if worth
             timings.sort_by_key(|x| x.recv_timestamp);
-            let (db_raws, db_timings, db_metas) =
-                (raw_msgs.clone(), timings.clone(), metas.clone());
-            db_batch_write(&pool, db_raws, db_timings, db_metas).await?;
 
-            raw_msgs.clear();
-            timings.clear();
-            metas.clear();
+            // Move our values into the batch writer instead of cloning.
+            let db_raws = std::mem::replace(&mut raw_msgs, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
+            let db_timings =
+                std::mem::replace(&mut timings, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
+            let db_metas = std::mem::replace(&mut metas, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
+
+            db_batch_write(&pool, db_raws, db_timings, db_metas).await?;
         }
     }
 }

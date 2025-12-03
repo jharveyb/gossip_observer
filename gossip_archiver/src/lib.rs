@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use itertools::Itertools;
 use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 #[cfg(test)]
@@ -6,6 +7,7 @@ mod test_constants;
 
 pub static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
+static V0_MSG_PARTS: usize = 9;
 
 // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
 // ldk-node/src/logger.rs#L272, LdkLogger.export()
@@ -158,21 +160,22 @@ impl From<MessageType> for u8 {
 // TODO: rkyv or smthn cool here? Jk this is fine on release builds
 // This should mirror whatever we're exporting to NATS
 pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
-    let parts = msg.split(INTRA_MSG_DELIM).collect::<Vec<&str>>();
     // None values will be "", but we'll always have 9 fields.
-    if parts.len() != 9 {
-        anyhow::bail!("Invalid message from collector: {msg}")
-    }
+    let parts: [&str; V0_MSG_PARTS] = msg
+        .split(INTRA_MSG_DELIM)
+        .collect_array()
+        .ok_or(anyhow::anyhow!("Invalid message from collector: {msg}"))?;
 
     // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
     // ldk-node/src/logger.rs#L272, LdkLogger.export()
     let recv_timestamp = DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap();
+    // TODO: remove recv_peer_hash, unless indexing on BYTEA is way better than TEXT
+    let recv_peer_hash = XX3Hasher::oneshot(parts[1].as_bytes());
     let recv_peer = parts[1].to_owned();
-    let recv_peer_hash = XX3Hasher::oneshot(recv_peer.as_bytes());
     let msg_type = parts[2].parse::<MessageType>()?.into();
     let msg_size = parts[3].parse::<u16>()?;
+    let msg_hash = XX3Hasher::oneshot(parts[4].as_bytes());
     let msg = parts[4].to_owned();
-    let msg_hash = XX3Hasher::oneshot(msg.as_bytes());
     let orig_timestamp = (!parts[5].is_empty())
         .then(|| parts[5].parse::<i64>())
         .transpose()?
