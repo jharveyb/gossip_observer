@@ -97,6 +97,7 @@ impl MessageMetadata {
     }
 }
 
+// Destructure our decoded message to match our DB schema; one struct per table.
 pub fn split_exported_gossip(
     msg: ExportedGossip,
 ) -> (RawMessage, MessageNodeTimings, MessageMetadata) {
@@ -129,6 +130,8 @@ pub enum MessageType {
     ChannelAnnouncement,
     NodeAnnouncement,
     ChannelUpdate,
+    Ping,
+    Pong,
 }
 
 impl std::str::FromStr for MessageType {
@@ -139,6 +142,8 @@ impl std::str::FromStr for MessageType {
             "ca" => Ok(Self::ChannelAnnouncement),
             "na" => Ok(Self::NodeAnnouncement),
             "cu" => Ok(Self::ChannelUpdate),
+            "ping" => Ok(Self::Ping),
+            "pong" => Ok(Self::Pong),
             _ => Err(anyhow::Error::msg("Invalid message type")),
         }
     }
@@ -212,6 +217,12 @@ mod tests {
     #[test]
     fn v0_minimal_msg() {
         let msg = test_constants::v0_minimal_fields();
+        assert!(decode_msg(&msg).is_ok());
+    }
+
+    #[test]
+    fn v0_pong_msg() {
+        let msg = test_constants::v0_pong_msg();
         assert!(decode_msg(&msg).is_ok());
     }
 
