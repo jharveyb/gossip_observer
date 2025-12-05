@@ -21,6 +21,7 @@ static MSG_SIZE: u16 = 430;
 static MSG_TYPE_VALID: &str = "ca";
 // introduced after v0.0.3
 static MSG_TYPE_PONG: &str = "pong";
+static MSG_DIR_OUT: &str = "outbound";
 
 // All 9 fields are populated; in practice this shouldn't occur, but the decoder
 // isn't checking the gossip message type against the populated fields.
@@ -48,6 +49,13 @@ pub fn v0_minimal_fields() -> String {
 pub fn v0_pong_msg() -> String {
     format!(
         "{TIMESTAMP_UNIX_USEC},{NODE_KEY},{MSG_TYPE_PONG},{MSG_SIZE},{B64_MSG_NO_SIG},,,,{NODE_3_KEY}"
+    )
+}
+
+// Example pong message.
+pub fn v0_outbound_pong_msg() -> String {
+    format!(
+        "{TIMESTAMP_UNIX_USEC},{NODE_KEY},{MSG_TYPE_PONG},{MSG_DIR_OUT},{MSG_SIZE},{B64_MSG_NO_SIG},,,,{NODE_3_KEY}"
     )
 }
 

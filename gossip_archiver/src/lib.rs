@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
+use lightning::util::logger::ExportMessageDirection;
 use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 #[cfg(test)]
@@ -7,7 +8,7 @@ mod test_constants;
 
 pub static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-static V0_MSG_PARTS: usize = 9;
+static V0_MSG_PARTS: usize = 10;
 
 // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
 // ldk-node/src/logger.rs#L272, LdkLogger.export()
@@ -25,6 +26,7 @@ pub struct ExportedGossip {
     pub orig_node: Option<String>,
     // metadata
     pub msg_type: u8,
+    pub msg_dir: u8,
     pub msg_size: u16,
     // part of a chan_ann or chan_update msg
     pub scid: Option<u64>,
@@ -82,16 +84,19 @@ impl MessageNodeTimings {
 pub struct MessageMetadata {
     pub msg_hash: u64,
     pub msg_type: u8,
+    pub msg_dir: u8,
     pub msg_size: u16,
     pub orig_node: Option<String>,
     pub scid: Option<u64>,
 }
 
 impl MessageMetadata {
-    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i32, Option<String>, Option<Vec<u8>>) {
+    #[allow(clippy::type_complexity)]
+    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i16, i32, Option<String>, Option<Vec<u8>>) {
         (
             m.msg_hash.to_le_bytes().to_vec(),
             m.msg_type.into(),
+            m.msg_dir.into(),
             m.msg_size.into(),
             m.orig_node,
             m.scid.map(|s| s.to_le_bytes().to_vec()),
@@ -118,6 +123,7 @@ pub fn split_exported_gossip(
     let metadata = MessageMetadata {
         msg_hash: msg.msg_hash,
         msg_type: msg.msg_type,
+        msg_dir: msg.msg_dir,
         msg_size: msg.msg_size,
         orig_node: msg.orig_node,
         scid: msg.scid,
@@ -165,26 +171,41 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         .split(INTRA_MSG_DELIM)
         .collect_array()
         .ok_or(anyhow::anyhow!("Invalid message from collector: {msg}"))?;
+    let mut parts = parts.into_iter();
 
-    // Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
-    // ldk-node/src/logger.rs#L272, LdkLogger.export()
-    let recv_timestamp = DateTime::from_timestamp_micros(parts[0].parse::<i64>()?).unwrap();
+    // Format: format_args!("{now},{recv_peer},{msg_type},{msg_dir},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
+    // ldk-node/src/logger.rs#L281, LdkLogger.export_record()
+    let mut next_part = || -> anyhow::Result<&str> {
+        parts.next().ok_or(anyhow::anyhow!(
+            "decode_msg: incorrect number of parts: {msg}"
+        ))
+    };
+
+    let recv_timestamp = DateTime::from_timestamp_micros(next_part()?.parse::<i64>()?).unwrap();
     // TODO: remove recv_peer_hash, unless indexing on BYTEA is way better than TEXT
-    let recv_peer_hash = XX3Hasher::oneshot(parts[1].as_bytes());
-    let recv_peer = parts[1].to_owned();
-    let msg_type = parts[2].parse::<MessageType>()?.into();
-    let msg_size = parts[3].parse::<u16>()?;
-    let msg_hash = XX3Hasher::oneshot(parts[4].as_bytes());
-    let msg = parts[4].to_owned();
-    let orig_timestamp = (!parts[5].is_empty())
-        .then(|| parts[5].parse::<i64>())
-        .transpose()?
-        .and_then(DateTime::from_timestamp_micros);
-    let orig_node = (!parts[6].is_empty()).then(|| parts[6].to_owned());
-    let scid = (!parts[7].is_empty())
-        .then(|| parts[7].parse::<u64>())
-        .transpose()?;
-    let collector = parts[8].to_owned();
+    let recv_peer = next_part()?;
+    let recv_peer_hash = XX3Hasher::oneshot(recv_peer.as_bytes());
+    let recv_peer = recv_peer.to_owned();
+    let msg_type = next_part()?.parse::<MessageType>()?.into();
+    let msg_dir: u8 = next_part()?.parse::<ExportMessageDirection>()?.into();
+
+    let msg_size = next_part()?.parse::<u16>()?;
+    let msg = next_part()?;
+    let msg_hash = XX3Hasher::oneshot(msg.as_bytes());
+    let msg = msg.to_owned();
+    let orig_timestamp = match next_part()? {
+        "" => None,
+        x => Some(DateTime::from_timestamp_micros(x.parse::<i64>()?).unwrap()),
+    };
+    let orig_node = match next_part()? {
+        "" => None,
+        x => Some(x.to_owned()),
+    };
+    let scid = match next_part()? {
+        "" => None,
+        x => Some(x.parse::<u64>()?),
+    };
+    let collector = next_part()?.to_owned();
 
     Ok(ExportedGossip {
         recv_timestamp,
@@ -194,6 +215,7 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         recv_peer_hash,
         orig_node,
         msg_type,
+        msg_dir,
         msg_size,
         scid,
         msg,
@@ -226,6 +248,12 @@ mod tests {
     #[test]
     fn v0_pong_msg() {
         let msg = test_constants::v0_pong_msg();
+        assert!(decode_msg(&msg).is_ok());
+    }
+
+    #[test]
+    fn v0_msg_with_direction() {
+        let msg = test_constants::v0_outbound_pong_msg();
         assert!(decode_msg(&msg).is_ok());
     }
 
