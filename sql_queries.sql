@@ -134,6 +134,8 @@ SELECT
     WHEN 1 THEN 'channel_announcement'
     WHEN 2 THEN 'node_announcement'
     WHEN 3 THEN 'channel_update'
+    WHEN 4 THEN 'ping'
+    WHEN 5 THEN 'pong'
     ELSE 'unknown'
   END as type_name
 FROM

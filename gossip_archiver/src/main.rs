@@ -291,15 +291,22 @@ pub async fn db_batch_write(
 
     // Insert metadata
     if !metas.is_empty() {
-        let (hashes, types, sizes, orig_nodes, scids): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-            metas.into_iter().map(MessageMetadata::unroll).multiunzip();
+        let (hashes, types, dirs, sizes, orig_nodes, scids): (
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+        ) = metas.into_iter().map(MessageMetadata::unroll).multiunzip();
 
         sqlx::query!(
-            "INSERT INTO metadata (hash, type, size, orig_node, scid)
-             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])
+            "INSERT INTO metadata (hash, type, dir, size, orig_node, scid)
+             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])
              ON CONFLICT DO NOTHING",
             &hashes,
             &types,
+            &dirs,
             &sizes,
             &orig_nodes as &[Option<String>],
             &scids as &[Option<Vec<u8>>]

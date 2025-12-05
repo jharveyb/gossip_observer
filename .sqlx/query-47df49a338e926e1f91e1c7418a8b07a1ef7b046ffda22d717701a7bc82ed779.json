@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO metadata (hash, type, dir, size, orig_node, scid)\n             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])\n             ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "ByteaArray",
+        "Int2Array",
+        "Int2Array",
+        "Int4Array",
+        "TextArray",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47df49a338e926e1f91e1c7418a8b07a1ef7b046ffda22d717701a7bc82ed779"
+}
