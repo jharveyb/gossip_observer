@@ -1,15 +1,16 @@
 -- Convergence delay percentiles:
 WITH
+  -- TODO: Filter out ping and pong here?
   message_propagation AS (
-    -- Collect the hash, recv_timestamp, # of peers who sent a message, and first seen timestamp
+    -- Collect the hash, net_timestamp, # of peers who sent a message, and first seen timestamp
     SELECT
       t.hash,
-      t.recv_timestamp,
+      t.net_timestamp,
       COUNT(*) OVER (
         PARTITION BY
           t.hash
       ) as total_peers,
-      MIN(t.recv_timestamp) OVER (
+      MIN(t.net_timestamp) OVER (
         PARTITION BY
           t.hash
       ) as first_seen
@@ -27,7 +28,7 @@ WITH
           COUNT(*) >= (
             -- This can be a fixed number instead of a percentage
             SELECT
-              COUNT(DISTINCT recv_peer_hash) * 0.5
+              COUNT(DISTINCT peer_hash) * 0.5
             FROM
               timings
           )
@@ -43,7 +44,7 @@ WITH
       approx_percentile_array (
         array[0.001, 0.05, 0.25, 0.50, 0.75, 0.95, 0.999],
         -- Our input here has to be double precision; compute the interval from
-        -- first_seen to recv_timestamp, and then convert to 'fractional seconds',
+        -- first_seen to net_timestamp, and then convert to 'fractional seconds',
         -- which preserves microseond precision.
         -- https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT
         -- This intverval will always be an underestimate, since we don't know
@@ -52,7 +53,7 @@ WITH
           EXTRACT(
             EPOCH
             FROM
-              (recv_timestamp - first_seen)
+              (net_timestamp - first_seen)
           )
         )
       ) as percentiles
@@ -92,7 +93,7 @@ FROM
 WITH
   total_peers AS (
     SELECT
-      COUNT(DISTINCT recv_peer_hash) as max_peers
+      COUNT(DISTINCT peer_hash) as max_peers
     FROM
       timings
   ),
@@ -149,9 +150,9 @@ WITH
   stats as (
     SELECT
       COUNT(DISTINCT t.hash) as total_unique_messages,
-      MIN(t.recv_timestamp) as start_time,
-      MAX(t.recv_timestamp) as end_time,
-      (MAX(t.recv_timestamp) - MIN(t.recv_timestamp)) as duration_seconds
+      MIN(t.net_timestamp) as start_time,
+      MAX(t.net_timestamp) as end_time,
+      (MAX(t.net_timestamp) - MIN(t.net_timestamp)) as duration_seconds
     FROM
       timings t
   )
@@ -283,12 +284,12 @@ ORDER BY
 WITH
   time_bounds AS (
     SELECT
-      MIN(recv_timestamp) as start_time,
-      MAX(recv_timestamp) as end_time,
+      MIN(net_timestamp) as start_time,
+      MAX(net_timestamp) as end_time,
       EXTRACT(
         EPOCH
         FROM
-          (MAX(recv_timestamp) - MIN(recv_timestamp))
+          (MAX(net_timestamp) - MIN(net_timestamp))
       ) as duration_seconds
     FROM
       timings
@@ -333,25 +334,25 @@ ORDER BY
 WITH
   peer_activity_intervals AS (
     SELECT -- Truncate to 15-minute intervals
-      DATE_TRUNC('hour', recv_timestamp) + INTERVAL '15 minutes' * FLOOR(
+      DATE_TRUNC('hour', net_timestamp) + INTERVAL '15 minutes' * FLOOR(
         EXTRACT(
           minute
           FROM
-            recv_timestamp
+            net_timestamp
         ) / 15
       ) as interval_start,
-      recv_peer_hash
+      peer_hash
     FROM
       timings
     GROUP BY
-      DATE_TRUNC('hour', recv_timestamp) + INTERVAL '15 minutes' * FLOOR(
+      DATE_TRUNC('hour', net_timestamp) + INTERVAL '15 minutes' * FLOOR(
         EXTRACT(
           minute
           FROM
-            recv_timestamp
+            net_timestamp
         ) / 15
       ),
-      recv_peer_hash
+      peer_hash
   )
 SELECT
   interval_start,

@@ -223,7 +223,7 @@ pub async fn db_write_handler(
 
             // Sort our 'time-series' data to improve DB behavior.
             // TODO: move sort to spawn_blocking? not sure if worth
-            timings.sort_by_key(|x| x.recv_timestamp);
+            timings.sort_by_key(|x| x.net_timestamp);
 
             // Move our values into the batch writer instead of cloning.
             let db_raws = std::mem::replace(&mut raw_msgs, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
@@ -263,7 +263,8 @@ pub async fn db_batch_write(
 
     // Insert timings (time-series data)
     if !timings.is_empty() {
-        let (hashes, collectors, recv_peers, recv_peer_hashes, recv_timestamps, orig_timestamps): (
+        let (hashes, collectors, peers, peer_hashes, dirs, net_timestamps, orig_timestamps): (
+            Vec<_>,
             Vec<_>,
             Vec<_>,
             Vec<_>,
@@ -276,13 +277,14 @@ pub async fn db_batch_write(
             .multiunzip();
 
         sqlx::query!(
-            "INSERT INTO timings (hash, collector, recv_peer, recv_peer_hash, recv_timestamp, orig_timestamp)
-             SELECT * FROM UNNEST($1::bytea[], $2::text[], $3::text[], $4::bytea[], $5::timestamptz[], $6::timestamptz[])",
+            "INSERT INTO timings (net_timestamp, hash, collector, peer, dir, peer_hash, orig_timestamp)
+             SELECT * FROM UNNEST($1::timestamptz[], $2::bytea[], $3::text[], $4::text[], $5::smallint[], $6::bytea[], $7::timestamptz[])",
+            &net_timestamps,
             &hashes,
             &collectors,
-            &recv_peers,
-            &recv_peer_hashes,
-            &recv_timestamps,
+            &peers,
+            &dirs,
+            &peer_hashes,
             &orig_timestamps as &[Option<chrono::DateTime<chrono::Utc>>]
         )
         .execute(pool)
@@ -291,22 +293,15 @@ pub async fn db_batch_write(
 
     // Insert metadata
     if !metas.is_empty() {
-        let (hashes, types, dirs, sizes, orig_nodes, scids): (
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-            Vec<_>,
-        ) = metas.into_iter().map(MessageMetadata::unroll).multiunzip();
+        let (hashes, types, sizes, orig_nodes, scids): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
+            metas.into_iter().map(MessageMetadata::unroll).multiunzip();
 
         sqlx::query!(
-            "INSERT INTO metadata (hash, type, dir, size, orig_node, scid)
-             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])
+            "INSERT INTO metadata (hash, type, size, orig_node, scid)
+             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])
              ON CONFLICT DO NOTHING",
             &hashes,
             &types,
-            &dirs,
             &sizes,
             &orig_nodes as &[Option<String>],
             &scids as &[Option<Vec<u8>>]

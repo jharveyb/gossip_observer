@@ -10,18 +10,18 @@ pub static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
 static V0_MSG_PARTS: usize = 10;
 
-// Format: format_args!("{now},{recv_peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
+// Format: format_args!("{now},{peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
 // ldk-node/src/logger.rs#L272, LdkLogger.export()
 #[derive(Debug, Clone)]
 pub struct ExportedGossip {
     // stamp set by collector before sending a message over NATS
-    pub recv_timestamp: DateTime<Utc>,
+    pub net_timestamp: DateTime<Utc>,
     // stamp that's part of a node_ann or chan_update msg
     pub orig_timestamp: Option<DateTime<Utc>>,
     // node pubkeys
     pub collector: String,
-    pub recv_peer: String,
-    pub recv_peer_hash: u64,
+    pub peer: String,
+    pub peer_hash: u64,
     // source node in a node_ann msg
     pub orig_node: Option<String>,
     // metadata
@@ -51,9 +51,10 @@ impl RawMessage {
 pub struct MessageNodeTimings {
     pub msg_hash: u64,
     pub collector: String,
-    pub recv_peer: String,
-    pub recv_peer_hash: u64,
-    pub recv_timestamp: DateTime<Utc>,
+    pub peer: String,
+    pub peer_hash: u64,
+    pub dir: u8,
+    pub net_timestamp: DateTime<Utc>,
     pub orig_timestamp: Option<DateTime<Utc>>,
 }
 
@@ -66,15 +67,17 @@ impl MessageNodeTimings {
         String,
         String,
         Vec<u8>,
+        i16,
         DateTime<Utc>,
         Option<DateTime<Utc>>,
     ) {
         (
             m.msg_hash.to_le_bytes().to_vec(),
             m.collector,
-            m.recv_peer,
-            m.recv_peer_hash.to_le_bytes().to_vec(),
-            m.recv_timestamp,
+            m.peer,
+            m.peer_hash.to_le_bytes().to_vec(),
+            m.dir.into(),
+            m.net_timestamp,
             m.orig_timestamp,
         )
     }
@@ -84,7 +87,6 @@ impl MessageNodeTimings {
 pub struct MessageMetadata {
     pub msg_hash: u64,
     pub msg_type: u8,
-    pub msg_dir: u8,
     pub msg_size: u16,
     pub orig_node: Option<String>,
     pub scid: Option<u64>,
@@ -92,11 +94,10 @@ pub struct MessageMetadata {
 
 impl MessageMetadata {
     #[allow(clippy::type_complexity)]
-    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i16, i32, Option<String>, Option<Vec<u8>>) {
+    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i32, Option<String>, Option<Vec<u8>>) {
         (
             m.msg_hash.to_le_bytes().to_vec(),
             m.msg_type.into(),
-            m.msg_dir.into(),
             m.msg_size.into(),
             m.orig_node,
             m.scid.map(|s| s.to_le_bytes().to_vec()),
@@ -115,15 +116,15 @@ pub fn split_exported_gossip(
     let timings = MessageNodeTimings {
         msg_hash: msg.msg_hash,
         collector: msg.collector,
-        recv_peer: msg.recv_peer,
-        recv_peer_hash: msg.recv_peer_hash,
-        recv_timestamp: msg.recv_timestamp,
+        peer: msg.peer,
+        peer_hash: msg.peer_hash,
+        dir: msg.msg_dir,
+        net_timestamp: msg.net_timestamp,
         orig_timestamp: msg.orig_timestamp,
     };
     let metadata = MessageMetadata {
         msg_hash: msg.msg_hash,
         msg_type: msg.msg_type,
-        msg_dir: msg.msg_dir,
         msg_size: msg.msg_size,
         orig_node: msg.orig_node,
         scid: msg.scid,
@@ -173,7 +174,7 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         .ok_or(anyhow::anyhow!("Invalid message from collector: {msg}"))?;
     let mut parts = parts.into_iter();
 
-    // Format: format_args!("{now},{recv_peer},{msg_type},{msg_dir},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
+    // Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
     // ldk-node/src/logger.rs#L281, LdkLogger.export_record()
     let mut next_part = || -> anyhow::Result<&str> {
         parts.next().ok_or(anyhow::anyhow!(
@@ -181,11 +182,11 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         ))
     };
 
-    let recv_timestamp = DateTime::from_timestamp_micros(next_part()?.parse::<i64>()?).unwrap();
-    // TODO: remove recv_peer_hash, unless indexing on BYTEA is way better than TEXT
-    let recv_peer = next_part()?;
-    let recv_peer_hash = XX3Hasher::oneshot(recv_peer.as_bytes());
-    let recv_peer = recv_peer.to_owned();
+    let net_timestamp = DateTime::from_timestamp_micros(next_part()?.parse::<i64>()?).unwrap();
+    // TODO: remove peer_hash, unless indexing on BYTEA is way better than TEXT
+    let peer = next_part()?;
+    let peer_hash = XX3Hasher::oneshot(peer.as_bytes());
+    let peer = peer.to_owned();
     let msg_type = next_part()?.parse::<MessageType>()?.into();
     let msg_dir: u8 = next_part()?.parse::<ExportMessageDirection>()?.into();
 
@@ -208,11 +209,11 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
     let collector = next_part()?.to_owned();
 
     Ok(ExportedGossip {
-        recv_timestamp,
+        net_timestamp,
         orig_timestamp,
         collector,
-        recv_peer,
-        recv_peer_hash,
+        peer,
+        peer_hash,
         orig_node,
         msg_type,
         msg_dir,
