@@ -227,6 +227,10 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as b64_engine};
+    use lightning::bitcoin::secp256k1::Secp256k1;
+    use lightning::ln::msgs;
+    use lightning::util::ser::LengthReadable;
 
     #[test]
     fn v0_msg() {
@@ -262,5 +266,19 @@ mod tests {
     fn v0_invalid_msg_type() {
         let msg = test_constants::v0_invalid_msg_type();
         assert!(decode_msg(&msg).is_err());
+    }
+
+    #[test]
+    fn read_exported_msg() {
+        let msg_bin = test_constants::RAW_NODE_ANNOUNCEMENT;
+        let msg = b64_engine.decode(msg_bin).unwrap();
+
+        // The gossip message types implement LengthReadable, not Readable.
+        // A properly stored message should have a valid signature.
+        let na =
+            msgs::NodeAnnouncement::read_from_fixed_length_buffer(&mut msg.as_slice()).unwrap();
+
+        let ctx = Secp256k1::verification_only();
+        lightning::routing::gossip::verify_node_announcement(&na, &ctx).unwrap();
     }
 }

@@ -1,33 +1,29 @@
 [package]
+edition = "2024"
 name = "gossip_archiver"
 version = "0.1.0"
-edition = "2024"
 
 [dependencies]
-tokio = { version = "1.47", features = ["full", "tracing"] }
-
 anyhow = "1.0"
-
-chrono = { version = "0.4", default-features = false, features = [
-        "clock",
-        "serde",
-] }
-
 async-nats = "0.44.0"
-futures = "0.3.31"
-
-sqlx = { version = "0.8.0", features = [
-        "runtime-tokio",
-        "tls-rustls",
-        "postgres",
-        "chrono",
-        "macros",
-        "derive",
-] }
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 bytes = { version = "1.10.1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "serde",
+] }
 console-subscriber = "0.5.0"
-twox-hash = { version = "2.1.2", features = ["std", "xxhash3_64"] }
-itertools = "0.14"
 dotenvy = "0.15.7"
-
+futures = "0.3.31"
+itertools = "0.14"
 lightning = { version = "0.2.0-rc1", features = ["std"] }
+sqlx = { version = "0.8.0", features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "chrono",
+  "macros",
+  "derive",
+] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
+twox-hash = { version = "2.1.2", features = ["std", "xxhash3_64"] }
