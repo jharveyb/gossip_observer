@@ -364,3 +364,252 @@ GROUP BY
   interval_start
 ORDER BY
   interval_start;
+
+-- Ping-pong response times per peer:
+-- Shows individual ping messages (sent to peers) and their corresponding pong
+-- responses (received from peers). ONLY includes pings that received a pong response.
+-- Each sent ping should be followed by 0 or 1 received pongs before the next sent ping.
+-- This query pairs each sent ping with the first received pong that occurs after it
+-- but before the next sent ping to the same peer, ensuring proper ping-pong sequencing.
+--
+WITH
+  -- Filter to only pings (type 4) and pongs (type 5). Should use the metadata
+  -- type index.
+  ping_hashes AS (
+    SELECT
+      hash
+    FROM
+      metadata
+    WHERE
+      type = 4
+  ),
+  pong_hashes AS (
+    SELECT
+      hash
+    FROM
+      metadata
+    WHERE
+      type = 5
+  ),
+  -- Match each ping to all possible pongs from the same peer
+  -- This is the main join that finds potential ping-pong pairs.
+  -- We join pings to pongs based on:
+  -- 1. Same peer (peer_hash matches)
+  -- 2. Pong came after ping (row_inc comparison, pong > ping)
+  -- 3. Correct message direction (ping outbound, pong inbound)
+  ping_pong_direct AS (
+    SELECT
+      ping_t.peer_hash,
+      ping_t.peer,
+      ping_t.net_timestamp as ping_timestamp,
+      ping_t.row_inc as ping_row_inc,
+      ping_t.hash as ping_hash,
+      pong_t.net_timestamp as pong_timestamp,
+      pong_t.row_inc as pong_row_inc,
+      pong_t.hash as pong_hash
+    FROM
+      -- Start with all ping timing records
+      timings ping_t
+      -- Filter to only rows that are ping messages
+      INNER JOIN ping_hashes ph ON ping_t.hash = ph.hash
+      -- Find pongs from the same peer that came after this ping
+      INNER JOIN timings pong_t ON ping_t.peer_hash = pong_t.peer_hash
+      AND pong_t.row_inc > ping_t.row_inc -- Pong came after ping
+      -- Filter to only rows that are pong messages
+      INNER JOIN pong_hashes ponh ON pong_t.hash = ponh.hash
+      -- dir 2 is outbound, dir 1 is inbound
+    WHERE
+      ping_t.dir = 2
+      AND pong_t.dir = 1
+  ),
+  -- For each ping-pong pair, check if another ping occurred in between
+  -- We need to verify that this pong is responding to THIS ping, not a later one.
+  -- If there's a ping between our ping and pong, we need to discard this pairing.
+  ping_with_next AS (
+    SELECT
+      pp.peer_hash,
+      pp.peer,
+      pp.ping_timestamp,
+      pp.ping_row_inc,
+      pp.ping_hash,
+      pp.pong_timestamp,
+      pp.pong_row_inc,
+      pp.pong_hash,
+      -- Find if there's another ping message that came after our ping but before our pong.
+      -- If intervening_ping_row_inc is NULL, no ping occurred in between (good!).
+      -- If it's NOT NULL, there was an intervening ping (we'll filter this out later).
+      -- The CASE statement only counts rows that are actually ping messages (verified by ping_check join).
+      MIN(
+        CASE
+          WHEN ping_check.hash IS NOT NULL THEN ping_t.row_inc
+          ELSE NULL
+        END
+      ) as intervening_ping_row_inc
+    FROM
+      ping_pong_direct pp
+      -- LEFT JOIN means: try to find matching rows, but keep all rows from pp even if no match
+      -- Look for any timings row from the same peer
+      LEFT JOIN timings ping_t ON pp.peer_hash = ping_t.peer_hash
+      AND ping_t.row_inc > pp.ping_row_inc -- After our ping
+      AND ping_t.row_inc < pp.pong_row_inc -- But before our pong
+      AND ping_t.dir = 2 -- Outbound message
+      -- Verify that the intervening message is actually a ping (not some other message type)
+      LEFT JOIN ping_hashes ping_check ON ping_t.hash = ping_check.hash
+      -- GROUP BY consolidates all potential intervening pings for each ping-pong pair
+      -- and uses MIN to find the earliest intervening ping (if any exists)
+    GROUP BY
+      pp.peer_hash,
+      pp.peer,
+      pp.ping_timestamp,
+      pp.ping_row_inc,
+      pp.ping_hash,
+      pp.pong_timestamp,
+      pp.pong_row_inc,
+      pp.pong_hash
+  )
+  -- Final selection - only keep valid ping-pong pairs
+SELECT
+  peer_hash,
+  peer,
+  ping_timestamp,
+  pong_timestamp,
+  EXTRACT(
+    EPOCH
+    FROM
+      (pong_timestamp - ping_timestamp)
+  ) as response_time_seconds
+FROM
+  ping_with_next
+WHERE
+  -- Only keep pairs where no ping occurred between the ping and pong
+  intervening_ping_row_inc IS NULL
+ORDER BY
+  peer_hash,
+  ping_timestamp;
+
+-- Summary statistics for ping-pong response times:
+-- Aggregates ping-pong data per peer to show response rates and timing statistics.
+-- This is useful for identifying peers with slow or unreliable pong responses.
+-- ONLY includes pings that received a response.
+--
+-- This query uses the same logic as the detailed query above, but aggregates the results
+-- by peer to show summary statistics (average, min, max, percentiles) instead of individual pairs.
+WITH
+  -- Filter to only pings (type 4) and pongs (type 5). Should use the metadata
+  -- type index.
+  ping_hashes AS (
+    SELECT
+      hash
+    FROM
+      metadata
+    WHERE
+      type = 4
+  ),
+  pong_hashes AS (
+    SELECT
+      hash
+    FROM
+      metadata
+    WHERE
+      type = 5
+  ),
+  -- Match pings to pongs.
+  ping_pong_direct AS (
+    SELECT
+      ping_t.peer_hash,
+      ping_t.peer,
+      ping_t.net_timestamp as ping_timestamp,
+      ping_t.row_inc as ping_row_inc,
+      ping_t.hash as ping_hash,
+      pong_t.net_timestamp as pong_timestamp,
+      pong_t.row_inc as pong_row_inc,
+      pong_t.hash as pong_hash
+    FROM
+      timings ping_t
+      INNER JOIN ping_hashes ph ON ping_t.hash = ph.hash
+      INNER JOIN timings pong_t ON ping_t.peer_hash = pong_t.peer_hash
+      AND pong_t.row_inc > ping_t.row_inc
+      INNER JOIN pong_hashes ponh ON pong_t.hash = ponh.hash
+    WHERE
+      ping_t.dir = 2
+      AND pong_t.dir = 1
+  ),
+  -- For each ping-pong pair, find if there's another ping in between
+  ping_with_next AS (
+    SELECT
+      pp.peer_hash,
+      pp.peer,
+      pp.ping_timestamp,
+      pp.ping_row_inc,
+      pp.ping_hash,
+      pp.pong_timestamp,
+      pp.pong_row_inc,
+      pp.pong_hash,
+      -- Find the minimum ping row_inc that's greater than current ping but less than current pong
+      MIN(
+        CASE
+          WHEN ping_check.hash IS NOT NULL THEN ping_t.row_inc
+          ELSE NULL
+        END
+      ) as intervening_ping_row_inc
+    FROM
+      ping_pong_direct pp
+      LEFT JOIN timings ping_t ON pp.peer_hash = ping_t.peer_hash
+      AND ping_t.row_inc > pp.ping_row_inc
+      AND ping_t.row_inc < pp.pong_row_inc
+      AND ping_t.dir = 2
+      LEFT JOIN ping_hashes ping_check ON ping_t.hash = ping_check.hash
+    GROUP BY
+      pp.peer_hash,
+      pp.peer,
+      pp.ping_timestamp,
+      pp.ping_row_inc,
+      pp.ping_hash,
+      pp.pong_timestamp,
+      pp.pong_row_inc,
+      pp.pong_hash
+  ),
+  -- Extract valid ping-pong pairs (filtering out intervening pings)
+  ping_pong_pairs AS (
+    SELECT
+      peer_hash,
+      peer,
+      ping_timestamp,
+      pong_timestamp,
+      EXTRACT(
+        EPOCH
+        FROM
+          (pong_timestamp - ping_timestamp)
+      ) as response_time_seconds
+    FROM
+      ping_with_next
+    WHERE
+      intervening_ping_row_inc IS NULL
+  ),
+  -- Aggregate statistics per peer + compute percentiles
+  peer_stats AS (
+    SELECT
+      peer_hash,
+      peer,
+      COUNT(*) as total_responses,
+      -- TimescaleDB function
+      approx_percentile_array (array[0.05, 0.25, 0.50, 0.75, 0.95], percentile_agg (response_time_seconds)) as percentiles
+    FROM
+      ping_pong_pairs
+    GROUP BY
+      peer_hash,
+      peer
+  )
+SELECT
+  peer_hash,
+  peer,
+  total_responses,
+  ROUND(percentiles[1]::numeric, 6) as p5_rt_secs,
+  ROUND(percentiles[2]::numeric, 6) as p25_rt_secs,
+  ROUND(percentiles[3]::numeric, 6) as p50_rt_secs,
+  ROUND(percentiles[4]::numeric, 6) as p75_rt_secs,
+  ROUND(percentiles[5]::numeric, 6) as p95_rt_secs
+FROM
+  peer_stats
+ORDER BY
+  p50_rt_secs DESC;
