@@ -1,0 +1,15 @@
+- name: Tailscale setup
+  hosts: all
+  # SSH in as our user, but use sudo for each command
+  remote_user: "{{ nonroot_username }}"
+  become: yes
+
+  # must contain 'tailscale_authkey'
+  vars_files:
+    - vault.yml
+
+  tasks:
+    - import_tasks: tasks/tailscale.yml
+
+  handlers:
+    - import_tasks: handlers/main.yml

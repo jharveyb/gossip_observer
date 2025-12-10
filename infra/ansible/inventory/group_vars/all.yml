@@ -1,0 +1,20 @@
+base_pkgs:
+  - net-tools
+  - htop
+  - neovim
+  - tmux
+  - bind9-dnsutils
+  - tree
+
+locale: "en_US.UTF-8"
+nonroot_username: "goss"
+hostfile_path: "/inventory/hosts.ini"
+# Every 4 hours
+apt_cache_stale: 14400
+
+bash_config:
+  - { line: "set -o vi" }
+  - { line: "HISTCONTROL=ignoreboth" }
+  - { line: "HISTSIZE=100000", regexp: "^HISTSIZE=" }
+  - { line: "HISTFILESIZE=200000", regexp: "^HISTFILESIZE=" }
+  - { line: "shopt -s cmdhist" }

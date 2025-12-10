@@ -15,3 +15,7 @@
 **/collector_logs*
 
 .env
+
+infra/ansible/vault.yml
+.ansible
+infra/ansible/inventory/hosts.ini

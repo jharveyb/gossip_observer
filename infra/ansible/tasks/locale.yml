@@ -1,0 +1,28 @@
+- name: Install locales
+  ansible.builtin.apt:
+    name: locales
+    state: present
+
+- name: Generate locale
+  locale_gen:
+    name: "{{ locale }}"
+    state: present
+
+- name: Get current locale
+  ansible.builtin.command: localectl status
+  # register stores stdout & stderr, plus return code
+  register: current_locale
+  changed_when: false
+  check_mode: false
+
+- name: Set expected locale
+  ansible.builtin.set_fact:
+    expected_locale: "LANG={{ locale }}"
+
+- name: Set locale to "{{ locale }}"
+  # Raw string-ish value, must template
+  ansible.builtin.command: localectl set-locale LANG="{{ locale }}"
+  # Conditional; variable usage without templating brackets
+  when: expected_locale not in current_locale.stdout
+  register: locale_output
+  changed_when: locale_output.rc != 0

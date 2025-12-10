@@ -1,0 +1,39 @@
+- name: Create main user
+  ansible.builtin.user:
+    name: "{{ nonroot_username }}"
+    state: present
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    create_home: true
+    generate_ssh_key: true
+    # TODO: print fingerprint for initial SSH later?
+    ssh_key_type: ed25519
+
+- name: Register SSH key
+  ansible.posix.authorized_key:
+    user: "{{ nonroot_username }}"
+    state: present
+    # key path is specified in the vault
+    key: "{{ lookup('file', ssh_pubkey_path) }}"
+
+- name: Enable passwordless sudo
+  ansible.builtin.copy:
+    content: "{{ nonroot_username }} ALL=(ALL) NOPASSWD: ALL\n"
+    dest: "/etc/sudoers.d/50-ansible-sudo"
+    owner: root
+    group: root
+    mode: "0o440"
+    validate: 'visudo -cf %s'
+
+# Pulled from group_vars
+- name: Configure bash settings
+  ansible.builtin.lineinfile:
+    path: "/home/{{ nonroot_username }}/.bashrc"
+    line: "{{ item.line }}"
+    regexp: "{{ item.regexp | default(omit) }}"
+    create: true
+    owner: "{{ nonroot_username }}"
+    group: "{{ nonroot_username }}"
+    mode: "0644"
+  loop: "{{ bash_config }}"

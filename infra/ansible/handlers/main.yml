@@ -1,0 +1,12 @@
+---
+# Shared handlers for all playbooks; basically tasks you trigger
+# from a 'notify:' statement
+
+- name: Restart systemd-resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
+
+- name: Reapply netplan
+  ansible.builtin.command: netplan apply
+  changed_when: true

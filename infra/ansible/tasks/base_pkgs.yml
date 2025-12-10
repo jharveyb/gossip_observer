@@ -1,0 +1,9 @@
+- name: Update pkg cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: "{{ apt_cache_stale }}"
+
+- name: Basic pkgs
+  ansible.builtin.apt:
+    name: "{{ base_pkgs }}"
+    state: present

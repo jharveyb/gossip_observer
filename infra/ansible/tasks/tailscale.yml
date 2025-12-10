@@ -1,0 +1,144 @@
+# Official repos only go up to bookworm, not trixie
+- name: Add Tailscale repository
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    types: deb
+    uris: https://pkgs.tailscale.com/stable/debian
+    suites: bookworm
+    components: main
+    signed_by: https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: "{{ apt_cache_stale }}"
+
+- name: Install Tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+
+- name: Check if Tailscale is already connected
+  ansible.builtin.command: tailscale status
+  register: tailscale_status
+  changed_when: false
+  failed_when: false
+
+- name: Connect to Tailscale network
+  ansible.builtin.command: >
+    tailscale up
+    --authkey="{{ tailscale_authkey }}"
+    --ssh
+    --accept-dns
+    --hostname="{{ inventory_hostname }}"
+  when: tailscale_status.rc != 0
+  register: tailscale_up_result
+  changed_when: tailscale_up_result.rc != 0
+
+- name: Display Tailscale connection result
+  ansible.builtin.debug:
+    var: tailscale_up_result.stdout_lines
+  when: tailscale_status.rc != 0
+
+# This should always exist already
+- name: Create systemd-resolved config directory
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure systemd-resolved to use Tailscale DNS
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/tailscale.conf
+    content: |
+      [Resolve]
+      DNS=100.100.100.100
+      Domains=~.
+      # Set Quad9 and Cloudflare as fallbacks if Tailscale DNS fails
+      FallbackDNS=9.9.9.9 2620:fe::fe 1.1.1.1 2606:4700:4700::1111
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart systemd-resolved
+
+- name: Remove Digital Ocean DNS resolved configuration
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d/DigitalOcean.conf
+    state: absent
+  notify: Restart systemd-resolved
+
+# Should add Tailscale DNS, but not remove the OpenDNS entries
+- name: Flush handlers to restart systemd-resolved immediately
+  ansible.builtin.meta: flush_handlers
+
+- name: Read cloud-init netplan config
+  ansible.builtin.slurp:
+    path: /etc/netplan/50-cloud-init.yaml
+  register: netplan_cloud_init
+
+# Slurp provides output as base64 (why?), so we need a decode step here
+- name: Parse netplan YAML
+  ansible.builtin.set_fact:
+    netplan_config: "{{ netplan_cloud_init.content | b64decode | from_yaml }}"
+
+# Mutate the original netplan YAML to remove the 'nameservers:' section
+# so netplan does not add anything to our DNS config, and disable DHCP DNS
+- name: Modify eth0 config - remove nameservers and add DHCP overrides
+  ansible.builtin.set_fact:
+    eth0_modified: >-
+      {{
+        (netplan_config.network.ethernets.eth0 | dict2items | rejectattr('key', 'equalto', 'nameservers') | items2dict) | combine({
+          'dhcp4-overrides': {'use-dns': false},
+          'dhcp6-overrides': {'use-dns': false}
+        })
+      }}
+
+- name: Modify eth1 config - remove nameservers and add DHCP overrides
+  ansible.builtin.set_fact:
+    eth1_modified: >-
+      {{
+        (netplan_config.network.ethernets.eth1 | dict2items | rejectattr('key', 'equalto', 'nameservers') | items2dict) | combine({
+          'dhcp4-overrides': {'use-dns': false},
+          'dhcp6-overrides': {'use-dns': false}
+        })
+      }}
+
+# Override the eth0 and eth1 sections
+- name: Rebuild netplan config with modified interfaces
+  ansible.builtin.set_fact:
+    netplan_config:
+      network:
+        version: "{{ netplan_config.network.version }}"
+        ethernets:
+          eth0: "{{ eth0_modified }}"
+          eth1: "{{ eth1_modified }}"
+
+- name: Write updated netplan config
+  ansible.builtin.copy:
+    content: "{{ netplan_config | to_nice_yaml(indent=2) }}"
+    dest: /etc/netplan/50-cloud-init.yaml
+    backup: true
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Reapply netplan
+
+- name: Flush handlers to apply netplan immediately
+  ansible.builtin.meta: flush_handlers
+
+# Remove the reference to a public IP for this machine in our inventory.
+# This means that Ansible will connect to machines via Tailscale hostname,
+# using Tailscale SSH. We don't need to manage any SSH keys for that.
+- name: Update inventory file to use Tailscale hostname
+  become: false
+  ansible.builtin.lineinfile:
+    path: "{{ playbook_dir }}{{ hostfile_path }}"
+    # Use fancy regex to split our line into \1, the target section, and \2
+    # then replace only the ansible_host var.
+    regexp: "^({{ inventory_hostname }} )ansible_host=\\S+(.*)"
+    line: "\\1ansible_host={{ inventory_hostname }}\\2"
+    backrefs: true
+    backup: true
+  delegate_to: localhost
