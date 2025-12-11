@@ -1,0 +1,25 @@
+[Unit]
+Description=NATS Server - {{ item.name }}
+After=network-online.target ntp.service tailscaled.service
+
+[Service]
+PrivateTmp=true
+Type=simple
+ExecStart=/usr/sbin/nats-server -c /etc/{{ item.service_name }}.conf
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# The nats-server uses SIGUSR2 to trigger Lame Duck Mode (LDM) shutdown
+# https://docs.nats.io/running-a-nats-service/nats_admin/lame_duck_mode
+ExecStop=/bin/kill -s SIGUSR2  $MAINPID
+
+# This should be `lame_duck_duration` + some buffer to finish the shutdown.
+# By default, `lame_duck_duration` is 2 mins.
+TimeoutStopSec=150
+
+Restart=on-failure
+
+User=nats
+Group=nats
+
+[Install]
+WantedBy=multi-user.target

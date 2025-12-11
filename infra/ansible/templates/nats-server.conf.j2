@@ -1,0 +1,23 @@
+server_name: obverser_ingest_{{ item.name }}
+# default is 1 MB
+max_payload: 4MB
+# Absorb bursts and a slow consumer
+write_deadline: 60s
+max_pending: 256MB
+
+host: {{ tailscale_ip }}
+port: {{ item.port }}
+http_port: {{ item.http_port }}
+
+# Logs will be captured by systemd journald
+# log_file not set - NATS will log to stdout/stderr by default
+logtime: true
+debug: false
+trace: false
+
+jetstream {
+	store_dir: /var/lib/nats_{{ item.name }}
+	# 750 MB, 4 GB
+	max_memory_store: 786432000
+	max_file_store: 4294967296
+}

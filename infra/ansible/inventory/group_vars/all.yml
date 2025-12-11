@@ -14,7 +14,18 @@ apt_cache_stale: 14400
 
 bash_config:
   - { line: "set -o vi" }
-  - { line: "HISTCONTROL=ignoreboth" }
   - { line: "HISTSIZE=100000", regexp: "^HISTSIZE=" }
   - { line: "HISTFILESIZE=200000", regexp: "^HISTFILESIZE=" }
   - { line: "shopt -s cmdhist" }
+
+nats_version: "2.12.2"
+
+nats_instances:
+  - name: staging
+    service_name: nats-server-staging
+    port: 4223
+    http_port: 8223
+  - name: prod
+    service_name: nats-server-prod
+    port: 4224
+    http_port: 8224

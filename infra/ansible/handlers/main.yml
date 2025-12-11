@@ -10,3 +10,15 @@
 - name: Reapply netplan
   ansible.builtin.command: netplan apply
   changed_when: true
+
+- name: Restart nats-server-staging
+  ansible.builtin.systemd:
+    name: nats-server-staging
+    state: restarted
+    daemon_reload: true
+
+- name: Restart nats-server-prod
+  ansible.builtin.systemd:
+    name: nats-server-prod
+    state: restarted
+    daemon_reload: true

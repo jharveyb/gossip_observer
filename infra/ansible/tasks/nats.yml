@@ -1,0 +1,91 @@
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  # Pulled when we 'gather facts', as a prelude before tasks are run
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Create nats user
+  ansible.builtin.user:
+    name: nats
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create NATS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: nats
+    group: nats
+    mode: '0755'
+  loop:
+    - /var/lib/nats_staging
+    - /var/lib/nats_prod
+    - /opt/nats
+
+# https://docs.nats.io/running-a-nats-service/introduction/installation
+# Pinned to amd64 for now
+- name: Download NATS server
+  ansible.builtin.unarchive:
+    src: "https://github.com/nats-io/nats-server/releases/download/v{{ nats_version }}/nats-server-v{{ nats_version }}-linux-amd64.tar.gz"
+    dest: /opt/nats
+    remote_src: true
+    mode: '0644'
+    extra_opts:
+      - "--strip-components=1"
+
+- name: Check if NATS server binary exists
+  ansible.builtin.stat:
+    path: /usr/sbin/nats-server
+  register: nats_binary
+
+- name: Install NATS server binary
+  ansible.builtin.copy:
+    src: /opt/nats/nats-server
+    dest: /usr/sbin/nats-server
+    remote_src: true
+    owner: root
+    group: root
+    mode: preserve
+  when: not nats_binary.stat.exists or nats_binary.stat.size == 0
+
+- name: Set NATS server binary permissions
+  ansible.builtin.file:
+    path: /usr/sbin/nats-server
+    owner: root
+    group: root
+    mode: '0755'
+  when: nats_binary.stat.exists and (nats_binary.stat.mode != '0755')
+
+# Pulled from official repo: https://github.com/nats-io/nats-server/blob/main/util/nats-server.service
+- name: Copy NATS configurations
+  ansible.builtin.template:
+    src: nats-server.conf.j2
+    dest: "/etc/{{ item.service_name }}.conf"
+    owner: nats
+    group: nats
+    mode: '0644'
+  loop: "{{ nats_instances }}"
+  notify: "Restart {{ item.service_name }}"
+
+- name: Install NATS systemd services
+  ansible.builtin.template:
+    src: nats-server.service.j2
+    dest: "/etc/systemd/system/{{ item.service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ nats_instances }}"
+  notify: "Restart {{ item.service_name }}"
+
+- name: Enable and start NATS services
+  ansible.builtin.systemd:
+    name: "{{ item.service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ nats_instances }}"
