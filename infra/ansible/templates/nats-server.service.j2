@@ -17,6 +17,7 @@ ExecStop=/bin/kill -s SIGUSR2  $MAINPID
 TimeoutStopSec=150
 
 Restart=on-failure
+RestartSec=15s
 
 User=nats
 Group=nats
