@@ -5,6 +5,8 @@ base_pkgs:
   - tmux
   - bind9-dnsutils
   - tree
+  - iftop
+  - ufw
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"

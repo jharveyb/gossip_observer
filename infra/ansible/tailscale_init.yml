@@ -2,14 +2,24 @@
   hosts: all
   # SSH in as our user, but use sudo for each command
   remote_user: "{{ nonroot_username }}"
-  become: yes
-
-  # must contain 'tailscale_authkey'
-  vars_files:
-    - vault.yml
+  become: true
 
   tasks:
-    - import_tasks: tasks/tailscale.yml
+    - name: Tailscale setup
+      tags: [tailscale]
+      block:
+        # must contain 'tailscale_authkey'
+        - name: Load vault variables
+          ansible.builtin.include_vars: vault.yml
+        - name: Import tailscale tasks
+          ansible.builtin.import_tasks: tasks/tailscale.yml
+
+    - name: Firewall setup
+      tags: [firewall]
+      block:
+        - name: Import firewall tasks
+          ansible.builtin.import_tasks: tasks/firewall.yml
 
   handlers:
-    - import_tasks: handlers/main.yml
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
