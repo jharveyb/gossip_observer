@@ -49,11 +49,14 @@
     group: root
     mode: '0755'
 
+# The stub listener and LLMNR are on by default; we definitely don't need them.
 - name: Configure systemd-resolved to use Tailscale DNS
   ansible.builtin.copy:
     dest: /etc/systemd/resolved.conf.d/tailscale.conf
     content: |
       [Resolve]
+      DNSStubListener=no
+      LLMNR=no
       DNS=100.100.100.100
       Domains=~.
       # Set Quad9 and Cloudflare as fallbacks if Tailscale DNS fails
