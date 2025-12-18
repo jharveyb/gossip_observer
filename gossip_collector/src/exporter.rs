@@ -206,7 +206,7 @@ impl NATSExporter {
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
                         println!(
-                            "Avg. NATS upload time: {}us",
+                            "Avg. NATS upload + ACK time: {}us",
                             total_upload_time / upload_count
                         );
                     }

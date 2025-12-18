@@ -1,27 +1,31 @@
 [package]
-name = "gossip_collector"
-version = "0.1.0"
 edition = "2024"
+name    = "gossip_collector"
+version = "0.1.0"
 
 [dependencies]
 
 actix-web = "4.11.0"
-ldk-node = { version = "0.7" }
-tokio = { version = "1.47", features = ["full", "tracing"] }
-serde = { version = "1.0", features = ["derive"] }
-configparser = "3.0"
 anyhow = "1.0"
 bitcoin = "0.32.4"
 chrono = { version = "0.4", default-features = false, features = [
-        "clock",
-        "serde",
+  "clock",
+  "serde",
 ] }
+configparser = "3.0"
+ldk-node = { version = "0.7" }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 
 log = { version = "0.4.22", default-features = false, features = ["std"] }
 
-lightning = { version = "0.2.0-rc1", features = ["std"] }
-async-nats = "0.44.0"
+async-nats         = "0.44.0"
 console-subscriber = "0.5.0"
-tokio-util = { version = "0.7.16", features = ["full", "rt"] }
-rand = { version = "0.9.2", features = ["std"] }
-itertools = "0.14.0"
+itertools          = "0.14.0"
+lightning          = { version = "0.2.0-rc1", features = ["std"] }
+rand               = { version = "0.9.2", features = ["std"] }
+tokio-util         = { version = "0.7.16", features = ["full", "rt"] }
+
+observer_common = { path = "../observer_common" }
+observer_proto  = { path = "../observer_proto" }
+tonic           = "0.14"

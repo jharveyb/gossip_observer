@@ -8,12 +8,14 @@ use ldk_node::logger::LogLevel;
 use rand::seq::SliceRandom;
 use std::fs::read_to_string;
 use tokio::task::JoinSet;
+use tonic::transport::Server as TonicServer;
 
 use tokio::time::interval;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 mod config;
 mod exporter;
+mod grpc_server;
 mod logger;
 mod node_manager;
 use crate::exporter::Exporter;
@@ -149,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     let actix_stop_signal = stop_signal.child_token();
     let bg_stats_stop_signal = stop_signal.child_token();
+    let grpc_stop_signal = stop_signal.child_token();
 
     println!("Collector runtime: {} minutes", server_config.runtime);
     println!("Start time: {}", chrono::Utc::now().to_rfc3339());
@@ -156,10 +159,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut node_connect_init = JoinSet::new();
     let mut task_id = 0;
-    let max_tasks = 50;
 
-    let total_tasks = 4000;
-    let connect_update_delay = Duration::from_millis(500);
+    // Parallel connection attempts.
+    let max_tasks = 5;
+
+    // Max. # of peers we'll try to connect to.
+    let total_tasks = 80;
+    let connect_update_delay = Duration::from_millis(100);
 
     let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();
     for _ in 0..max_tasks {
@@ -213,6 +219,18 @@ async fn main() -> anyhow::Result<()> {
         println!("Starting peers:");
     });
 
+    // Start gRPC server
+    let grpc_node_handle = node.clone();
+    let grpc_addr = format!("{}:{}", server_config.hostname, server_config.grpc_port).parse()?;
+    let grpc_service = grpc_server::create_service(grpc_node_handle);
+    let grpc_server = tokio::spawn(async move {
+        println!("Starting gRPC server on {}", grpc_addr);
+        TonicServer::builder()
+            .add_service(grpc_service)
+            .serve_with_shutdown(grpc_addr, grpc_stop_signal.cancelled())
+            .await
+    });
+
     let mut stats_waiter = interval(exporter::STATS_INTERVAL);
     let node_stats_handle = node.clone();
     let bg_stats = tokio::spawn(async move {
@@ -238,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO: what do we want to dump from node before shutdown?
     // nodelist, channel list, peer list, etc.
     let node_shutdown_handle = node.clone();
+    // TODO: this may not be cleaning itself up correctly?
     let deadline = tokio::spawn(async move {
         tokio::select! {
             _ = deadline_waiter => {
@@ -262,10 +281,11 @@ async fn main() -> anyhow::Result<()> {
         stop_signal.cancel();
     });
 
-    Ok(tokio::join!(
+    let final_res = tokio::join!(
         bg_stats,
         init_connections,
         deadline,
+        grpc_server,
         HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(AppState { node: node.clone() }))
@@ -277,8 +297,16 @@ async fn main() -> anyhow::Result<()> {
         })
         .workers(2)
         .shutdown_signal(actix_stop_signal.cancelled_owned())
-        .bind((server_config.hostname.as_str(), server_config.port))?
+        .bind((server_config.hostname.as_str(), server_config.actix_port))?
         .run()
-    )
-    .0?)
+    );
+
+    // lol
+    final_res.0?;
+    final_res.1?;
+    final_res.2?;
+    final_res.3??;
+    final_res.4?;
+
+    Ok(())
 }

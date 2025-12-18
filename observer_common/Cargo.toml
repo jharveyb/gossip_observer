@@ -1,0 +1,10 @@
+[package]
+edition = "2024"
+name    = "observer_common"
+version = "0.1.0"
+
+[dependencies]
+anyhow         = "1.0"
+bitcoin        = "0.32.4"
+lightning      = { version = "0.2.0-rc1", features = ["std"] }
+observer_proto = { path = "../observer_proto" }

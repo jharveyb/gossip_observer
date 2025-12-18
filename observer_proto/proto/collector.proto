@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package collector;
+
+service CollectorService {
+  rpc GetNodeConfig(NodeConfigRequest) returns (NodeConfigResponse);
+}
+
+message NodeConfigRequest {}
+
+message NodeConfigResponse {
+  repeated string listen_addrs = 1;
+  optional bytes node_alias = 2;
+  string node_id = 3;
+}

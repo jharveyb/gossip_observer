@@ -15,7 +15,8 @@ pub struct NodeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub hostname: String,
-    pub port: u16,
+    pub actix_port: u16,
+    pub grpc_port: u16,
     pub runtime: u64,
     pub startup_delay: u64,
 }
@@ -69,7 +70,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             hostname: "127.0.0.1".to_string(),
-            port: 8080,
+            actix_port: 8080,
+            grpc_port: 50051,
             runtime: 60,
             startup_delay: 120,
         }
@@ -88,7 +90,12 @@ impl ServerConfig {
         if let Some(port_str) = config.get("server", "port")
             && let Ok(port) = port_str.parse::<u16>()
         {
-            cfg.port = port;
+            cfg.actix_port = port;
+        }
+        if let Some(grpc_port_str) = config.get("server", "grpc_port")
+            && let Ok(grpc_port) = grpc_port_str.parse::<u16>()
+        {
+            cfg.grpc_port = grpc_port;
         }
         if let Some(runtime) = config.get("server", "runtime")
             && let Ok(runtime) = runtime.parse::<u64>()
