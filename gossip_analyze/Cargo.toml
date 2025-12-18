@@ -1,7 +1,7 @@
 [package]
+edition = "2024"
 name = "gossip_analyze"
 version = "0.1.0"
-edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
@@ -12,6 +12,6 @@ serde = { version = "1", features = ["derive"] }
 
 ldk-node = { version = "0.7" }
 
-tokio = { version = "1.47.0", features = ["full"] }
 reqwest = { version = "0.12.23", features = ["json"] }
 serde_json = "1.0.145"
+tokio = { version = "1.47.0", features = ["full"] }

@@ -6,8 +6,10 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
+use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +23,82 @@ fn parse_peer_specifier(peer_specifier: &str) -> anyhow::Result<(PublicKey, Sock
         SocketAddress::from_str(address).map_err(|e| anyhow!("Invalid address format: {e}"))?;
     let pubkey = PublicKey::from_str(pubkey_str)?;
     Ok((pubkey, addr))
+}
+
+// This will truncate / overwrite existing contents.
+fn new_file_writer(dir: &str, filename: &str) -> BufWriter<File> {
+    let path = format!("{}/{}", dir, filename);
+    let file = fs::File::create(path).unwrap();
+    BufWriter::new(file)
+}
+
+async fn fetch_node_info_1ml(
+    client: &reqwest::Client,
+    node_pubkey: &str,
+) -> anyhow::Result<(u64, Vec<String>)> {
+    let oneml_base = "https://1ml.com/node";
+    let req_url = format!("{}/{}/json", oneml_base, node_pubkey);
+    let res = match client.get(req_url).send().await {
+        Ok(res) => match res.error_for_status() {
+            Ok(res) => res.json::<serde_json::Value>().await?,
+            Err(e) => {
+                let errstr = format!("1ML: response error: {node_pubkey}: {e}");
+                println!("{errstr}");
+                bail!("{errstr}");
+            }
+        },
+        Err(e) => {
+            let errstr = format!("1ML: error on GET for node {node_pubkey}: {e}");
+            println!("{errstr}");
+            bail!("{errstr}");
+        }
+    };
+    let last_msg = res["last_update"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("No last update for {}", node_pubkey))?;
+    let addrs = res["addresses"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No addresses for {}", node_pubkey))?
+        .iter()
+        .filter_map(|a| a["addr"].as_str())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    Ok((last_msg, addrs))
+}
+
+async fn fetch_node_info_mempool_space(
+    client: &reqwest::Client,
+    node_pubkey: &str,
+) -> anyhow::Result<(u64, Vec<String>)> {
+    let mempool_base = "https://mempool.space/api/v1/lightning/nodes";
+    let req_url = format!("{}/{}", mempool_base, node_pubkey);
+    let res = match client.get(req_url).send().await {
+        Ok(res) => match res.error_for_status() {
+            Ok(res) => res.json::<serde_json::Value>().await?,
+            Err(e) => {
+                let errstr = format!("Mempool-space: response error: {node_pubkey}: {e}");
+                println!("{errstr}");
+                bail!("{errstr}");
+            }
+        },
+        Err(e) => {
+            let errstr = format!("Mempool-space: error on GET for node {node_pubkey}: {e}");
+            println!("{errstr}");
+            bail!("{errstr}");
+        }
+    };
+
+    let last_msg = res["updated_at"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("No last update for {}", node_pubkey))?;
+    let addrs = res["sockets"]
+        .as_str()
+        .ok_or_else(|| anyhow!("No addresses for {}", node_pubkey))?
+        .split(',')
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+    Ok((last_msg, addrs))
 }
 
 #[derive(Parser)]
@@ -60,44 +138,98 @@ async fn main() -> anyhow::Result<()> {
             let node_list_path = format!("{}/{}", datadir, "node_list.csv");
             let node_list_file = fs::read_to_string(node_list_path)?;
 
-            let node_addresses_path = format!("{}/{}", datadir, "node_addresses.txt");
-            let node_addresses_file = fs::File::create(node_addresses_path)?;
-            let mut buf_node_addresses = BufWriter::new(node_addresses_file);
+            let mut localhost_counter = 0;
+            let mut clearnet_nodes = new_file_writer(datadir, "node_addrs_clearnet.txt");
+            let mut onion_nodes = new_file_writer(datadir, "node_addrs_onion.txt");
 
             let client = reqwest::Client::new();
-            let oneml_base = "https://1ml.com/node";
             let target_delay = 1000;
             let mut loop_start: i64;
             let mut loop_delay: i64;
             let mut delay_padding: std::time::Duration;
             for node in node_list_file.lines() {
                 loop_start = chrono::Utc::now().timestamp_millis();
-                let req_url = format!("{}/{}/json", oneml_base, node);
-                let res = client
-                    .get(req_url)
-                    .send()
-                    .await?
-                    .json::<serde_json::Value>()
-                    .await?;
-                let last_msg = res["last_update"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow!("No last update for {}", node))?;
-                let addrs = res["addresses"]
-                    .as_array()
-                    .ok_or_else(|| anyhow!("No addresses for {}", node))?;
+                let (last_msg, addrs) = match fetch_node_info_1ml(&client, node).await {
+                    Ok((last_msg, addrs)) => (last_msg, addrs),
+                    // Try mempool.space as a backup
+                    Err(_) => match fetch_node_info_mempool_space(&client, node).await {
+                        Ok((last_msg, addrs)) => (last_msg, addrs),
+                        Err(_) => continue,
+                    },
+                };
+
                 for addr in addrs {
-                    let network_addr = addr["addr"].as_str().unwrap();
                     let connection_info = match include_timestamp {
                         true => {
-                            format!("{}@{},{}\n", node, network_addr, last_msg)
+                            format!("{}@{},{}\n", node, addr, last_msg)
                         }
                         false => {
-                            format!("{}@{}\n", node, network_addr)
+                            format!("{}@{}\n", node, addr)
                         }
                     };
-                    buf_node_addresses.write_all(connection_info.as_bytes())?;
+                    if addr.contains("onion") {
+                        onion_nodes.write_all(connection_info.as_bytes())?;
+                        continue;
+                    }
+                    let addr = match std::net::SocketAddr::from_str(&addr) {
+                        Ok(addr) => addr.ip(),
+                        Err(e) => {
+                            println!("Invalid IP address: {addr} {e}");
+                            continue;
+                        }
+                    };
+
+                    // A clearnet address we expect to not work, is one from a reserved private
+                    // or non-global IP range. This includes the private ranges like 10.0.0.0/8,
+                    // loopback, unspecified (0.0.0.0), link-local, and others. The is_global()
+                    // method is not stabilized yet: https://github.com/rust-lang/rust/issues/27709
+                    let v4_is_reserved = |addr: &Ipv4Addr| -> bool {
+                        // The broadcast address would also be unworkable here.
+                        addr.octets()[0] & 240 == 240
+                    };
+                    let v4_is_shared = |addr: &Ipv4Addr| -> bool {
+                        // Test for 100.64.0.0/10; used for CG-NAT at least
+                        // https://datatracker.ietf.org/doc/html/rfc6598
+                        addr.octets()[0] == 100 && (addr.octets()[1] & 0b1100_0000 == 0b0100_0000)
+                    };
+                    let v4_maybe_reachable = |addr: &Ipv4Addr| -> bool {
+                        // Ignoring the benchmarking range.
+                        !(addr.is_unspecified()
+                            || addr.is_private()
+                            || v4_is_shared(addr)
+                            || addr.is_loopback()
+                            || addr.is_link_local()
+                            || addr.is_documentation()
+                            || v4_is_reserved(addr))
+                    };
+                    let v6_maybe_reachable = |addr: &Ipv6Addr| -> bool {
+                        // Ignoring some ranges.
+                        !(addr.is_unspecified()
+                            || addr.is_loopback()
+                            || addr.is_unique_local()
+                            || addr.is_unicast_link_local()
+                            || addr.to_ipv4_mapped().is_none())
+                    };
+
+                    match addr {
+                        IpAddr::V4(v4) => {
+                            if v4_maybe_reachable(&v4) {
+                                clearnet_nodes.write_all(connection_info.as_bytes())?;
+                            } else {
+                                localhost_counter += 1;
+                            }
+                        }
+                        IpAddr::V6(v6) => {
+                            if v6_maybe_reachable(&v6) {
+                                clearnet_nodes.write_all(connection_info.as_bytes())?;
+                            } else {
+                                localhost_counter += 1;
+                            }
+                        }
+                    }
                 }
-                buf_node_addresses.flush()?;
+                onion_nodes.flush()?;
+                clearnet_nodes.flush()?;
 
                 // Aim for at least 1 second delay between requests.
                 loop_delay = chrono::Utc::now().timestamp_millis() - loop_start;
@@ -105,12 +237,13 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                delay_padding = std::time::Duration::from_millis(1005 - (loop_delay as u64));
+                delay_padding = std::time::Duration::from_millis(
+                    (target_delay as u64) + 5 - (loop_delay as u64),
+                );
                 sleep(delay_padding).await;
             }
 
-            // TODO: add step that splits file to clearnet and tor
-            // also filters out localhost
+            println!("{} localhost IPs", localhost_counter);
             Ok(())
         }
         Commands::ParseAddresses {} => {
@@ -251,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
             // We'll stop waiting once the node count is stable.
             let min_node_count = 11_000;
             let mut node_count = 0;
-            let check_delay = Duration::from_secs(2);
+            let check_delay = Duration::from_secs(10);
             while !(graph_size.iter().all(|x| x > &min_node_count)
                 && graph_size.iter().all(|x| x == &node_count))
             {
