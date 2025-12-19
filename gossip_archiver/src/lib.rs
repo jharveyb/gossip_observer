@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
+use config::{Config, Environment, File};
 use itertools::Itertools;
 use lightning::util::logger::ExportMessageDirection;
+use serde::Deserialize;
+use std::env;
 use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 #[cfg(test)]
@@ -222,6 +225,52 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         msg,
         msg_hash,
     })
+}
+
+// A stream can have multiple subjects, and a consumer can pull
+// messages from a stream + filter by subject.
+#[derive(Debug, Deserialize)]
+pub struct Nats {
+    pub server_addr: String,
+    pub stream_name: String,
+    pub consumer_name: String,
+    pub subject_prefix: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiverConfig {
+    pub nats: Nats,
+    pub db_url: String,
+    pub uuid: String,
+}
+
+impl ArchiverConfig {
+    pub fn new() -> anyhow::Result<Self> {
+        // Required, but we're not checking its a valid UUIDv7
+        let id = env::var("ARCHIVER_UUID")?;
+        let mode = env::var("ARCHIVER_MODE")?;
+
+        // Config file is optional; env. vars can substitute and will override
+        let cfg_path = match mode.as_str() {
+            // Templated cfg created on deploy
+            "production" => format!("/etc/gossip_archiver/{id}/config.toml"),
+            // One-off, likely running from repo root
+            "local" => "archiver_config.toml".to_string(),
+            _ => anyhow::bail!("Unknown ARCHIVER_MODE: {mode}"),
+        };
+
+        let cfg = Config::builder()
+            // All default config values
+            .set_default("nats.server_addr", "localhost:4222")?
+            .set_default("nats.stream_name", "main")?
+            .set_default("nats.consumer_name", "gossip_recv")?
+            .set_default("nats.subject_prefix", "observer.*")?
+            .add_source(File::with_name(&cfg_path).required(false))
+            .add_source(Environment::with_prefix("ARCHIVER"))
+            .build()?;
+
+        cfg.try_deserialize().map_err(anyhow::Error::new)
+    }
 }
 
 #[cfg(test)]

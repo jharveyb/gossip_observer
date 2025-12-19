@@ -3,6 +3,7 @@ use std::time::Duration;
 use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
+use gossip_archiver::ArchiverConfig;
 use gossip_archiver::INTER_MSG_DELIM;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
@@ -24,19 +25,18 @@ static DB_WRITE_BATCH_SIZE: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // TODO: decide how we want to load connection strings
-    // for now, load from .env
     dotenvy::dotenv()?;
+    let cfg = ArchiverConfig::new()?;
 
     // Enable tokio-console
     console_subscriber::init();
 
-    // TODO: proper INI cfg
-    let nats_server = "100.68.143.113:4222";
-    let nats_client = async_nats::connect(nats_server).await?;
+    println!("Gossip archiver: {}", cfg.uuid);
+    let nats_client = async_nats::connect(cfg.nats.server_addr).await?;
     let stream_ctx = jetstream::new(nats_client);
-    let stream = upsert_stream(stream_ctx).await?;
-    let consumer = upsert_consumer(stream).await?;
+    let stream = upsert_stream(stream_ctx, &cfg.nats.stream_name, &cfg.nats.subject_prefix).await?;
+    let consumer =
+        upsert_consumer(stream, &cfg.nats.consumer_name, &cfg.nats.subject_prefix).await?;
     let msg_stream = consumer.messages().await?;
     println!("Set up NATS stream and consumer");
 
@@ -49,9 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let (buf_meta_tx, buf_meta_rx) = unbounded_channel();
     let (buf_tick_tx, buf_tick_rx) = tokio_channel(1);
 
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/gossip_observer".to_string());
-
+    let database_url = cfg.db_url.to_owned();
     // Ensure database exists
     ensure_database_exists(&database_url).await?;
 
@@ -385,12 +383,15 @@ pub async fn msg_decoder(
     }
 }
 
-pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream::stream::Stream> {
-    let stream_name = "main";
+pub async fn upsert_stream(
+    ctx: jetstream::Context,
+    stream_name: &str,
+    subjects: &str,
+) -> anyhow::Result<jetstream::stream::Stream> {
     let stream = ctx
         .get_or_create_stream(jetstream::stream::Config {
             name: stream_name.to_string(),
-            subjects: vec!["observer.*".to_string()],
+            subjects: vec![subjects.to_string()],
             retention: jetstream::stream::RetentionPolicy::WorkQueue,
             storage: jetstream::stream::StorageType::Memory,
             ..Default::default()
@@ -401,9 +402,10 @@ pub async fn upsert_stream(ctx: jetstream::Context) -> anyhow::Result<jetstream:
 
 pub async fn upsert_consumer(
     ctx: jetstream::stream::Stream,
+    cons_name: &str,
+    filter_subject: &str,
 ) -> anyhow::Result<jetstream::consumer::PullConsumer> {
     // TODO: review ack policy, behavior if collector is down for maintenance
-    let cons_name = "gossip_recv";
     let consumer = ctx
         .get_or_create_consumer(
             cons_name,
@@ -411,7 +413,7 @@ pub async fn upsert_consumer(
                 durable_name: Some(cons_name.to_string()),
                 name: Some(cons_name.to_string()),
                 ack_policy: jetstream::consumer::AckPolicy::Explicit,
-                filter_subject: "observer.*".to_string(),
+                filter_subject: filter_subject.to_string(),
                 ..Default::default()
             },
         )
@@ -420,15 +422,10 @@ pub async fn upsert_consumer(
 }
 
 pub async fn ensure_database_exists(database_url: &str) -> anyhow::Result<()> {
-    // Parse the database URL to extract database name and construct a URL to 'postgres' db
-    // TODO: proper validation
-    let db_name = database_url.rsplit('/').next().unwrap_or("gossip_observer");
-
-    let postgres_url = database_url
+    let (db_host, db_name) = database_url
         .rsplit_once('/')
-        .map(|x| x.0)
-        .unwrap_or("postgres://postgres:postgres@localhost");
-    let postgres_url = format!("{}/postgres", postgres_url);
+        .ok_or_else(|| anyhow::anyhow!("DB connection string malformed"))?;
+    let postgres_url = format!("{}/postgres", db_host);
 
     // Connect to the default 'postgres' database
     let pool = PgPoolOptions::new()

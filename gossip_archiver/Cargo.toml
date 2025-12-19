@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-name = "gossip_archiver"
+name    = "gossip_archiver"
 version = "0.1.0"
 
 [dependencies]
@@ -12,11 +12,13 @@ chrono = { version = "0.4", default-features = false, features = [
   "clock",
   "serde",
 ] }
+config = { version = "0.15.19", features = ["toml"] }
 console-subscriber = "0.5.0"
 dotenvy = "0.15.7"
 futures = "0.3.31"
 itertools = "0.14"
 lightning = { version = "0.2.0-rc1", features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.8.0", features = [
   "runtime-tokio",
   "tls-rustls",
