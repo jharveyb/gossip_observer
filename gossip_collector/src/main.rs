@@ -223,10 +223,14 @@ async fn main() -> anyhow::Result<()> {
     let grpc_node_handle = node.clone();
     let grpc_addr = format!("{}:{}", server_config.hostname, server_config.grpc_port).parse()?;
     let grpc_service = grpc_server::create_service(grpc_node_handle);
+    let grpc_reflect_compat = observer_proto::collector_reflection_service_v1alpha()?;
+    let grpc_reflect = observer_proto::collector_reflection_service_v1()?;
     let grpc_server = tokio::spawn(async move {
         println!("Starting gRPC server on {}", grpc_addr);
         TonicServer::builder()
             .add_service(grpc_service)
+            .add_service(grpc_reflect)
+            .add_service(grpc_reflect_compat)
             .serve_with_shutdown(grpc_addr, grpc_stop_signal.cancelled())
             .await
     });
