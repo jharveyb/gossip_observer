@@ -9,7 +9,6 @@ use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMe
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use tokio::runtime::Handle;
 use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
@@ -61,10 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     let nats_recv = raw_msg_tx.clone();
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
-    let decode_handle = tokio::task::spawn_blocking({
-        let handle = Handle::current();
-        move || handle.block_on(async move { msg_decoder(raw_msg_rx, msg_tx).await })
-    });
+    let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
     let db_handle = tokio::spawn(async move {
         db_write_handler(pool, buf_raw_rx, buf_timings_rx, buf_meta_rx, buf_tick_rx).await
     });
