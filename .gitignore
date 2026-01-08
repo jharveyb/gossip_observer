@@ -13,9 +13,11 @@
 *.duckdb*
 **/archiver_logs*
 **/collector_logs*
+node_addrs*
 
 .env
 archiver_config*
+collector_config*
 **/file_descriptor_set.bin
 
 infra/ansible/vault.yml

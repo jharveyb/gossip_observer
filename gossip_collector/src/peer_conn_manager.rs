@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use lightning::ln::msgs::SocketAddress;
 use observer_common::token_bucket::TokenBucket;
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     time::{Interval, sleep},
 };
 use tokio_util::sync::CancellationToken;

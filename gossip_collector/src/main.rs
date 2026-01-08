@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use anyhow::anyhow;
+use bitcoin::Network;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use rand::seq::SliceRandom;
@@ -78,11 +79,11 @@ async fn main() -> anyhow::Result<()> {
     console_subscriber::init();
 
     println!("Starting gossip collector");
-    // Load configuration
-    let ldk_config = NodeConfig::load_from_ini("config.ini")?;
-    let server_config = ServerConfig::load_from_ini("config.ini")?;
-    let nats_config = NATSConfig::load_from_ini("config.ini")?;
+    dotenvy::dotenv()?;
+    let cfg = CollectorConfig::new()?;
+    println!("Gossip collector: {}", cfg.uuid);
 
+    // TODO: move peer selection to controller
     let mut rng = rand::rng();
     let node_list = read_to_string("./node_addrs_clearnet.txt")?;
     let mut node_list = node_list.lines().map(String::from).collect::<Vec<_>>();
@@ -99,15 +100,15 @@ async fn main() -> anyhow::Result<()> {
         fee_rate_cache_update_interval_secs: 600,
     };
 
-    builder.set_network(ldk_config.network);
+    builder.set_network(Network::from_core_arg(&cfg.ldk.network)?);
     builder.set_chain_source_esplora(
-        ldk_config.chain_source_esplora,
+        cfg.ldk.esplora.clone(),
         Some(EsploraSyncConfig {
             background_sync_config: Some(sync_cfg),
         }),
     );
 
-    let log_level = match ldk_config.log_level.to_lowercase().as_str() {
+    let log_level = match cfg.ldk.log_level.to_lowercase().as_str() {
         "error" => LogLevel::Error,
         "warn" => LogLevel::Warn,
         "info" => LogLevel::Info,
@@ -121,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
     // gossip messages being exported by that node.
     let log_file_path = format!(
         "{}/{}",
-        ldk_config.storage_dir_path,
+        cfg.ldk.storage_dir,
         ldk_node::config::DEFAULT_LOG_FILENAME
     );
     let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
@@ -158,8 +159,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let exporter_stop_signal = stop_signal.child_token();
+    let nats_cfg = NATSConfig {
+        server_addr: cfg.nats.server_addr.clone(),
+        stream: cfg.nats.stream.clone(),
+    };
     let mut nats_exporter =
-        NATSExporter::new(nats_config, peer_conn_manager.clone(), exporter_stop_signal);
+        NATSExporter::new(nats_cfg, peer_conn_manager.clone(), exporter_stop_signal);
     nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
 
@@ -168,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
 
     builder.set_custom_logger(Arc::new(writer_exporter));
     builder.set_gossip_source_p2p();
-    builder.set_storage_dir_path(ldk_config.storage_dir_path);
+    builder.set_storage_dir_path(cfg.ldk.storage_dir);
 
     let node = Arc::new(builder.build()?);
     node.start()?;
@@ -195,13 +200,13 @@ async fn main() -> anyhow::Result<()> {
     let actix_stop_signal = stop_signal.child_token();
     let grpc_stop_signal = stop_signal.child_token();
 
-    println!("Collector runtime: {} minutes", server_config.runtime);
+    println!("Collector runtime: {} minutes", cfg.apiserver.runtime);
     println!("Start time: {}", chrono::Utc::now().to_rfc3339());
-    let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
+    let deadline_waiter = sleep(Duration::from_secs(cfg.apiserver.runtime * 60));
 
     // Start gRPC server
     let grpc_node_handle = node.clone();
-    let grpc_addr = format!("{}:{}", server_config.hostname, server_config.grpc_port).parse()?;
+    let grpc_addr = format!("{}:{}", cfg.apiserver.hostname, cfg.apiserver.grpc_port).parse()?;
     let grpc_service = grpc_server::create_service(grpc_node_handle);
     let grpc_reflect_compat = observer_proto::collector_reflection_service_v1alpha()?;
     let grpc_reflect = observer_proto::collector_reflection_service_v1()?;
@@ -258,7 +263,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .workers(2)
         .shutdown_signal(actix_stop_signal.cancelled_owned())
-        .bind((server_config.hostname.as_str(), server_config.actix_port))?
+        .bind((cfg.apiserver.hostname.as_str(), cfg.apiserver.actix_port))?
         .run(),
         grpc_server,
     );

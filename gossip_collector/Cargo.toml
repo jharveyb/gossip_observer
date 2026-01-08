@@ -12,7 +12,8 @@ chrono = { version = "0.4", default-features = false, features = [
   "clock",
   "serde",
 ] }
-configparser = "3.0"
+config = { version = "0.15.19", features = ["toml"] }
+dotenvy = "0.15.7"
 ldk-node = { version = "0.7" }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.47", features = ["full", "tracing"] }
