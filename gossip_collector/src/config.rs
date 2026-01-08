@@ -18,7 +18,6 @@ pub struct ServerConfig {
     pub actix_port: u16,
     pub grpc_port: u16,
     pub runtime: u64,
-    pub startup_delay: u64,
 }
 
 // For NATS message upload
@@ -73,7 +72,6 @@ impl Default for ServerConfig {
             actix_port: 8080,
             grpc_port: 50051,
             runtime: 60,
-            startup_delay: 120,
         }
     }
 }
@@ -101,11 +99,6 @@ impl ServerConfig {
             && let Ok(runtime) = runtime.parse::<u64>()
         {
             cfg.runtime = runtime;
-        }
-        if let Some(startup_delay) = config.get("server", "startup_delay")
-            && let Ok(startup_delay) = startup_delay.parse::<u64>()
-        {
-            cfg.startup_delay = startup_delay;
         }
 
         Ok(cfg)

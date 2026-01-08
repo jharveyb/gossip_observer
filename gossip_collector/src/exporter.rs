@@ -1,6 +1,8 @@
 use crate::logger::Writer;
+use crate::peer_conn_manager::PeerConnManagerHandle;
 use async_nats::jetstream;
 use ldk_node::logger::{LogRecord, LogWriter};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -20,7 +22,6 @@ pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
 static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
-static EXPORT_DELAY: OnceLock<u64> = OnceLock::new();
 
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
@@ -33,9 +34,6 @@ pub trait Exporter: Send + Sync {
 
     // Provide extra data to be included alongside each exported message.
     fn set_export_metadata(&self, meta: String) -> Result<(), String>;
-
-    // Set the global delay before exporting any messages.
-    fn set_export_delay(&self, delay: u64) -> anyhow::Result<()>;
 }
 
 pub struct StdoutExporter {}
@@ -49,16 +47,13 @@ impl Exporter for StdoutExporter {
     fn set_export_metadata(&self, _meta: String) -> Result<(), String> {
         Ok(())
     }
-
-    fn set_export_delay(&self, _delay: u64) -> anyhow::Result<()> {
-        Ok(())
-    }
 }
 
 pub struct NATSExporter {
     cfg: NATSConfig,
     // TODO: How do we join on this later?
     pub tasks: JoinSet<()>,
+    conn_manager: PeerConnManagerHandle,
     export_tx: UnboundedSender<String>,
     export_rx: Option<UnboundedReceiver<String>>,
     stop_signal: CancellationToken,
@@ -81,16 +76,14 @@ impl Exporter for NATSExporter {
         MSG_SUFFIX.get_or_init(|| format!("{}{}", INTRA_MSG_DELIM, meta));
         Ok(())
     }
-
-    fn set_export_delay(&self, delay: u64) -> anyhow::Result<()> {
-        println!("NATS export delay: {} seconds", delay);
-        EXPORT_DELAY.get_or_init(|| delay);
-        Ok(())
-    }
 }
 
 impl NATSExporter {
-    pub fn new(cfg: NATSConfig, stop_signal: CancellationToken) -> Self {
+    pub fn new(
+        cfg: NATSConfig,
+        conn_manager: PeerConnManagerHandle,
+        stop_signal: CancellationToken,
+    ) -> Self {
         // Bridge sync -> async, since a sync send won't block for an unbounded channel.
         let (export_tx, export_rx) = tokio::sync::mpsc::unbounded_channel();
         let tasks = JoinSet::new();
@@ -98,6 +91,7 @@ impl NATSExporter {
         Self {
             cfg,
             tasks,
+            conn_manager,
             export_tx,
             export_rx: Some(export_rx),
             stop_signal,
@@ -120,9 +114,10 @@ impl NATSExporter {
             });
         }
         {
+            let conn_manager = self.conn_manager.clone();
             let export_stop_signal = self.stop_signal.child_token();
             self.tasks.spawn(async move {
-                Self::publish_msgs(stream_ctx, nats_rx, export_stop_signal).await
+                Self::publish_msgs(stream_ctx, nats_rx, conn_manager, export_stop_signal).await
             });
         }
         Ok(())
@@ -137,7 +132,6 @@ impl NATSExporter {
         tx: Sender<String>,
         stop_signal: CancellationToken,
     ) {
-        let start_time = std::time::Instant::now();
         loop {
             let msg = match tokio::select! {
                 rx_msg = rx.recv() => rx_msg,
@@ -146,12 +140,6 @@ impl NATSExporter {
                 }
             } {
                 Some(mut rx_msg) => {
-                    // Drop any messages within the startup window.
-                    // TODO: Triggger this for every new connection vs. globally
-                    if start_time.elapsed().as_secs() < *EXPORT_DELAY.get().unwrap() {
-                        continue;
-                    }
-
                     // Add our node ID to the message.
                     rx_msg.push_str(MSG_SUFFIX.get().unwrap());
                     rx_msg
@@ -183,6 +171,7 @@ impl NATSExporter {
     async fn publish_msgs(
         ctx: jetstream::Context,
         mut rx: Receiver<String>,
+        mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
     ) {
         let mut total_upload_time = 0;
@@ -191,12 +180,54 @@ impl NATSExporter {
         let mut upload_count = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
         let mut msg_batch = Vec::with_capacity(NATS_BATCH_SIZE);
+
+        // Local version of the peer filter set; mark the initial value as
+        // changed before we start.
+        let mut msg_filter_rules = HashSet::new();
+        msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
         loop {
             tokio::select! {
-                // Do we want recv_many here?
+                // Prioritize receiving config updates over other events.
+                biased;
+
+                _ = conn_manager.pending_notifier.changed() => {
+                    // After a changed() call, the value is already marked as seen, so borrow() could be used.
+                    // borrow_and_update() is used to safely handle a potential race:
+                    // https://docs.rs/tokio/latest/tokio/sync/watch/index.html#borrow_and_update-versus-borrow
+                    msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
+
+                    // Sort for readability.
+                    let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
+                    let filter_size = filter_fmt.len();
+                    filter_fmt.sort_unstable();
+                    println!("exporter: loaded new filter cfg: size {}", filter_size);
+                    println!("{:?}", filter_fmt);
+                }
+                _ = stop_signal.cancelled() => {
+                    break;
+                }
                 rx_msg = rx.recv() => {
                     match rx_msg {
-                        Some(msg) => msg_batch.push(msg),
+                        Some(msg) => {
+                            // Filter out messages from specific peers we've
+                            // connected to recently. Peer pubkey is field 2.
+                            match msg.split(INTRA_MSG_DELIM).nth(1) {
+                                Some(recv_peer) => {
+                                    if !msg_filter_rules.contains(recv_peer) {
+                                        msg_batch.push(msg)
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                                // Should not happen, this means msg formatting
+                                // is broken.
+                                None => {
+                                    println!("internal: publish_msgs: rx msg format broken");
+                                    println!("msg: {msg}");
+                                    break;
+                                }
+                            }
+                        },
                         None => {
                             println!("internal: publish_msgs: rx stream closed");
                             break;
@@ -206,13 +237,10 @@ impl NATSExporter {
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
                         println!(
-                            "Avg. NATS upload + ACK time: {}us",
+                            "Avg. NATS upload + ACK time: {}ms",
                             total_upload_time / upload_count
                         );
                     }
-                }
-                _ = stop_signal.cancelled() => {
-                    break;
                 }
             }
 
@@ -239,7 +267,7 @@ impl NATSExporter {
                     }
                 };
 
-                msg_submit_interval = msg_send_time.elapsed().as_micros();
+                msg_submit_interval = msg_send_time.elapsed().as_millis();
                 total_upload_time += msg_submit_interval;
                 upload_count += 1;
             }

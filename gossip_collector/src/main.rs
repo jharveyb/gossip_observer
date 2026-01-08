@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
@@ -7,7 +8,6 @@ use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use rand::seq::SliceRandom;
 use std::fs::read_to_string;
-use tokio::task::JoinSet;
 use tonic::transport::Server as TonicServer;
 
 use tokio::time::interval;
@@ -18,8 +18,11 @@ mod exporter;
 mod grpc_server;
 mod logger;
 mod node_manager;
+mod peer_conn_manager;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
+use crate::node_manager::parse_peer_specifier;
+use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 use config::{NATSConfig, NodeConfig, ServerConfig};
 
 #[get("/instanceid")]
@@ -124,11 +127,39 @@ async fn main() -> anyhow::Result<()> {
     let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
+    // Create our peer connection manager. This tracks which peers we've connected
+    // to recently, and a list of eligible peers to connect to. Separate tasks
+    // will attempt to connect to new peers to keep our peer count
+    // stable. An eligible peer list must be passed in by the Controller.
+    let peer_conn_manager = PeerConnManagerHandle::new();
+
+    // Load an eligible peer list
+    let initial_peer_list_size = 250;
+    for _ in 0..initial_peer_list_size {
+        let peer_info = node_list.pop().unwrap();
+        let peer_info = parse_peer_specifier(&peer_info).unwrap();
+        peer_conn_manager.add_eligible_peer(peer_info);
+    }
+
+    // The pending connection sweeper will maintain our message filter list by
+    // removing peer pubkeys once we've been connected to them for enough time
+    // to have (likely) finished any gossip query request/responses, which would
+    // pollute our data.
+    let pending_conn_waiter = interval(Duration::from_secs(60));
+
+    // 10 minute delay.
+    let pending_conn_delay = chrono::TimeDelta::seconds(10 * 60);
+    let bg_conn_sweeper_stop_signal = stop_signal.child_token();
+    let pending_conn_task = tokio::spawn(pending_conn_sweeper(
+        peer_conn_manager.clone(),
+        pending_conn_waiter,
+        bg_conn_sweeper_stop_signal,
+        pending_conn_delay,
+    ));
+
     let exporter_stop_signal = stop_signal.child_token();
-    let mut nats_exporter = NATSExporter::new(nats_config, exporter_stop_signal);
-    nats_exporter
-        .set_export_delay(server_config.startup_delay)
-        .unwrap();
+    let mut nats_exporter =
+        NATSExporter::new(nats_config, peer_conn_manager.clone(), exporter_stop_signal);
     nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
 
@@ -149,75 +180,24 @@ async fn main() -> anyhow::Result<()> {
         .set_export_metadata(node.node_id().to_string())
         .map_err(anyhow::Error::msg)?;
 
+    // The peer connection monitor will use the eligible peer list to maintain
+    // our connection count above a target value.
+    let target_peer_count = Arc::new(AtomicUsize::new(25));
+    let peer_monitor_waiter = interval(Duration::from_secs(60));
+    let conn_monitor_task = tokio::spawn(peer_count_monitor(
+        node.clone(),
+        peer_conn_manager.clone(),
+        peer_monitor_waiter,
+        stop_signal.child_token(),
+        target_peer_count.clone(),
+    ));
+
     let actix_stop_signal = stop_signal.child_token();
-    let bg_stats_stop_signal = stop_signal.child_token();
     let grpc_stop_signal = stop_signal.child_token();
 
     println!("Collector runtime: {} minutes", server_config.runtime);
     println!("Start time: {}", chrono::Utc::now().to_rfc3339());
     let deadline_waiter = sleep(Duration::from_secs(server_config.runtime * 60));
-
-    let mut node_connect_init = JoinSet::new();
-    let mut task_id = 0;
-
-    // Parallel connection attempts.
-    let max_tasks = 5;
-
-    // Max. # of peers we'll try to connect to.
-    let total_tasks = 80;
-    let connect_update_delay = Duration::from_millis(100);
-
-    let mut peers = node_list.into_iter().take(total_tasks).collect::<Vec<_>>();
-    for _ in 0..max_tasks {
-        let next_peer = peers.pop().unwrap();
-        let node_handle = node.clone();
-        // TODO: Why do so many connections fail? Is this a missing feature bit with LDK / rust-lighning?
-        node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));
-        task_id += 1;
-        sleep(connect_update_delay).await;
-    }
-    println!(
-        "Scheduled {} of {} initial connections",
-        task_id, total_tasks
-    );
-
-    let node_handle = node.clone();
-    let init_connections = tokio::spawn(async move {
-        while let Some(res) = node_connect_init.join_next().await {
-            if let Err(e) = res {
-                println!("Tokio: init connect task failed: {:#?}", e);
-            }
-
-            if task_id < total_tasks {
-                if task_id % 100 == 0 {
-                    println!(
-                        "Scheduled {} of {} initial connections",
-                        task_id, total_tasks
-                    );
-                }
-
-                let next_peer = peers.pop().unwrap();
-                let node_handle = node_handle.clone();
-                node_connect_init.spawn(node_manager::node_peer_connect(node_handle, next_peer));
-                task_id += 1;
-                sleep(connect_update_delay).await;
-            }
-        }
-        println!("Finished adding peers: {}", chrono::Utc::now().to_rfc3339());
-        println!("Starting peers:");
-        let peers = node_manager::current_peers(node_handle.clone())
-            .await
-            .unwrap();
-        let peers = peers
-            .iter()
-            .filter(|p| p.is_connected)
-            .map(|p| format!("{}@{}", p.node_id, p.address))
-            .collect::<Vec<_>>();
-        for peer in peers {
-            println!("{peer}");
-        }
-        println!("Starting peers:");
-    });
 
     // Start gRPC server
     let grpc_node_handle = node.clone();
@@ -233,28 +213,6 @@ async fn main() -> anyhow::Result<()> {
             .add_service(grpc_reflect_compat)
             .serve_with_shutdown(grpc_addr, grpc_stop_signal.cancelled())
             .await
-    });
-
-    let mut stats_waiter = interval(exporter::STATS_INTERVAL);
-    let node_stats_handle = node.clone();
-    let bg_stats = tokio::spawn(async move {
-        let mut peer_count = 0;
-        loop {
-            tokio::select! {
-                _ = stats_waiter.tick() => {
-                    let peer_info = node_stats_handle.list_peers();
-                    let new_peer_count = peer_info.len();
-
-                    println!("Peer count: {}", new_peer_count);
-                    let delta = (new_peer_count as i64) - (peer_count as i64);
-                    println!("Delta over {:?}: {}", exporter::STATS_INTERVAL, delta);
-                    peer_count = new_peer_count;
-                }
-                _ = bg_stats_stop_signal.cancelled() => {
-                    break;
-                }
-            }
-        }
     });
 
     // TODO: what do we want to dump from node before shutdown?
@@ -286,10 +244,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let final_res = tokio::join!(
-        bg_stats,
-        init_connections,
+        pending_conn_task,
+        conn_monitor_task,
         deadline,
-        grpc_server,
         HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(AppState { node: node.clone() }))
@@ -302,15 +259,17 @@ async fn main() -> anyhow::Result<()> {
         .workers(2)
         .shutdown_signal(actix_stop_signal.cancelled_owned())
         .bind((server_config.hostname.as_str(), server_config.actix_port))?
-        .run()
+        .run(),
+        grpc_server,
     );
 
     // lol
     final_res.0?;
     final_res.1?;
     final_res.2?;
-    final_res.3??;
-    final_res.4?;
+    final_res.3?;
+    final_res.4??;
+    // final_res.5?;
 
     Ok(())
 }
