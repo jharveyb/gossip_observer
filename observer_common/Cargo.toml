@@ -8,3 +8,4 @@ anyhow         = "1.0"
 bitcoin        = "0.32.4"
 lightning      = { version = "0.2.0-rc1", features = ["std"] }
 observer_proto = { path = "../observer_proto" }
+tokio          = { version = "1.47", features = ["full", "tracing"] }
