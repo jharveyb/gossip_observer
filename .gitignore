@@ -15,6 +15,7 @@
 **/collector_logs*
 
 .env
+archiver_config*
 **/file_descriptor_set.bin
 
 infra/ansible/vault.yml
