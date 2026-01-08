@@ -5,6 +5,7 @@ members = [
         "gossip_archiver",
         "observer_proto",
         "observer_common",
+        "tor_proxy",
 ]
 resolver = "3"
 

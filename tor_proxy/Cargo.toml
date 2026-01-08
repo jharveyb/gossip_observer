@@ -1,0 +1,11 @@
+[package]
+edition = "2024"
+name    = "tor_proxy"
+version = "0.1.0"
+
+[dependencies]
+tokio-io-timeout = "1.2.1"
+
+anyhow = "1.0"
+tokio  = { version = "1.47", features = ["full", "tracing"] }
+tokio-socks = "0.5.2"
