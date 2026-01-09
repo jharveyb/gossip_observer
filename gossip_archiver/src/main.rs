@@ -3,8 +3,8 @@ use std::time::Duration;
 use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
-use gossip_archiver::ArchiverConfig;
 use gossip_archiver::INTER_MSG_DELIM;
+use gossip_archiver::config::ArchiverConfig;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
@@ -14,13 +14,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
 
-// TODO: move to some gossip_common module
 static STATS_INTERVAL: Duration = Duration::from_secs(60);
-static DB_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-
-// Adjust this based on observed ingest rate
-// Seeing 400-500 msg/min with 600-700 peers; 500*256 = 128k individual msgs, or ~2133 msg/sec.
-static DB_WRITE_BATCH_SIZE: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,7 +33,6 @@ async fn main() -> anyhow::Result<()> {
     let msg_stream = consumer.messages().await?;
     println!("Set up NATS stream and consumer");
 
-    // TODO: are unbounded chans a risk? we can enforce mem. limits with systemd, etc.
     let (raw_msg_tx, raw_msg_rx) = unbounded_channel();
     let (msg_tx, msg_rx) = unbounded_channel();
 
@@ -62,10 +55,27 @@ async fn main() -> anyhow::Result<()> {
     let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
     let db_handle = tokio::spawn(async move {
-        db_write_handler(pool, buf_raw_rx, buf_timings_rx, buf_meta_rx, buf_tick_rx).await
+        db_write_handler(
+            pool,
+            buf_raw_rx,
+            buf_timings_rx,
+            buf_meta_rx,
+            buf_tick_rx,
+            cfg.database.batch_size,
+        )
+        .await
     });
     let db_write_ticker_handle = tokio::spawn(async move {
-        db_write_ticker(msg_rx, buf_raw_tx, buf_timings_tx, buf_meta_tx, buf_tick_tx).await
+        db_write_ticker(
+            msg_rx,
+            buf_raw_tx,
+            buf_timings_tx,
+            buf_meta_tx,
+            buf_tick_tx,
+            cfg.database.flush_interval,
+            cfg.database.batch_size,
+        )
+        .await
     });
 
     match tokio::try_join!(
@@ -88,13 +98,16 @@ pub async fn db_write_ticker(
     buf_timings_tx: UnboundedSender<MessageNodeTimings>,
     buf_meta_tx: UnboundedSender<MessageMetadata>,
     buf_tick_tx: Sender<()>,
+    flush_interval: u32,
+    batch_size: u32,
 ) -> anyhow::Result<()> {
-    let mut flush_waiter = time::interval(DB_FLUSH_INTERVAL);
+    let mut flush_waiter = time::interval(Duration::from_secs(flush_interval.into()));
     let mut stats_waiter = time::interval(STATS_INTERVAL);
 
     let mut poll_counter = 0;
     let mut full_counter = 0;
     let mut msg_counter = 0;
+    let batch_size = batch_size as usize;
 
     // Signal another task to write buffered values to the DB.
     let signal_flush = async || -> anyhow::Result<usize> {
@@ -104,7 +117,8 @@ pub async fn db_write_ticker(
     };
 
     println!("Starting DB write ticker");
-    println!("Flush interval: {DB_FLUSH_INTERVAL:?}");
+    println!("Flush interval: {flush_interval:?}");
+    println!("Batch size: {batch_size:?}");
     println!("Stats interval: {STATS_INTERVAL:?}");
 
     let mut gossip_msg = None;
@@ -124,13 +138,13 @@ pub async fn db_write_ticker(
                     }
                 }
             }
+            _ = flush_waiter.tick() => {
+                flush_tick = true;
+            }
             _ = stats_waiter.tick() => {
                 println!("Flush count: {poll_counter}, Full buffer count: {full_counter}");
                 poll_counter = 0;
                 full_counter = 0;
-            }
-            _ = flush_waiter.tick() => {
-                flush_tick = true;
             }
         };
 
@@ -143,7 +157,7 @@ pub async fn db_write_ticker(
         if let Some(msg) = gossip_msg {
             // Check if we've received enough messages to fill a batch since the
             // last flush.
-            if msg_counter >= DB_WRITE_BATCH_SIZE {
+            if msg_counter >= batch_size {
                 msg_counter = signal_flush().await?;
                 full_counter += 1;
             }
@@ -165,11 +179,14 @@ pub async fn db_write_handler(
     mut buf_timings_rx: UnboundedReceiver<MessageNodeTimings>,
     mut buf_meta_rx: UnboundedReceiver<MessageMetadata>,
     mut buf_tick_rx: Receiver<()>,
+    batch_size: u32,
 ) -> anyhow::Result<()> {
     println!("Starting DB writer");
-    let mut raw_msgs = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
-    let mut timings = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
-    let mut metas = Vec::with_capacity(DB_WRITE_BATCH_SIZE);
+    println!("Batch size: {batch_size:?}");
+    let batch_size = batch_size as usize;
+    let mut raw_msgs = Vec::with_capacity(batch_size);
+    let mut timings = Vec::with_capacity(batch_size);
+    let mut metas = Vec::with_capacity(batch_size);
     let mut should_flush = false;
     loop {
         // TODO: clean up our closed chan. handling
@@ -216,14 +233,12 @@ pub async fn db_write_handler(
             }
 
             // Sort our 'time-series' data to improve DB behavior.
-            // TODO: move sort to spawn_blocking? not sure if worth
             timings.sort_by_key(|x| x.net_timestamp);
 
             // Move our values into the batch writer instead of cloning.
-            let db_raws = std::mem::replace(&mut raw_msgs, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
-            let db_timings =
-                std::mem::replace(&mut timings, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
-            let db_metas = std::mem::replace(&mut metas, Vec::with_capacity(DB_WRITE_BATCH_SIZE));
+            let db_raws = std::mem::replace(&mut raw_msgs, Vec::with_capacity(batch_size));
+            let db_timings = std::mem::replace(&mut timings, Vec::with_capacity(batch_size));
+            let db_metas = std::mem::replace(&mut metas, Vec::with_capacity(batch_size));
 
             db_batch_write(&pool, db_raws, db_timings, db_metas).await?;
         }
@@ -350,13 +365,13 @@ pub async fn nats_reader(
 }
 
 // split a big NATS msg into multiple decoded msgs
+// TODO: add cancel token
 pub async fn msg_decoder(
     mut raw_msg_rx: UnboundedReceiver<Message>,
     msg_tx: UnboundedSender<ExportedGossip>,
 ) -> anyhow::Result<()> {
     let mut stats_waiter = time::interval(STATS_INTERVAL);
     loop {
-        // TODO: add graceful shutdown, some other branch?
         tokio::select! {
             rx_msg = raw_msg_rx.recv() => {
                 match rx_msg {
