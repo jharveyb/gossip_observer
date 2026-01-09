@@ -124,7 +124,9 @@ impl PeerConnManager {
                 self.eligible_peers.push_back(peer);
             }
             ConnManagerMsg::RotateEligiblePeers => {
-                self.eligible_peers.rotate_left(1);
+                if !self.eligible_peers.is_empty() {
+                    self.eligible_peers.rotate_left(1);
+                }
             }
             ConnManagerMsg::EmptyEligiblePeers => {
                 self.eligible_peers.clear();
