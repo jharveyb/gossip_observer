@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use anyhow::anyhow;
 use bitcoin::Network;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
@@ -24,53 +23,6 @@ use crate::config::CollectorConfig;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
-
-#[get("/instanceid")]
-async fn instanceid(data: web::Data<AppState>) -> impl Responder {
-    // Derived from seed + network + IP
-    let node_id = data.node.node_id().to_string();
-    let network = data.node.config().network.to_string();
-    HttpResponse::Ok().body(format!("Node ID: {node_id}, Network: {network}"))
-}
-
-#[get("/node/config")]
-async fn node_config(data: web::Data<AppState>) -> impl Responder {
-    let cfg = data.node.config();
-    format!("{cfg:?}")
-}
-
-#[post("/node/connect")]
-async fn node_connect(data: web::Data<AppState>, body: String) -> impl Responder {
-    let connection_string = body.trim();
-
-    if let Err(e) = node_manager::parse_peer_specifier(connection_string) {
-        return HttpResponse::BadRequest().body(e.to_string());
-    };
-
-    let node = data.node.clone();
-    match node_manager::node_peer_connect(node, connection_string.to_owned()).await {
-        Ok(_) => HttpResponse::Ok().body("Connected successfully"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-    }
-}
-
-#[get("/node/graph_stats")]
-async fn graph(data: web::Data<AppState>) -> impl Responder {
-    let node_count = data.node.network_graph().list_nodes().len();
-    let channel_count = data.node.network_graph().list_channels().len();
-    HttpResponse::Ok().body(format!("Node #: {node_count}, Channel #: {channel_count}"))
-}
-
-#[get("/node/peers")]
-async fn node_peers(data: web::Data<AppState>) -> impl Responder {
-    let peer_info = data.node.list_peers();
-    // TODO: filter / reformat
-    HttpResponse::Ok().body(format!("{peer_info:?}"))
-}
-
-struct AppState {
-    node: Arc<ldk_node::Node>,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -252,33 +204,13 @@ async fn main() -> anyhow::Result<()> {
         stop_signal.cancel();
     });
 
-    let final_res = tokio::join!(
-        pending_conn_task,
-        conn_monitor_task,
-        deadline,
-        HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(AppState { node: node.clone() }))
-                .service(instanceid)
-                .service(node_config)
-                .service(node_peers)
-                .service(node_connect)
-                .service(graph)
-        })
-        .workers(2)
-        .shutdown_signal(actix_stop_signal.cancelled_owned())
-        .bind((cfg.apiserver.hostname.as_str(), cfg.apiserver.actix_port))?
-        .run(),
-        grpc_server,
-    );
+    let final_res = tokio::join!(pending_conn_task, conn_monitor_task, deadline, grpc_server);
 
     // lol
     final_res.0?;
     final_res.1?;
     final_res.2?;
-    final_res.3?;
-    final_res.4??;
-    // final_res.5?;
+    final_res.3??;
 
     Ok(())
 }
