@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 
 use observer_proto::collector as CollectorRPC;
 
-use crate::peer_conn_manager::PeerConnManagerHandle;
+use crate::{node_manager::current_peers, peer_conn_manager::PeerConnManagerHandle};
 
 // Any state we need to implement our RPC server.
 pub struct CollectorServiceImpl {
@@ -68,6 +68,26 @@ impl CollectorRPC::collector_service_server::CollectorService for CollectorServi
         let target = req.into_inner().target;
         self.target_peer_count.store(target as usize, SeqCst);
         Ok(Response::new(CollectorRPC::TargetPeerCountResponse {}))
+    }
+
+    async fn get_current_peers(
+        &self,
+        _req: Request<CollectorRPC::CurrentPeersRequest>,
+    ) -> Result<Response<CollectorRPC::CurrentPeersResponse>, Status> {
+        let peers = current_peers(self.node.clone())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut peers: Vec<_> = peers
+            .iter()
+            .map(|d| CollectorRPC::PeerDetails {
+                pubkey: d.node_id.to_string(),
+                socket_addr: d.address.to_string(),
+                is_persisted: d.is_persisted,
+                is_connected: d.is_connected,
+            })
+            .collect();
+        peers.sort_unstable_by(|a, b| a.pubkey.cmp(&b.pubkey));
+        Ok(Response::new(CollectorRPC::CurrentPeersResponse { peers }))
     }
 }
 

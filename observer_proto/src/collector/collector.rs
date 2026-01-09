@@ -17,6 +17,17 @@ pub struct PeerConnectionInfo {
     #[prost(string, repeated, tag = "2")]
     pub socket_addrs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PeerDetails {
+    #[prost(string, tag = "1")]
+    pub pubkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub socket_addr: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub is_persisted: bool,
+    #[prost(bool, tag = "4")]
+    pub is_connected: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EligiblePeersRequest {
     #[prost(message, repeated, tag = "1")]
@@ -24,6 +35,13 @@ pub struct EligiblePeersRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct EligiblePeersResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CurrentPeersRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CurrentPeersResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub peers: ::prost::alloc::vec::Vec<PeerDetails>,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TargetPeerCountRequest {
     #[prost(uint32, tag = "1")]
@@ -198,6 +216,32 @@ pub mod collector_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_current_peers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CurrentPeersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CurrentPeersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collector.CollectorService/GetCurrentPeers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("collector.CollectorService", "GetCurrentPeers"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -232,6 +276,13 @@ pub mod collector_service_server {
             request: tonic::Request<super::TargetPeerCountRequest>,
         ) -> std::result::Result<
             tonic::Response<super::TargetPeerCountResponse>,
+            tonic::Status,
+        >;
+        async fn get_current_peers(
+            &self,
+            request: tonic::Request<super::CurrentPeersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CurrentPeersResponse>,
             tonic::Status,
         >;
     }
@@ -440,6 +491,52 @@ pub mod collector_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = PostTargetPeerCountSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collector.CollectorService/GetCurrentPeers" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCurrentPeersSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<super::CurrentPeersRequest>
+                    for GetCurrentPeersSvc<T> {
+                        type Response = super::CurrentPeersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CurrentPeersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::get_current_peers(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCurrentPeersSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

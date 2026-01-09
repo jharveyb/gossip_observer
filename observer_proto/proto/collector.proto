@@ -6,6 +6,7 @@ service CollectorService {
   rpc GetNodeConfig(NodeConfigRequest) returns (NodeConfigResponse);
   rpc PostEligiblePeers(EligiblePeersRequest) returns (EligiblePeersResponse);
   rpc PostTargetPeerCount(TargetPeerCountRequest) returns (TargetPeerCountResponse);
+  rpc GetCurrentPeers(CurrentPeersRequest) returns (CurrentPeersResponse);
 }
 
 message NodeConfigRequest {}
@@ -21,11 +22,24 @@ message PeerConnectionInfo {
   repeated string socket_addrs = 2;
 }
 
+message PeerDetails {
+  string pubkey = 1;
+  string socket_addr = 2;
+  bool is_persisted = 3;
+  bool is_connected = 4;
+}
+
 message EligiblePeersRequest {
   repeated PeerConnectionInfo peers = 1;
 }
 
 message EligiblePeersResponse {}
+
+message CurrentPeersRequest {}
+
+message CurrentPeersResponse {
+  repeated PeerDetails peers = 1;
+}
 
 message TargetPeerCountRequest {
   uint32 target = 1;
