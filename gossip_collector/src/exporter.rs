@@ -104,24 +104,17 @@ impl NATSExporter {
 
         let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(self.cfg.batch_size as usize);
         {
+            let conn_manager = self.conn_manager.clone();
             let queue_stop_signal = self.stop_signal.child_token();
             self.tasks.spawn(async move {
-                Self::queue_exported_msg(export_rx, nats_tx, queue_stop_signal).await
+                Self::queue_exported_msg(export_rx, nats_tx, conn_manager, queue_stop_signal).await
             });
         }
         {
-            let conn_manager = self.conn_manager.clone();
             let export_stop_signal = self.stop_signal.child_token();
             let batch_size = self.cfg.batch_size as usize;
             self.tasks.spawn(async move {
-                Self::publish_msgs(
-                    stream_ctx,
-                    batch_size,
-                    nats_rx,
-                    conn_manager,
-                    export_stop_signal,
-                )
-                .await
+                Self::publish_msgs(stream_ctx, batch_size, nats_rx, export_stop_signal).await
             });
         }
         Ok(())
@@ -130,18 +123,41 @@ impl NATSExporter {
     // Move msg from our unbounded buffer fed by ldk-node, to our fixed-size buffer.
     // If the ring buffer is full, wait for another task to drain it. This should
     // be fine, since our input buffer is unbounded.
-    // TODO: track backpressure here?
     async fn queue_exported_msg(
         mut rx: UnboundedReceiver<String>,
         tx: Sender<String>,
+        mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
     ) {
+        // Local version of the peer filter set; mark the initial value as
+        // changed before we start.
+        let mut msg_filter_rules = HashSet::new();
+        msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
         loop {
             let msg = match tokio::select! {
-                rx_msg = rx.recv() => rx_msg,
+                // Prioritize receiving config updates over other events.
+                biased;
+
                 _ = stop_signal.cancelled() => {
                     break;
                 }
+                _ = conn_manager.pending_notifier.changed() => {
+                    // After a changed() call, the value is already marked as seen, so borrow() could be used.
+                    // borrow_and_update() is used to safely handle a potential race:
+                    // https://docs.rs/tokio/latest/tokio/sync/watch/index.html#borrow_and_update-versus-borrow
+                    msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
+
+                    // Sort for readability.
+                    let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
+                    let filter_size = filter_fmt.len();
+                    filter_fmt.sort_unstable();
+                    println!("exporter: loaded new filter cfg: size {}", filter_size);
+                    println!("{:?}", filter_fmt);
+
+                    // We don't want to return anything, so just skip any following logic.
+                    continue;
+                }
+                rx_msg = rx.recv() => rx_msg,
             } {
                 Some(mut rx_msg) => {
                     // Add our node ID to the message.
@@ -153,6 +169,23 @@ impl NATSExporter {
                     break;
                 }
             };
+
+            // Filter out messages from specific peers we've connected to recently.
+            // Peer pubkey is field 2.
+            match msg.split(INTRA_MSG_DELIM).nth(1) {
+                Some(recv_peer) => {
+                    if msg_filter_rules.contains(recv_peer) {
+                        continue;
+                    }
+                }
+                // Should not happen, this means msg formatting
+                // is broken.
+                None => {
+                    println!("internal: publish_msgs: rx msg format broken");
+                    println!("msg: {msg}");
+                    break;
+                }
+            }
 
             tokio::select! {
                 tx_permit = tx.reserve() => {
@@ -176,7 +209,6 @@ impl NATSExporter {
         ctx: jetstream::Context,
         batch_size: usize,
         mut rx: Receiver<String>,
-        mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
     ) {
         let mut total_upload_time = 0;
@@ -186,58 +218,21 @@ impl NATSExporter {
         let mut stats_waiter = time::interval(STATS_INTERVAL);
         let mut msg_batch = Vec::with_capacity(batch_size);
 
-        // Local version of the peer filter set; mark the initial value as
-        // changed before we start.
-        let mut msg_filter_rules = HashSet::new();
-        msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
         loop {
             tokio::select! {
-                // Prioritize receiving config updates over other events.
-                biased;
-
-                _ = conn_manager.pending_notifier.changed() => {
-                    // After a changed() call, the value is already marked as seen, so borrow() could be used.
-                    // borrow_and_update() is used to safely handle a potential race:
-                    // https://docs.rs/tokio/latest/tokio/sync/watch/index.html#borrow_and_update-versus-borrow
-                    msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
-
-                    // Sort for readability.
-                    let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
-                    let filter_size = filter_fmt.len();
-                    filter_fmt.sort_unstable();
-                    println!("exporter: loaded new filter cfg: size {}", filter_size);
-                    println!("{:?}", filter_fmt);
-                }
-                _ = stop_signal.cancelled() => {
-                    break;
-                }
                 rx_msg = rx.recv() => {
                     match rx_msg {
                         Some(msg) => {
-                            // Filter out messages from specific peers we've
-                            // connected to recently. Peer pubkey is field 2.
-                            match msg.split(INTRA_MSG_DELIM).nth(1) {
-                                Some(recv_peer) => {
-                                    if !msg_filter_rules.contains(recv_peer) {
-                                        msg_batch.push(msg)
-                                    } else {
-                                        continue;
-                                    }
-                                }
-                                // Should not happen, this means msg formatting
-                                // is broken.
-                                None => {
-                                    println!("internal: publish_msgs: rx msg format broken");
-                                    println!("msg: {msg}");
-                                    break;
-                                }
-                            }
+                            msg_batch.push(msg);
                         },
                         None => {
                             println!("internal: publish_msgs: rx stream closed");
                             break;
                         }
                     }
+                }
+                _ = stop_signal.cancelled() => {
+                    break;
                 }
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
