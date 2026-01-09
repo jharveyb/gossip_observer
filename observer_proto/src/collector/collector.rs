@@ -10,6 +10,27 @@ pub struct NodeConfigResponse {
     #[prost(string, tag = "3")]
     pub node_id: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PeerConnectionInfo {
+    #[prost(string, tag = "1")]
+    pub pubkey: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub socket_addrs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EligiblePeersRequest {
+    #[prost(message, repeated, tag = "1")]
+    pub peers: ::prost::alloc::vec::Vec<PeerConnectionInfo>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EligiblePeersResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TargetPeerCountRequest {
+    #[prost(uint32, tag = "1")]
+    pub target: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TargetPeerCountResponse {}
 /// Generated client implementations.
 pub mod collector_service_client {
     #![allow(
@@ -125,6 +146,58 @@ pub mod collector_service_client {
                 .insert(GrpcMethod::new("collector.CollectorService", "GetNodeConfig"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn post_eligible_peers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EligiblePeersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EligiblePeersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collector.CollectorService/PostEligiblePeers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("collector.CollectorService", "PostEligiblePeers"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn post_target_peer_count(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TargetPeerCountRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TargetPeerCountResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collector.CollectorService/PostTargetPeerCount",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("collector.CollectorService", "PostTargetPeerCount"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -145,6 +218,20 @@ pub mod collector_service_server {
             request: tonic::Request<super::NodeConfigRequest>,
         ) -> std::result::Result<
             tonic::Response<super::NodeConfigResponse>,
+            tonic::Status,
+        >;
+        async fn post_eligible_peers(
+            &self,
+            request: tonic::Request<super::EligiblePeersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EligiblePeersResponse>,
+            tonic::Status,
+        >;
+        async fn post_target_peer_count(
+            &self,
+            request: tonic::Request<super::TargetPeerCountRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TargetPeerCountResponse>,
             tonic::Status,
         >;
     }
@@ -255,6 +342,104 @@ pub mod collector_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetNodeConfigSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collector.CollectorService/PostEligiblePeers" => {
+                    #[allow(non_camel_case_types)]
+                    struct PostEligiblePeersSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<super::EligiblePeersRequest>
+                    for PostEligiblePeersSvc<T> {
+                        type Response = super::EligiblePeersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EligiblePeersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::post_eligible_peers(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PostEligiblePeersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collector.CollectorService/PostTargetPeerCount" => {
+                    #[allow(non_camel_case_types)]
+                    struct PostTargetPeerCountSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<super::TargetPeerCountRequest>
+                    for PostTargetPeerCountSvc<T> {
+                        type Response = super::TargetPeerCountResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TargetPeerCountRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::post_target_peer_count(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PostTargetPeerCountSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

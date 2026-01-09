@@ -23,7 +23,6 @@ mod peer_conn_manager;
 use crate::config::CollectorConfig;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
-use crate::node_manager::parse_peer_specifier;
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
 #[get("/instanceid")]
@@ -135,12 +134,15 @@ async fn main() -> anyhow::Result<()> {
     let peer_conn_manager = PeerConnManagerHandle::new();
 
     // Load an eligible peer list
+    // TODO: move to an RPC call
+    /*
     let initial_peer_list_size = 250;
     for _ in 0..initial_peer_list_size {
         let peer_info = node_list.pop().unwrap();
         let peer_info = parse_peer_specifier(&peer_info).unwrap();
         peer_conn_manager.add_eligible_peer(peer_info);
     }
+    */
 
     // The pending connection sweeper will maintain our message filter list by
     // removing peer pubkeys once we've been connected to them for enough time
@@ -203,9 +205,12 @@ async fn main() -> anyhow::Result<()> {
     let deadline_waiter = sleep(Duration::from_secs(cfg.apiserver.runtime * 60));
 
     // Start gRPC server
-    let grpc_node_handle = node.clone();
     let grpc_addr = format!("{}:{}", cfg.apiserver.hostname, cfg.apiserver.grpc_port).parse()?;
-    let grpc_service = grpc_server::create_service(grpc_node_handle);
+    let grpc_service = grpc_server::create_service(
+        peer_conn_manager.clone(),
+        node.clone(),
+        target_peer_count.clone(),
+    );
     let grpc_reflect_compat = observer_proto::collector_reflection_service_v1alpha()?;
     let grpc_reflect = observer_proto::collector_reflection_service_v1()?;
     let grpc_server = tokio::spawn(async move {
@@ -222,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
     // nodelist, channel list, peer list, etc.
     let node_shutdown_handle = node.clone();
     // TODO: this may not be cleaning itself up correctly?
+    // TODO: replace with stop() RPC call
     let deadline = tokio::spawn(async move {
         tokio::select! {
             _ = deadline_waiter => {

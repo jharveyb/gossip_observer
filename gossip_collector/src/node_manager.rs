@@ -5,7 +5,7 @@ use ldk_node::{NodeError, PeerDetails};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::peer_conn_manager::PeerSpecifier;
+use observer_common::types::PeerSpecifier;
 
 pub fn split_peer_info(peer_info: &str) -> Vec<String> {
     let mut info_parts = peer_info.split(';');

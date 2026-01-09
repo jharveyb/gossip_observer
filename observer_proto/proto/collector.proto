@@ -4,6 +4,8 @@ package collector;
 
 service CollectorService {
   rpc GetNodeConfig(NodeConfigRequest) returns (NodeConfigResponse);
+  rpc PostEligiblePeers(EligiblePeersRequest) returns (EligiblePeersResponse);
+  rpc PostTargetPeerCount(TargetPeerCountRequest) returns (TargetPeerCountResponse);
 }
 
 message NodeConfigRequest {}
@@ -13,3 +15,20 @@ message NodeConfigResponse {
   optional bytes node_alias = 2;
   string node_id = 3;
 }
+
+message PeerConnectionInfo {
+  string pubkey = 1;
+  repeated string socket_addrs = 2;
+}
+
+message EligiblePeersRequest {
+  repeated PeerConnectionInfo peers = 1;
+}
+
+message EligiblePeersResponse {}
+
+message TargetPeerCountRequest {
+  uint32 target = 1;
+}
+
+message TargetPeerCountResponse {}

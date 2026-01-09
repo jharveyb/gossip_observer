@@ -1,16 +1,14 @@
 use std::{
     collections::{HashSet, VecDeque},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, atomic::Ordering::SeqCst},
     time::Duration,
 };
 
-use bitcoin::secp256k1::PublicKey;
-use chrono::{DateTime, Utc};
-use lightning::ln::msgs::SocketAddress;
-use observer_common::token_bucket::TokenBucket;
+use chrono::{DateTime, TimeDelta, Utc};
+use observer_common::{
+    token_bucket::TokenBucket,
+    types::{PeerConnectionInfo, PeerSpecifier, SharedUsize},
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{Interval, sleep},
@@ -18,31 +16,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::node_manager::{current_peers, node_peer_connect};
-
-// The (pubkey, network address) pair that specifies a way to try and connect to a peer.
-#[derive(PartialEq, Clone, Debug)]
-pub struct PeerSpecifier {
-    pub pubkey: PublicKey,
-    pub addr: SocketAddress,
-}
-
-#[derive(Clone)]
-pub struct PeerConnectionInfo {
-    pub pubkey: PublicKey,
-    pub addrs: Vec<SocketAddress>,
-}
-
-impl PeerConnectionInfo {
-    pub fn split(&self) -> Vec<PeerSpecifier> {
-        self.addrs
-            .iter()
-            .map(|addr| PeerSpecifier {
-                pubkey: self.pubkey,
-                addr: addr.clone(),
-            })
-            .collect()
-    }
-}
 
 #[derive(Clone)]
 pub struct PendingConnection {
@@ -57,7 +30,7 @@ type EligiblePeers = VecDeque<PeerConnectionInfo>;
 pub enum ConnManagerMsg {
     AddPendingConn(PendingConnection),
     RemovePendingConn(PeerSpecifier),
-    SweepPendingConnections(chrono::TimeDelta),
+    SweepPendingConnections(TimeDelta),
     GetPendingConnections(oneshot::Sender<Option<PendingConnections>>),
     PeekEligiblePeer(oneshot::Sender<Option<PeerConnectionInfo>>),
     AddEligiblePeer(PeerConnectionInfo),
@@ -175,16 +148,12 @@ impl PeerConnManagerHandle {
         next_peer
     }
 
-    // TODO: pass peer specifier directly here
-    pub fn add_eligible_peer(&self, info: (PublicKey, SocketAddress)) {
-        let msg = ConnManagerMsg::AddEligiblePeer(PeerConnectionInfo {
-            pubkey: info.0,
-            addrs: vec![info.1],
-        });
+    pub fn add_eligible_peer(&self, info: PeerConnectionInfo) {
+        let msg = ConnManagerMsg::AddEligiblePeer(info);
         self.mailbox.send(msg).unwrap();
     }
 
-    pub fn add_pending_conn(&self, peer: &PeerSpecifier) {
+    fn add_pending_conn(&self, peer: &PeerSpecifier) {
         let msg = ConnManagerMsg::AddPendingConn(PendingConnection {
             peer: peer.clone(),
             conn_time: Utc::now(),
@@ -192,7 +161,7 @@ impl PeerConnManagerHandle {
         self.mailbox.send(msg).unwrap();
     }
 
-    pub fn remove_pending_conn(&self, peer: PeerSpecifier) {
+    fn remove_pending_conn(&self, peer: PeerSpecifier) {
         let msg = ConnManagerMsg::RemovePendingConn(peer);
         self.mailbox.send(msg).unwrap();
     }
@@ -202,7 +171,7 @@ pub async fn pending_conn_sweeper(
     handle: PeerConnManagerHandle,
     mut waiter: Interval,
     cancel: CancellationToken,
-    startup_delay: chrono::TimeDelta,
+    startup_delay: TimeDelta,
 ) {
     loop {
         tokio::select! {
@@ -263,7 +232,7 @@ pub async fn peer_count_monitor(
     conn_mgr_handle: PeerConnManagerHandle,
     mut waiter: Interval,
     cancel: CancellationToken,
-    peer_target: Arc<AtomicUsize>,
+    peer_target: SharedUsize,
 ) {
     let peer_count = async || -> usize {
         let peer_list = current_peers(node_handle.clone()).await.unwrap_or_default();
@@ -273,7 +242,7 @@ pub async fn peer_count_monitor(
     };
     let count_below_target = async || -> bool {
         let peer_count = peer_count().await;
-        let target = peer_target.load(Ordering::SeqCst);
+        let target = peer_target.load(SeqCst);
         println!("Peer count: {peer_count}, target: {target}");
         peer_count < target
     };
@@ -293,7 +262,7 @@ pub async fn peer_count_monitor(
 
         // Inner loop to increase peer count until we reach our target.
         let mut cancelled = false;
-        // #
+        // TODO: configurable? May need to slow down for a smaller machine
         let attempt_rate = 1;
         let attempt_refill_delay = Duration::from_secs(2);
         let total_attempts = 5;
@@ -308,6 +277,8 @@ pub async fn peer_count_monitor(
         // Loop iteration speed & concurrent connection attempts are limited by our token bucket.
         while below_target {
             let _permit = connect_rate_limiter.acquire().await;
+            // TOOD: filter out peers we're already connected to, so we don't
+            // re-add them to our filter list
             if let Some(new_peer) = conn_mgr_handle.next_eligible_peer().await {
                 let cm = conn_mgr_handle.clone();
                 let nh = node_handle.clone();
@@ -318,7 +289,7 @@ pub async fn peer_count_monitor(
             // Missing eligible peers; sleep and wait for some to get added. This should only happen on startup.
             } else {
                 println!("Peer conn manager: no eligible peers");
-                sleep(Duration::from_secs(2)).await;
+                sleep(Duration::from_secs(15)).await;
             }
 
             cancelled = cancel.is_cancelled();
