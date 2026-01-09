@@ -20,11 +20,11 @@ mod grpc_server;
 mod logger;
 mod node_manager;
 mod peer_conn_manager;
+use crate::config::CollectorConfig;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
 use crate::node_manager::parse_peer_specifier;
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
-use config::{NATSConfig, NodeConfig, ServerConfig};
 
 #[get("/instanceid")]
 async fn instanceid(data: web::Data<AppState>) -> impl Responder {
@@ -146,25 +146,22 @@ async fn main() -> anyhow::Result<()> {
     // removing peer pubkeys once we've been connected to them for enough time
     // to have (likely) finished any gossip query request/responses, which would
     // pollute our data.
-    let pending_conn_waiter = interval(Duration::from_secs(60));
 
-    // 10 minute delay.
-    let pending_conn_delay = chrono::TimeDelta::seconds(10 * 60);
-    let bg_conn_sweeper_stop_signal = stop_signal.child_token();
     let pending_conn_task = tokio::spawn(pending_conn_sweeper(
         peer_conn_manager.clone(),
-        pending_conn_waiter,
-        bg_conn_sweeper_stop_signal,
-        pending_conn_delay,
+        interval(Duration::from_secs(
+            cfg.collector.connection_sweeper_interval.into(),
+        )),
+        stop_signal.child_token(),
+        chrono::TimeDelta::seconds(cfg.collector.pending_connection_delay.into()),
     ));
 
     let exporter_stop_signal = stop_signal.child_token();
-    let nats_cfg = NATSConfig {
-        server_addr: cfg.nats.server_addr.clone(),
-        stream: cfg.nats.stream.clone(),
-    };
-    let mut nats_exporter =
-        NATSExporter::new(nats_cfg, peer_conn_manager.clone(), exporter_stop_signal);
+    let mut nats_exporter = NATSExporter::new(
+        cfg.nats.clone(),
+        peer_conn_manager.clone(),
+        exporter_stop_signal,
+    );
     nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
 
@@ -187,12 +184,13 @@ async fn main() -> anyhow::Result<()> {
 
     // The peer connection monitor will use the eligible peer list to maintain
     // our connection count above a target value.
-    let target_peer_count = Arc::new(AtomicUsize::new(25));
-    let peer_monitor_waiter = interval(Duration::from_secs(60));
+    let target_peer_count = Arc::new(AtomicUsize::new(cfg.collector.target_peer_count as usize));
     let conn_monitor_task = tokio::spawn(peer_count_monitor(
         node.clone(),
         peer_conn_manager.clone(),
-        peer_monitor_waiter,
+        interval(Duration::from_secs(
+            cfg.collector.peer_monitor_interval.into(),
+        )),
         stop_signal.child_token(),
         target_peer_count.clone(),
     ));

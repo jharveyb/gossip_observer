@@ -19,10 +19,31 @@ pub struct Apiserver {
     pub runtime: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Nats {
     pub server_addr: String,
     pub stream: String,
+
+    // # of msgs. exported from LDK, per message sent over NATS
+    // Max. export msg size is ~500B, we could go higher here
+    // NATS default msg size limit is 1 MB, we're using 4 MB
+    pub batch_size: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Collector {
+    // Seconds between updates to the exporter filter map, where we decide
+    // to start exporting messages from a peer
+    pub connection_sweeper_interval: u32,
+
+    // Seconds between our node connecting to a peer, and exporting gossip
+    // messages from that peer to the archiver.
+    pub pending_connection_delay: u32,
+
+    // Seconds between our node checking that it has the target amount of peers.
+    pub peer_monitor_interval: u32,
+
+    pub target_peer_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +51,7 @@ pub struct CollectorConfig {
     pub ldk: Ldk,
     pub apiserver: Apiserver,
     pub nats: Nats,
+    pub collector: Collector,
     pub uuid: String,
 }
 
@@ -48,7 +70,7 @@ impl CollectorConfig {
         };
 
         let cfg = Config::builder()
-            // All default config values
+            // All default config values; should be aimed for local testing
             .set_default("ldk.network", "main")?
             .set_default("ldk.storage_dir", "./observer_ldk")?
             .set_default("ldk.log_level", "debug")?
@@ -58,17 +80,18 @@ impl CollectorConfig {
             .set_default("apiserver.runtime", 60)?
             .set_default("nats.server_addr", "localhost:4222")?
             .set_default("nats.stream", "observer")?
+            // Our NATS messages should be ~500kB.
+            .set_default("nats.batch_size", 1024)?
+            .set_default("collector.connection_sweeper_interval", 60)?
+            // Wait 10 minutes pefore exporting peer messages.
+            .set_default("collector.pending_connection_delay", 10 * 60)?
+            .set_default("collector.peer_monitor_interval", 60)?
+            // Aim for a 'normal' amount of peers, compared to the implementation defaults of 5-10.
+            .set_default("collector.target_peer_count", 10)?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("COLLECTOR"))
             .build()?;
 
         cfg.try_deserialize().map_err(anyhow::Error::new)
     }
-}
-
-// For NATS message upload
-#[derive(Debug, Clone, Deserialize)]
-pub struct NATSConfig {
-    pub server_addr: String,
-    pub stream: String,
 }

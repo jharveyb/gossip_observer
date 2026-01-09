@@ -1,3 +1,4 @@
+use crate::config::Nats;
 use crate::logger::Writer;
 use crate::peer_conn_manager::PeerConnManagerHandle;
 use async_nats::jetstream;
@@ -11,13 +12,8 @@ use tokio::task::JoinSet;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::NATSConfig;
-
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-// Max. export msg size is ~500B, we could go higher here
-// TODO: adjust buffer size here; needs to stay below NATS msg_size limit; default 1 MB
-static NATS_BATCH_SIZE: usize = 1024;
 pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(60);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
@@ -50,7 +46,7 @@ impl Exporter for StdoutExporter {
 }
 
 pub struct NATSExporter {
-    cfg: NATSConfig,
+    cfg: Nats,
     // TODO: How do we join on this later?
     pub tasks: JoinSet<()>,
     conn_manager: PeerConnManagerHandle,
@@ -80,7 +76,7 @@ impl Exporter for NATSExporter {
 
 impl NATSExporter {
     pub fn new(
-        cfg: NATSConfig,
+        cfg: Nats,
         conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
     ) -> Self {
@@ -106,7 +102,7 @@ impl NATSExporter {
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
 
-        let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(NATS_BATCH_SIZE);
+        let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(self.cfg.batch_size as usize);
         {
             let queue_stop_signal = self.stop_signal.child_token();
             self.tasks.spawn(async move {
@@ -116,8 +112,16 @@ impl NATSExporter {
         {
             let conn_manager = self.conn_manager.clone();
             let export_stop_signal = self.stop_signal.child_token();
+            let batch_size = self.cfg.batch_size as usize;
             self.tasks.spawn(async move {
-                Self::publish_msgs(stream_ctx, nats_rx, conn_manager, export_stop_signal).await
+                Self::publish_msgs(
+                    stream_ctx,
+                    batch_size,
+                    nats_rx,
+                    conn_manager,
+                    export_stop_signal,
+                )
+                .await
             });
         }
         Ok(())
@@ -170,6 +174,7 @@ impl NATSExporter {
     // Drain our fixed-size buffer of msgs by publishing to NATS.
     async fn publish_msgs(
         ctx: jetstream::Context,
+        batch_size: usize,
         mut rx: Receiver<String>,
         mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
@@ -179,7 +184,7 @@ impl NATSExporter {
         let mut msg_submit_interval;
         let mut upload_count = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
-        let mut msg_batch = Vec::with_capacity(NATS_BATCH_SIZE);
+        let mut msg_batch = Vec::with_capacity(batch_size);
 
         // Local version of the peer filter set; mark the initial value as
         // changed before we start.
@@ -244,7 +249,7 @@ impl NATSExporter {
                 }
             }
 
-            if msg_batch.len() >= NATS_BATCH_SIZE {
+            if msg_batch.len() >= batch_size {
                 // Our vec should have the same capacity after being drained.
                 // std intersperse is nightly-only for now: https://github.com/rust-lang/rust/issues/79524
                 let batch_output =
