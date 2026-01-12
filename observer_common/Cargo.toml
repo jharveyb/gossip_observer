@@ -4,8 +4,16 @@ name    = "observer_common"
 version = "0.1.0"
 
 [dependencies]
-anyhow         = "1.0"
-bitcoin        = "0.32.4"
-lightning      = { version = "0.2.0-rc1", features = ["std"] }
-observer_proto = { path = "../observer_proto" }
-tokio          = { version = "1.47", features = ["full", "tracing"] }
+
+anyhow           = "1.0"
+bitcoin          = "0.32.4"
+ldk-node         = { version = "0.7" }
+lightning        = { version = "0.2.0-rc1", features = ["std"] }
+prost            = "0.14"
+tokio            = { version = "1.47", features = ["full", "tracing"] }
+tonic            = "0.14"
+tonic-prost      = "0.14"
+tonic-reflection = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"

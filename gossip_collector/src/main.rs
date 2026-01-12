@@ -163,8 +163,8 @@ async fn main() -> anyhow::Result<()> {
         node.clone(),
         target_peer_count.clone(),
     );
-    let grpc_reflect_compat = observer_proto::collector_reflection_service_v1alpha()?;
-    let grpc_reflect = observer_proto::collector_reflection_service_v1()?;
+    let grpc_reflect_compat = observer_common::collector_reflection_service_v1alpha()?;
+    let grpc_reflect = observer_common::collector_reflection_service_v1()?;
     let grpc_server = tokio::spawn(async move {
         println!("Starting gRPC server on {}", grpc_addr);
         TonicServer::builder()

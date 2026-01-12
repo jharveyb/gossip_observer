@@ -3,7 +3,6 @@ members = [
         "gossip_collector",
         "gossip_analyze",
         "gossip_archiver",
-        "observer_proto",
         "observer_common",
         "tor_proxy",
 ]

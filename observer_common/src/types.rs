@@ -1,15 +1,15 @@
-use std::{
-    ops::Deref,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use bitcoin::secp256k1::PublicKey;
+use ldk_node::PeerDetails;
 use lightning::{ln::msgs::SocketAddress, routing::gossip::NodeAlias};
-use observer_proto::collector as CollectorRPC;
+
+use crate::collectorrpc;
+use crate::util;
 
 pub type SharedUsize = Arc<AtomicUsize>;
-pub struct PeerConnectionInfos(pub Vec<PeerConnectionInfo>);
 
+// Basic info about our embedded LDK node.
 #[derive(Debug, Clone)]
 pub struct LdkNodeConfig {
     pub listening_addresses: Option<Vec<SocketAddress>>,
@@ -17,44 +17,42 @@ pub struct LdkNodeConfig {
     pub node_id: PublicKey,
 }
 
-impl From<LdkNodeConfig> for CollectorRPC::NodeConfigResponse {
+impl From<LdkNodeConfig> for collectorrpc::NodeConfigResponse {
     fn from(config: LdkNodeConfig) -> Self {
-        CollectorRPC::NodeConfigResponse {
-            listen_addrs: config
-                .listening_addresses
-                .unwrap_or_default()
-                .iter()
-                .map(|addr| addr.to_string())
-                .collect(),
+        collectorrpc::NodeConfigResponse {
+            listen_addrs: util::convert_vec(config.listening_addresses.unwrap_or_default()),
             node_alias: config.node_alias.map(|a| a.0.to_vec()),
-            node_id: config.node_id.to_string(),
+            node_id: Some(config.node_id.into()),
         }
     }
 }
 
-impl TryFrom<CollectorRPC::NodeConfigResponse> for LdkNodeConfig {
+impl TryFrom<collectorrpc::NodeConfigResponse> for LdkNodeConfig {
     type Error = anyhow::Error;
 
-    fn try_from(resp: CollectorRPC::NodeConfigResponse) -> Result<Self, Self::Error> {
-        let mut addrs = None;
-        if !resp.listen_addrs.is_empty() {
-            addrs = Some(
-                resp.listen_addrs
-                    .iter()
-                    .map(|addr| addr.parse())
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
+    fn try_from(resp: collectorrpc::NodeConfigResponse) -> Result<Self, Self::Error> {
+        let listening_addresses = if resp.listen_addrs.is_empty() {
+            None
+        } else {
+            Some(util::try_convert_vec(resp.listen_addrs)?)
         };
-        let mut alias = None;
-        if let Some(a) = resp.node_alias {
-            let inner: [u8; 32] = a.as_slice().try_into()?;
-            alias = Some(NodeAlias(inner));
-        }
-        let node_id = resp.node_id.parse()?;
+
+        let node_alias = resp
+            .node_alias
+            .map(|a| -> Result<NodeAlias, anyhow::Error> {
+                let inner: [u8; 32] = a.as_slice().try_into()?;
+                Ok(NodeAlias(inner))
+            })
+            .transpose()?;
+
+        let node_id = resp
+            .node_id
+            .ok_or_else(|| anyhow::anyhow!("node_id is required"))?
+            .try_into()?;
 
         Ok(LdkNodeConfig {
-            listening_addresses: addrs,
-            node_alias: alias,
+            listening_addresses,
+            node_alias,
             node_id,
         })
     }
@@ -86,63 +84,63 @@ impl PeerConnectionInfo {
     }
 }
 
-impl From<&PeerConnectionInfo> for CollectorRPC::PeerConnectionInfo {
-    fn from(info: &PeerConnectionInfo) -> Self {
-        CollectorRPC::PeerConnectionInfo {
-            pubkey: info.pubkey.to_string(),
-            socket_addrs: info.addrs.iter().map(|addr| addr.to_string()).collect(),
+impl From<PeerConnectionInfo> for collectorrpc::PeerConnectionInfo {
+    fn from(info: PeerConnectionInfo) -> Self {
+        collectorrpc::PeerConnectionInfo {
+            pubkey: Some(info.pubkey.into()),
+            socket_addrs: util::convert_vec(info.addrs),
         }
     }
 }
 
-impl TryFrom<&CollectorRPC::PeerConnectionInfo> for PeerConnectionInfo {
+impl TryFrom<collectorrpc::PeerConnectionInfo> for PeerConnectionInfo {
     type Error = anyhow::Error;
 
-    fn try_from(info: &CollectorRPC::PeerConnectionInfo) -> Result<Self, Self::Error> {
-        let pubkey = info.pubkey.parse()?;
-        let addrs = info
-            .socket_addrs
-            .iter()
-            .map(|addr| addr.parse())
-            .collect::<Result<Vec<_>, _>>()?;
+    fn try_from(info: collectorrpc::PeerConnectionInfo) -> Result<Self, Self::Error> {
+        let pubkey = util::convert_required_field(info.pubkey, "pubkey")?;
+        let addrs = util::try_convert_vec(info.socket_addrs)?;
         Ok(PeerConnectionInfo { pubkey, addrs })
     }
 }
 
-// We need to use a newtype wrapper around Vec<_> to impl TryFrom.
-/*
-impl Deref for PeerConnectionInfos {
-    type Target = Vec<PeerConnectionInfo>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<PeerConnectionInfos> for Vec<PeerConnectionInfo> {
-    fn from(peers: PeerConnectionInfos) -> Self {
-        peers.0
-    }
-}
-    */
-
-impl IntoIterator for PeerConnectionInfos {
-    type Item = PeerConnectionInfo;
-    type IntoIter = std::vec::IntoIter<PeerConnectionInfo>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl TryFrom<CollectorRPC::EligiblePeersRequest> for PeerConnectionInfos {
+impl TryFrom<collectorrpc::EligiblePeersRequest> for Vec<PeerConnectionInfo> {
     type Error = anyhow::Error;
 
-    fn try_from(req: CollectorRPC::EligiblePeersRequest) -> Result<Self, Self::Error> {
-        req.peers
-            .iter()
-            .map(|p| p.try_into())
-            .collect::<Result<Vec<_>, _>>()
-            .map(PeerConnectionInfos)
+    fn try_from(req: collectorrpc::EligiblePeersRequest) -> Result<Self, Self::Error> {
+        util::try_convert_vec(req.peers)
+    }
+}
+
+impl From<PeerDetails> for collectorrpc::PeerDetails {
+    fn from(peer: PeerDetails) -> Self {
+        collectorrpc::PeerDetails {
+            pubkey: Some(peer.node_id.into()),
+            socket_addr: Some(peer.address.into()),
+            is_persisted: peer.is_persisted,
+            is_connected: peer.is_connected,
+        }
+    }
+}
+
+impl TryFrom<collectorrpc::PeerDetails> for PeerDetails {
+    type Error = anyhow::Error;
+
+    fn try_from(peer: collectorrpc::PeerDetails) -> Result<Self, Self::Error> {
+        let node_id = util::convert_required_field(peer.pubkey, "pubkey")?;
+        let address = util::convert_required_field(peer.socket_addr, "socket_addr")?;
+        Ok(PeerDetails {
+            node_id,
+            address,
+            is_persisted: peer.is_persisted,
+            is_connected: peer.is_connected,
+        })
+    }
+}
+
+impl From<Vec<PeerDetails>> for collectorrpc::CurrentPeersResponse {
+    fn from(peers: Vec<PeerDetails>) -> Self {
+        collectorrpc::CurrentPeersResponse {
+            peers: util::convert_vec(peers),
+        }
     }
 }

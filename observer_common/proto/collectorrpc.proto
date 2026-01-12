@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package collector;
+package collectorrpc;
 
 service CollectorService {
   rpc GetNodeConfig(NodeConfigRequest) returns (NodeConfigResponse);
@@ -9,22 +9,30 @@ service CollectorService {
   rpc GetCurrentPeers(CurrentPeersRequest) returns (CurrentPeersResponse);
 }
 
+message Pubkey {
+  string pubkey = 1;
+}
+
+message SocketAddress {
+  string address = 1;
+}
+
 message NodeConfigRequest {}
 
 message NodeConfigResponse {
-  repeated string listen_addrs = 1;
+  repeated SocketAddress listen_addrs = 1;
   optional bytes node_alias = 2;
-  string node_id = 3;
+  Pubkey node_id = 3;
 }
 
 message PeerConnectionInfo {
-  string pubkey = 1;
-  repeated string socket_addrs = 2;
+  Pubkey pubkey = 1;
+  repeated SocketAddress socket_addrs = 2;
 }
 
 message PeerDetails {
-  string pubkey = 1;
-  string socket_addr = 2;
+  Pubkey pubkey = 1;
+  SocketAddress socket_addr = 2;
   bool is_persisted = 3;
   bool is_connected = 4;
 }
