@@ -123,12 +123,15 @@ pub struct PeerConnManagerHandle {
 }
 
 impl PeerConnManagerHandle {
-    pub fn new() -> Self {
+    pub fn new(cancel: CancellationToken) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (pending_tx, pending_rx) = watch::channel(HashSet::new());
 
         // Task will exit if we close the mailbox channel.
-        tokio::spawn(run_conn_manager(PeerConnManager::new(rx, pending_tx)));
+        tokio::spawn(
+            cancel
+                .run_until_cancelled_owned(run_conn_manager(PeerConnManager::new(rx, pending_tx))),
+        );
         Self {
             mailbox: tx,
             pending_notifier: pending_rx,
@@ -176,12 +179,13 @@ pub async fn pending_conn_sweeper(
     loop {
         tokio::select! {
                 _ = waiter.tick() => {
-                        println!("Peer conn manager: sweeper: expiring pending connections");
-                        let msg = ConnManagerMsg::SweepPendingConnections ( startup_delay );
-                        handle.mailbox.send(msg).unwrap();
+                    println!("Peer conn manager: sweeper: expiring pending connections");
+                    let msg = ConnManagerMsg::SweepPendingConnections ( startup_delay );
+                    handle.mailbox.send(msg).unwrap();
                 }
                 _ = cancel.cancelled() => {
-                break;
+                    println!("Peer conn manager: sweeper: shutting down");
+                    break;
                 }
         }
     }
@@ -252,6 +256,7 @@ pub async fn peer_count_monitor(
         // Check our peer count on the given interval.
         tokio::select! {
                 _ = cancel.cancelled() => {
+                    println!("Peer conn manager: monitor: shutting down");
                     break;
                 }
                 _ = waiter.tick() => {
@@ -294,6 +299,7 @@ pub async fn peer_count_monitor(
 
             cancelled = cancel.is_cancelled();
             if cancelled {
+                println!("Peer conn manager: monitor: shutting down");
                 break;
             }
 

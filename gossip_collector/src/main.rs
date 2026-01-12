@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     // to recently, and a list of eligible peers to connect to. Separate tasks
     // will attempt to connect to new peers to keep our peer count
     // stable. An eligible peer list must be passed in by the Controller.
-    let peer_conn_manager = PeerConnManagerHandle::new();
+    let peer_conn_manager = PeerConnManagerHandle::new(stop_signal.child_token());
 
     // Load an eligible peer list
     // TODO: move to an RPC call
@@ -110,11 +110,10 @@ async fn main() -> anyhow::Result<()> {
         chrono::TimeDelta::seconds(cfg.collector.pending_connection_delay.into()),
     ));
 
-    let exporter_stop_signal = stop_signal.child_token();
     let mut nats_exporter = NATSExporter::new(
         cfg.nats.clone(),
         peer_conn_manager.clone(),
-        exporter_stop_signal,
+        stop_signal.child_token(),
     );
     nats_exporter.start().await?;
     let nats_exporter = Arc::new(nats_exporter);
@@ -149,22 +148,19 @@ async fn main() -> anyhow::Result<()> {
         target_peer_count.clone(),
     ));
 
-    let actix_stop_signal = stop_signal.child_token();
-    let grpc_stop_signal = stop_signal.child_token();
-
-    println!("Collector runtime: {} minutes", cfg.apiserver.runtime);
-    println!("Start time: {}", chrono::Utc::now().to_rfc3339());
-    let deadline_waiter = sleep(Duration::from_secs(cfg.apiserver.runtime * 60));
+    println!("Collector: Start time: {}", chrono::Utc::now().to_rfc3339());
 
     // Start gRPC server
     let grpc_addr = format!("{}:{}", cfg.apiserver.hostname, cfg.apiserver.grpc_port).parse()?;
     let grpc_service = grpc_server::create_service(
         peer_conn_manager.clone(),
         node.clone(),
+        stop_signal.clone(),
         target_peer_count.clone(),
     );
     let grpc_reflect_compat = observer_common::collector_reflection_service_v1alpha()?;
     let grpc_reflect = observer_common::collector_reflection_service_v1()?;
+    let grpc_stop_signal = stop_signal.child_token();
     let grpc_server = tokio::spawn(async move {
         println!("Starting gRPC server on {}", grpc_addr);
         TonicServer::builder()
@@ -175,33 +171,20 @@ async fn main() -> anyhow::Result<()> {
             .await
     });
 
-    // TODO: what do we want to dump from node before shutdown?
-    // nodelist, channel list, peer list, etc.
-    let node_shutdown_handle = node.clone();
-    // TODO: this may not be cleaning itself up correctly?
-    // TODO: replace with stop() RPC call
+    let ctrl_handler_stop_signal = stop_signal.child_token();
     let deadline = tokio::spawn(async move {
         tokio::select! {
-            _ = deadline_waiter => {
-                println!("Server runtime exceeded, shutting down");
-                println!("Ending peers:");
-                let peers = node_manager::current_peers(node_shutdown_handle.clone()).await.unwrap();
-                let peers = peers
-                    .iter()
-                    .filter(|p| p.is_connected)
-                    .map(|p| format!("{}@{}", p.node_id, p.address))
-                    .collect::<Vec<_>>();
-                for peer in peers {
-                    println!("{peer}");
-                }
-                println!("Ending peers:");
-            }
+            _ = ctrl_handler_stop_signal.cancelled() => {
+                println!("Signal handler: received shutdown signal");
+            },
             _ = tokio::signal::ctrl_c() => {
-                println!("Ctrl-C received, shutting down");
-            }
+                println!("Signal handler: Ctrl-C received, shutting down");
+            },
         }
-        let _ = node_shutdown_handle.stop();
+        let _ = node.clone().stop();
+        println!("Signal handler: shut down LDK node");
         stop_signal.cancel();
+        println!("Signal handler: sent shutdown signal");
     });
 
     let final_res = tokio::join!(pending_conn_task, conn_monitor_task, deadline, grpc_server);

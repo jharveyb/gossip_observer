@@ -14,9 +14,7 @@ pub struct Ldk {
 #[derive(Debug, Deserialize)]
 pub struct Apiserver {
     pub hostname: String,
-    pub actix_port: u16,
     pub grpc_port: u16,
-    pub runtime: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -75,9 +73,7 @@ impl CollectorConfig {
             .set_default("ldk.storage_dir", "./observer_ldk")?
             .set_default("ldk.log_level", "debug")?
             .set_default("apiserver.hostname", "127.0.0.1")?
-            .set_default("apiserver.actix_port", 8080)?
             .set_default("apiserver.grpc_port", 50051)?
-            .set_default("apiserver.runtime", 60)?
             .set_default("nats.server_addr", "localhost:4222")?
             .set_default("nats.stream", "observer")?
             // Our NATS messages should be ~500kB.

@@ -7,6 +7,7 @@ service CollectorService {
   rpc PostEligiblePeers(EligiblePeersRequest) returns (EligiblePeersResponse);
   rpc PostTargetPeerCount(TargetPeerCountRequest) returns (TargetPeerCountResponse);
   rpc GetCurrentPeers(CurrentPeersRequest) returns (CurrentPeersResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message Pubkey {
@@ -54,3 +55,7 @@ message TargetPeerCountRequest {
 }
 
 message TargetPeerCountResponse {}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}
