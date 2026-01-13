@@ -1,17 +1,19 @@
 [package]
 edition = "2024"
-name = "gossip_analyze"
+name    = "gossip_analyze"
 version = "0.1.0"
 
 [dependencies]
 anyhow = "1.0.98"
 chrono = { version = "0.4.41", features = ["serde"] }
-clap = { version = "4.0", features = ["derive"] }
-csv = "1.3.1"
-serde = { version = "1", features = ["derive"] }
+clap   = { version = "4.0", features = ["derive"] }
+csv    = "1.3.1"
+serde  = { version = "1", features = ["derive"] }
 
 ldk-node = { version = "0.7" }
 
-reqwest = { version = "0.12.23", features = ["json"] }
+reqwest    = { version = "0.12.23", features = ["json"] }
 serde_json = "1.0.145"
-tokio = { version = "1.47.0", features = ["full"] }
+tokio      = { version = "1.47.0", features = ["full"] }
+
+observer_common = { path = "../observer_common" }

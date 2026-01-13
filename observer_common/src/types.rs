@@ -3,6 +3,8 @@ use std::sync::{Arc, atomic::AtomicUsize};
 use bitcoin::secp256k1::PublicKey;
 use ldk_node::PeerDetails;
 use lightning::{ln::msgs::SocketAddress, routing::gossip::NodeAlias};
+use serde_with::DisplayFromStr;
+use serde_with::serde_as;
 
 use crate::collectorrpc;
 use crate::util;
@@ -59,9 +61,11 @@ impl TryFrom<collectorrpc::NodeConfigResponse> for LdkNodeConfig {
 }
 
 // The (pubkey, network address) pair that specifies a way to try and connect to a peer.
-#[derive(PartialEq, Clone, Debug)]
+#[serde_as]
+#[derive(PartialEq, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PeerSpecifier {
     pub pubkey: PublicKey,
+    #[serde_as(as = "DisplayFromStr")]
     pub addr: SocketAddress,
 }
 
