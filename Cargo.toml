@@ -13,18 +13,18 @@ resolver = "3"
 # So to use our branch of ldk-node and rust-lightning, we apply these patch
 # directives.
 [patch.crates-io]
-ldk-node                       = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer-0.2.0-rc1" }
-lightning                      = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-background-processor = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-block-sync           = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-invoice              = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-liquidity            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-macros               = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-net-tokio            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-persister            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-rapid-gossip-sync    = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-transaction-sync     = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
-lightning-types                = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-0.2.0-rc1" }
+ldk-node                       = { git = "https://github.com/jharveyb/ldk-node", branch = "gossip_observer-v0.7.0" }
+lightning                      = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-background-processor = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-block-sync           = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-invoice              = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-liquidity            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-macros               = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-net-tokio            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-persister            = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-rapid-gossip-sync    = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-transaction-sync     = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
+lightning-types                = { git = "https://github.com/jharveyb/rust-lightning", branch = "gossip_observer-v0.2" }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3
