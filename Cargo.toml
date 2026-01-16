@@ -4,7 +4,7 @@ members = [
         "gossip_analyze",
         "gossip_archiver",
         "observer_common",
-        "tor_proxy",
+        "tor_proxy", "electrum-cli",
 ]
 resolver = "3"
 
