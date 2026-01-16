@@ -3,7 +3,13 @@ use anyhow::bail;
 use clap::{Parser, Subcommand};
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
+use ldk_node::lightning::routing::gossip::ChannelInfo;
+use ldk_node::lightning::routing::gossip::ChannelUpdateInfo;
+use ldk_node::lightning::routing::gossip::NodeAnnouncementInfo;
+use ldk_node::lightning::routing::gossip::NodeId;
 use observer_common::types::PeerSpecifier;
+use serde_with::DisplayFromStr;
+use serde_with::serde_as;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
@@ -15,12 +21,112 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::sleep;
 
 use observer_common::token_bucket::TokenBucket;
+
+#[serde_as]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct NodeInfo {
+    #[serde_as(as = "DisplayFromStr")]
+    pub pubkey: NodeId,
+    pub info: NodeAnnInfo,
+}
+
+// Wrapper around lightning::routing::gossip::NodeAnnouncementInfo to simplify
+// ser/de.
+#[serde_as]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct NodeAnnInfo {
+    // Pretty sure rust-lightning doesn't support building this from a string.
+    // Does this mean much beyond node fingerprinting?
+    // pub node_features: String,
+
+    // MAY be a unix timestamp, but not required.
+    pub last_update_timestamp: u32,
+
+    // Do we want RGB? Probably only useful for fingerprinting tbh
+    // This has Display but not FromStr, nor Deref to [u8; 32] it seems; F
+    pub alias: String,
+
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub addresses: Vec<SocketAddress>,
+}
+
+impl From<NodeAnnouncementInfo> for NodeAnnInfo {
+    fn from(info: NodeAnnouncementInfo) -> Self {
+        NodeAnnInfo {
+            // node_features: info.features().to_string(),
+            last_update_timestamp: info.last_update(),
+            alias: info.alias().to_string(),
+            // TODO: dedupe these addresses? we have duplicates sometimes for some reason
+            addresses: info.addresses().to_vec(),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct ChanDirectionFees {
+    // fee values are the latest we have; sourced from channel update msgs
+    pub htlc_min_msat: u64,
+    pub htlc_max_msat: u64,
+    pub fees_base_msat: u32,
+    pub fees_proportional_millionths: u32,
+    pub cltv_expiry_delta: u16,
+    pub last_update_timestamp: u32,
+}
+
+impl From<ChannelUpdateInfo> for ChanDirectionFees {
+    fn from(info: ChannelUpdateInfo) -> Self {
+        ChanDirectionFees {
+            htlc_min_msat: info.htlc_minimum_msat,
+            htlc_max_msat: info.htlc_maximum_msat,
+            fees_base_msat: info.fees.base_msat,
+            fees_proportional_millionths: info.fees.proportional_millionths,
+            cltv_expiry_delta: info.cltv_expiry_delta,
+            last_update_timestamp: info.last_update,
+        }
+    }
+}
+
+// Wrapper around lightning::routing::gossip::ChannelInfo to simplify
+// ser/de.
+#[serde_as]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct ChanInfo {
+    // Will leave this out for now.
+    // pub chan_features: String,
+    #[serde_as(as = "DisplayFromStr")]
+    pub node_one: NodeId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub node_two: NodeId,
+    // Require this, but our node will only fetch it if we're using a Core RPC
+    // chain source
+    pub capacity: u64,
+    pub one_to_two: Option<ChanDirectionFees>,
+    pub two_to_one: Option<ChanDirectionFees>,
+    // Can pull from the original message, or the caller
+    pub scid: Option<u64>,
+}
+
+impl From<ChannelInfo> for ChanInfo {
+    fn from(info: ChannelInfo) -> Self {
+        ChanInfo {
+            // chan_features: info.chan_features().to_string(),
+            node_one: info.node_one,
+            node_two: info.node_two,
+            // try from? will we ever be missing these (yes)
+            capacity: info.capacity_sats.unwrap(),
+            one_to_two: info.one_to_two.map(ChanDirectionFees::from),
+            two_to_one: info.two_to_one.map(ChanDirectionFees::from),
+            // Caller must set this
+            scid: None,
+        }
+    }
+}
 
 fn parse_peer_specifier(peer_specifier: &str) -> anyhow::Result<(PublicKey, SocketAddress)> {
     let (pubkey_str, address) = peer_specifier
@@ -262,6 +368,41 @@ async fn fetch_node_info(
     Ok(())
 }
 
+#[derive(Clone)]
+struct BitcoindRpcConfig {
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+}
+
+impl std::str::FromStr for BitcoindRpcConfig {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Expected format: "user:password@host:port"
+        let (auth, host_port) = s
+            .split_once('@')
+            .ok_or("Expected format: user:password@host:port")?;
+        let (user, password) = auth
+            .split_once(':')
+            .ok_or("Expected format: user:password@host:port")?;
+        let (host, port_str) = host_port
+            .split_once(':')
+            .ok_or("Expected format: user:password@host:port")?;
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|e| format!("Invalid port: {}", e))?;
+
+        Ok(BitcoindRpcConfig {
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+            password: password.to_string(),
+        })
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "gossip_analyze")]
 #[command(about = "A CLI tool for analyzing gossip data")]
@@ -278,6 +419,8 @@ enum Commands {
     },
     DumpNodeInfo {},
     Dump {
+        #[arg(help = "Bitcoind RPC config", required = true)]
+        rpc_cfg: BitcoindRpcConfig,
         #[arg(help = "List of peers to sync gossip from", required = false)]
         peers: Vec<String>,
     },
@@ -314,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
                 max_requests,
             ));
 
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = unbounded_channel();
             let node_info = new_file_writer(datadir, "node_info.txt");
 
             tokio::spawn(info_writer(rx, node_info));
@@ -357,9 +500,9 @@ async fn main() -> anyhow::Result<()> {
                 new_file_writer(datadir, "likely_unreachable_peer_specifiers.txt");
             let mystery_nodes_file = new_file_writer(datadir, "mystery_peers.txt");
 
-            let (reachable_tx, reachable_rx) = mpsc::unbounded_channel();
-            let (unreachable_tx, unreachable_rx) = mpsc::unbounded_channel();
-            let (mystery_tx, mystery_rx) = mpsc::unbounded_channel();
+            let (reachable_tx, reachable_rx) = unbounded_channel();
+            let (unreachable_tx, unreachable_rx) = unbounded_channel();
+            let (mystery_tx, mystery_rx) = unbounded_channel();
 
             let reachable_nodes = info_writer(reachable_rx, reachable_nodes_file);
             let unreachable_nodes = info_writer(unreachable_rx, unreachable_nodes_file);
@@ -556,7 +699,7 @@ async fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
-        Commands::Dump { peers } => {
+        Commands::Dump { peers, rpc_cfg } => {
             let mut peers = match peers.len() {
                 0 => Vec::new(),
                 l if l > 10 => bail!("Maximum 10 peers"),
@@ -565,6 +708,10 @@ async fn main() -> anyhow::Result<()> {
                     .map(|p| parse_peer_specifier(p))
                     .collect::<Result<Vec<_>, _>>()?,
             };
+            let simple_node_list_filename = "node_list.txt";
+            let simple_channel_list_filename = "channel_list.txt";
+            let full_node_list_filename = "full_node_list.txt";
+            let full_channel_list_filename = "full_channel_list.txt";
 
             // Add friendly peers
             // BFX 0 node rejected us, interesting
@@ -573,7 +720,17 @@ async fn main() -> anyhow::Result<()> {
             let megalithic = "0322d0e43b3d92d30ed187f4e101a9a9605c3ee5fc9721e6dac3ce3d7732fbb13e@164.92.106.32:9735";
             let lqwd_btcpay = "02cc611df622184f8c23639cf51b75001c07af0731f5569e87474ba3cc44f079ee@192.243.215.105:59735";
             let opennode = "028d98b9969fbed53784a36617eb489a59ab6dc9b9d77fcdca9ff55307cd98e3c4@18.222.70.85:9735";
-            let default_peers = [acinq, wos, megalithic, lqwd_btcpay, opennode];
+            let okx = "0294ac3e099def03c12a37e30fe5364b1223fd60069869142ef96580c8439c2e0a@47.242.126.50:26658";
+            let block_iad = "027100442c3b79f606f80f322d98d499eefcb060599efc5d4ecb00209c2cb54190@3.230.33.224:9735";
+            let default_peers = [
+                acinq,
+                wos,
+                megalithic,
+                lqwd_btcpay,
+                opennode,
+                okx,
+                block_iad,
+            ];
             let default_peers = default_peers
                 .iter()
                 .map(|p| parse_peer_specifier(p))
@@ -581,11 +738,18 @@ async fn main() -> anyhow::Result<()> {
             peers.extend(default_peers);
 
             // Mainnet only
-            let esplora_url = "https://blockstream.info/api";
+            // let esplora_url = "https://blockstream.info/api";
             let datadir = "./gossip_dump";
             let mut builder = ldk_node::Builder::new();
             builder.set_network(ldk_node::bitcoin::Network::Bitcoin);
-            builder.set_chain_source_esplora(esplora_url.to_string(), None);
+            // For ldk-node to look up channel capacity from SCID, it must be
+            // connected to a bitcoind-type ChainSource, not Esplora.
+            builder.set_chain_source_bitcoind_rpc(
+                rpc_cfg.host.clone(),
+                rpc_cfg.port,
+                rpc_cfg.user.clone(),
+                rpc_cfg.password.clone(),
+            );
             builder.set_gossip_source_p2p();
             builder.set_storage_dir_path(datadir.to_string());
             builder.set_filesystem_logger(None, None);
@@ -598,6 +762,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(e) = node.clone().connect(peer.0, peer.1, false) {
                     println!("Error connecting to peer: {e}");
                 }
+                sleep(Duration::from_secs(5)).await;
             }
 
             let queue_size = 5;
@@ -607,7 +772,8 @@ async fn main() -> anyhow::Result<()> {
             // We'll stop waiting once the node count is stable.
             let min_node_count = 11_000;
             let mut node_count = 0;
-            let check_delay = Duration::from_secs(10);
+            // 5 by 15 is beyond the 60 second ldk-node startup prune timer.
+            let check_delay = Duration::from_secs(15);
             while !(graph_size.iter().all(|x| x > &min_node_count)
                 && graph_size.iter().all(|x| x == &node_count))
             {
@@ -619,6 +785,12 @@ async fn main() -> anyhow::Result<()> {
                 sleep(check_delay).await;
             }
 
+            // Wait some more for us to fetch channel info from our chain source.
+            // TODO: how long does this take? Hella long, and it has to be done
+            // from scratch with an RPC connection
+            sleep(Duration::from_secs(10 * 60)).await;
+
+            // We could loop over the graph I guess
             let current_graph = node.network_graph();
             println!("Final graph stats:");
             println!("Nodes: {:?}", current_graph.list_nodes().len());
@@ -629,31 +801,53 @@ async fn main() -> anyhow::Result<()> {
             println!("Channels: {:?}", current_graph.list_channels().len());
 
             // Overwrite results from previous runs if present.
-            let node_list_path = format!("{}/{}", datadir, "node_list.txt");
-            let node_list_file = fs::File::create(node_list_path)?;
-            let mut buf_node_list = BufWriter::new(node_list_file);
+            let mut simple_node_list = new_file_writer(datadir, simple_node_list_filename);
+            let (node_info_tx, node_info_rx) = unbounded_channel();
+            let full_node_info = new_file_writer(datadir, full_node_list_filename);
 
-            // TODO: make these lists much richer
+            tokio::spawn(info_writer(node_info_rx, full_node_info));
+
+            // Dump all the info we can get from the gossip graph.
             for node in current_graph.list_nodes() {
+                // We'll dump the node's channels separately.
                 let rich_node_info = current_graph.node(&node).unwrap();
-                let _ = rich_node_info.announcement_info.unwrap().last_update();
-                let node_key = format!("{}\n", node.as_pubkey()?);
-                buf_node_list.write_all(node_key.as_bytes())?;
-            }
-            buf_node_list.flush()?;
+                if let Some(announcement_info) = rich_node_info.announcement_info {
+                    let info = NodeAnnInfo::from(announcement_info);
+                    let node_info = NodeInfo { pubkey: node, info };
+                    node_info_tx
+                        .send(serde_json::to_value(node_info).unwrap())
+                        .unwrap();
+                }
 
-            let channel_list_path = format!("{}/{}", datadir, "channel_list.txt");
-            let channel_list_file = fs::File::create(channel_list_path)?;
-            let mut buf_channel_list = BufWriter::new(channel_list_file);
+                let node_key = format!("{}\n", node.as_pubkey()?);
+                simple_node_list.write_all(node_key.as_bytes())?;
+            }
+            simple_node_list.flush()?;
+            drop(node_info_tx);
+            sleep(Duration::from_secs(2)).await;
+
+            let mut simple_channel_list = new_file_writer(datadir, simple_channel_list_filename);
+            let (channel_info_tx, channel_info_rx) = unbounded_channel();
+            let full_channel_info = new_file_writer(datadir, full_channel_list_filename);
+
+            tokio::spawn(info_writer(channel_info_rx, full_channel_info));
 
             for channel_id in current_graph.list_channels() {
                 let channel = current_graph
                     .channel(channel_id)
                     .ok_or_else(|| anyhow!("Channel missing from graph"))?;
+                let mut chan_info = ChanInfo::from(channel.clone());
+                chan_info.scid = Some(channel_id);
+                channel_info_tx
+                    .send(serde_json::to_value(chan_info).unwrap())
+                    .unwrap();
+
                 let channel = format!("{},{},{}\n", channel_id, channel.node_one, channel.node_two);
-                buf_channel_list.write_all(channel.as_bytes())?;
+                simple_channel_list.write_all(channel.as_bytes())?;
             }
-            buf_channel_list.flush()?;
+            simple_channel_list.flush()?;
+            drop(channel_info_tx);
+            sleep(Duration::from_secs(2)).await;
 
             node.stop()?;
             Ok(())
