@@ -9,6 +9,7 @@
 
 /mainnet_data
 /gossip_dump
+/query_results/sbm_results
 
 *.duckdb*
 **/archiver_logs*
