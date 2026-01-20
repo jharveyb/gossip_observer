@@ -838,6 +838,7 @@ async fn main() -> anyhow::Result<()> {
             let simple_node_list_filename = "node_list.txt";
             let simple_channel_list_filename = "channel_list.txt";
             let full_node_list_filename = "full_node_list.txt";
+            let nodes_missing_ann_filename = "node_missing_ann.txt";
             let full_channel_list_filename = "full_channel_list.txt";
 
             // Add friendly peers
@@ -915,15 +916,12 @@ async fn main() -> anyhow::Result<()> {
             // Wait some more for us to fetch channel info from our chain source.
             // TODO: how long does this take? Hella long, and it has to be done
             // from scratch with an RPC connection
-            sleep(Duration::from_secs(10 * 60)).await;
+            println!("Waiting a bit for LDK to finish UTXO lookup for channel capacities");
+            sleep(Duration::from_secs(5 * 60)).await;
 
             // We could loop over the graph I guess
             let current_graph = node.network_graph();
             println!("Final graph stats:");
-            println!("Nodes: {:?}", current_graph.list_nodes().len());
-            println!("Channels: {:?}", current_graph.list_channels().len());
-
-            println!("Final graph stats after pruning:");
             println!("Nodes: {:?}", current_graph.list_nodes().len());
             println!("Channels: {:?}", current_graph.list_channels().len());
 
@@ -932,25 +930,39 @@ async fn main() -> anyhow::Result<()> {
             let (node_info_tx, node_info_rx) = unbounded_channel();
             let full_node_info = new_file_writer(datadir, full_node_list_filename);
 
+            let (node_missing_ann_tx, node_missing_ann_rx) = unbounded_channel();
+            let nodes_missing_ann = new_file_writer(datadir, nodes_missing_ann_filename);
+
             tokio::spawn(info_writer(node_info_rx, full_node_info));
+            tokio::spawn(info_writer(node_missing_ann_rx, nodes_missing_ann));
 
             // Dump all the info we can get from the gossip graph.
             for node in current_graph.list_nodes() {
                 // We'll dump the node's channels separately.
                 let rich_node_info = current_graph.node(&node).unwrap();
+                let node_key = node.as_pubkey()?;
                 if let Some(announcement_info) = rich_node_info.announcement_info {
                     let info = NodeAnnInfo::from(announcement_info);
                     let node_info = NodeInfo { pubkey: node, info };
                     node_info_tx
                         .send(serde_json::to_value(node_info).unwrap())
                         .unwrap();
+                } else {
+                    // Our node may have never received node announcement info
+                    // for a node, if it hasn't reannounced in the last 14 days,
+                    // or for some other reason. We should still record it.
+                    let row = json!({
+                        "pubkey": node_key.to_string(),
+                    });
+                    node_missing_ann_tx.send(row).unwrap();
                 }
 
-                let node_key = format!("{}\n", node.as_pubkey()?);
+                let node_key = format!("{}\n", node_key);
                 simple_node_list.write_all(node_key.as_bytes())?;
             }
             simple_node_list.flush()?;
             drop(node_info_tx);
+            drop(node_missing_ann_tx);
             sleep(Duration::from_secs(2)).await;
 
             let mut simple_channel_list = new_file_writer(datadir, simple_channel_list_filename);
