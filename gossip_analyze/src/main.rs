@@ -8,9 +8,11 @@ use ldk_node::lightning::routing::gossip::ChannelUpdateInfo;
 use ldk_node::lightning::routing::gossip::NodeAnnouncementInfo;
 use ldk_node::lightning::routing::gossip::NodeId;
 use observer_common::types::PeerSpecifier;
+use serde_json::json;
 use serde_with::DisplayFromStr;
 use serde_with::serde_as;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
@@ -256,6 +258,43 @@ async fn fetch_node_info_mempool_space(
     Ok(res)
 }
 
+async fn fetch_asn_info_ipapi(
+    client: &reqwest::Client,
+    asn: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let ipapi_base = "https://api.ipapi.is";
+    let req_url = format!("{}/?q=as{}", ipapi_base, asn);
+    let res = match client.get(req_url).send().await {
+        Ok(res) => match res.error_for_status() {
+            Ok(res) => res.json::<serde_json::Value>().await?,
+            Err(e) => {
+                let errstr = format!("IPAPI: response parsing error: {asn}: {e}");
+                println!("{errstr}");
+                bail!("{errstr}");
+            }
+        },
+        // TODO: reduce rate limit if we get 429s
+        // We get 1000 calls a day
+        Err(e) => {
+            let errstr = format!("IPAPI: error on GET for ASN {asn}: {e}");
+            println!("{errstr}");
+            bail!("{errstr}");
+        }
+    };
+    Ok(res)
+}
+
+fn extract_asn_from_ms_info(info: serde_json::Value) -> Option<u64> {
+    if let Some(obj) = info.as_object()
+        && let Some(asn) = obj.get("as_number")
+    {
+        // Field should be a uint, or null for Tor-only nodes
+        return asn.as_u64();
+    }
+
+    None
+}
+
 fn extract_addrs_from_mempool_space_info(
     pubkey: &str,
     info: serde_json::Value,
@@ -368,6 +407,18 @@ async fn fetch_node_info(
     Ok(())
 }
 
+async fn fetch_asn_info(
+    client: &reqwest::Client,
+    asn: u64,
+    tx: UnboundedSender<serde_json::Value>,
+) -> anyhow::Result<()> {
+    let info = fetch_asn_info_ipapi(client, asn).await?;
+    if let Err(e) = tx.send(info) {
+        println!("fetch_asn_info: send issue: {}, {}", asn, e);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct BitcoindRpcConfig {
     host: String,
@@ -418,6 +469,15 @@ enum Commands {
         input_file: PathBuf,
     },
     DumpNodeInfo {},
+    FetchASNInfo {
+        #[arg(
+            long,
+            help = "Only fetch info for ASNs we don't have",
+            required = false,
+            default_value_t = false
+        )]
+        retry: bool,
+    },
     Dump {
         #[arg(help = "Bitcoind RPC config", required = true)]
         rpc_cfg: BitcoindRpcConfig,
@@ -488,6 +548,73 @@ async fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
+        Commands::FetchASNInfo { retry } => {
+            let datadir = "./gossip_dump";
+            let ms_info_path = format!("{}/{}", datadir, "node_info.txt");
+            let ms_node_infos = fs::read_to_string(ms_info_path)?;
+            let ms_node_infos: Vec<serde_json::Value> = serde_json::from_str(&ms_node_infos)?;
+
+            let mut ln_asns = HashSet::new();
+            for node in ms_node_infos {
+                if let Some(asn) = extract_asn_from_ms_info(node) {
+                    ln_asns.insert(asn);
+                }
+            }
+
+            // Filter out values we already have
+            let mut prev_asns = HashSet::new();
+            if *retry {
+                let prev_asn_path = format!("{}/{}", datadir, "fetched_asns.txt");
+                let prev_asn_list = fs::read_to_string(prev_asn_path)?;
+                for asn in prev_asn_list.lines() {
+                    prev_asns.insert(asn.parse::<u64>().unwrap());
+                }
+                println!("Previous ASN count: {}", prev_asns.len());
+
+                ln_asns = ln_asns.difference(&prev_asns).copied().collect();
+            }
+
+            println!("Unique ASN count: {}", ln_asns.len());
+
+            let max_requests = 2;
+            let request_bucket_size = 2;
+            let request_refill_delay = Duration::from_millis(1000);
+            let request_limiter = Arc::new(TokenBucket::new(
+                request_refill_delay,
+                request_bucket_size,
+                max_requests,
+            ));
+
+            let (tx, rx) = unbounded_channel();
+            let asn_info = new_file_writer(datadir, "asn_info.txt");
+
+            tokio::spawn(info_writer(rx, asn_info));
+
+            let client = reqwest::Client::new();
+            let mut req_count = 0;
+
+            for asn in ln_asns {
+                let _permit = request_limiter.acquire().await;
+                req_count += 1;
+                if req_count % 15 == 0 {
+                    println!("FetchASNInfo: {req_count}");
+                }
+
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = fetch_asn_info(&client, asn, tx).await {
+                        println!("FetchASNInfo: fetch issue: {}, {}", asn, e);
+                    }
+                });
+            }
+
+            drop(tx);
+            sleep(Duration::from_secs(2)).await;
+
+            Ok(())
+        }
+
         Commands::ExtractAddrsNodeInfo { input_file } => {
             let datadir = "./gossip_dump";
             let node_infos = fs::read_to_string(input_file)?;
