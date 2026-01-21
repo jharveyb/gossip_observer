@@ -5,31 +5,21 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime
+import pandas as pd
 from sklearn.preprocessing import PowerTransformer
 from sklearn.preprocessing import StandardScaler
-from ipaddress import ip_address
 
-# load mempool.space data from node_info.txt
-# load channels from full_channel_list.txt
-# load nodes from full_node_list.txt and supplemental
-# merge data from all sources
+# Import shared utilities and configuration
+from ln_data_utils import (
+    DATA_DIR,
+    MS_INFO_FILE,
+    load_lightning_graph,
+    net_type,
+)
 
-# --- Configuration ---
-DATA_DIR = "./data"
-
-# Dump of JSON node objects from LDK gossip graph
-NODE_FILE = f"{DATA_DIR}/full_node_list.txt"
-
-# Nodes that LDK knew about but which had no announcement info
-# So possibly offline, or with bad message propagation
-NODE_MISSING_ANN_FILE = f"{DATA_DIR}/node_missing_ann.txt"
-
-# Info on nodes scraped from mempool.space; most of this is 'historical' /
-# can't be computed from the current gossip graph directly
-MS_INFO_FILE = f"{DATA_DIR}/node_info.txt"
-
-# Dump of JSON channel objects from LDK gossip graph
-CHANNEL_FILE = f"{DATA_DIR}/full_channel_list.txt"
+# Auxiliary input files
+ASN_INFO_FILE = f"{DATA_DIR}/asn_info.txt"
+COUNTRY_CONVERTER_FILE = f"{DATA_DIR}/country_data.tsv"
 
 # Outputs
 # CSV format is node_one,node_two,scid,capacity,normalized_capacity
@@ -41,58 +31,12 @@ NODE_NORM_INITIAL_FILE = f"{DATA_DIR}/nodes_normalized_initial.csv"
 
 
 # From the gossip channel list, we want capacity and std-scaled(log-normalized) capacity
-def load_channel_list(channel_file):
-    with open(channel_file, "r") as f:
-        channel_data = json.load(f)
-
-    edge_features = list()
-    for channel in channel_data:
-        try:
-            node1 = channel.get("node_one")
-            node2 = channel.get("node_two")
-            scid = channel.get("scid")
-            capacity = channel.get("capacity")
-            if capacity:
-                edge_features.append((node1, node2, scid, capacity))
-        except (KeyError, TypeError):
-            continue
-
-    return edge_features
 
 
-def load_node_list(node_file):
-    with open(node_file, "r") as f:
-        node_list = json.load(f)
+def load_ms_info(ms_file=None):
+    if ms_file is None:
+        ms_file = MS_INFO_FILE
 
-    node_features = list()
-    for node in node_list:
-        try:
-            pubkey = node.get("pubkey")
-            info = node.get("info")
-            # Nodes without info will be handled when loading a different file
-            if info:
-                alias = info.get("alias")
-
-                node_features.append((pubkey, alias))
-        except (KeyError, TypeError):
-            continue
-
-    return node_list
-
-
-def load_nodes_no_info(node_file):
-    with open(node_file, "r") as f:
-        node_list = json.load(f)
-
-    node_features = list()
-    for node in node_list:
-        pubkey = node.get("pubkey")
-        node_features.append((pubkey, None))
-
-    return node_features
-
-
-def load_ms_info(ms_file):
     with open(ms_file, "r") as f:
         node_list = json.load(f)
 
@@ -141,6 +85,48 @@ def load_ms_info(ms_file):
     return node_features
 
 
+def load_asn_info(asn_file=None):
+    if asn_file is None:
+        asn_file = ASN_INFO_FILE
+
+    with open(asn_file, "r") as f:
+        asn_list = json.load(f)
+
+    asn_params = dict()
+    for asn in asn_list:
+        try:
+            as_number = asn.get("asn")
+            country = asn.get("country")
+            desc = asn.get("description")
+            org = asn.get("org")
+            asn_type = asn.get("type")
+            asn_params[as_number] = (country, desc, org, asn_type)
+        except (KeyError, TypeError):
+            continue
+
+    return asn_params
+
+
+def load_region_info(country_file=None):
+    if country_file is None:
+        country_file = COUNTRY_CONVERTER_FILE
+
+    df = pd.read_csv(country_file, sep="\t")
+    return df
+
+
+def iso2_to_subregion(region_info, iso_code):
+    # look up matching row, then field
+    subregion = region_info[region_info["ISO2"] == iso_code]["UNregion"]
+    return subregion
+
+
+def subregion_to_category(unregion):
+    # map regions to something less dimensional
+    return
+
+
+# not rlly needed any more, just read from annotated graph
 def normalize_chan_capacities(edge_features):
     caps = [feature[3] for feature in edge_features]
     np_cap = np.array(caps).reshape(-1, 1)
@@ -157,64 +143,66 @@ def normalize_chan_capacities(edge_features):
     return full_edge_features, log_std
 
 
-# normalize_node_features
+# TODO: add extra features to vertices
+def annotate_vertices(node_features=None):
+    G, node_list, node_to_idx = load_lightning_graph()
 
+    print("Annotating vertices with extra properties...")
+    if node_features is None:
+        node_features = load_ms_info()
 
-def is_clearnet(addr):
-    # Addresses always have ports. Strip them:
-    # IPv6 with port: [2001:db8::1]:9735 -> find ] and strip after
-    # IPv4 with port: 192.168.1.1:9735 -> find last : and strip after
+    df_region_info = load_region_info()
+    asn_info = load_asn_info()
+    # look up our annotations by pubkey
+    pubkeys = [node[0] for node in node_features]
+    pubkey_to_metadata_idx = {node[0]: idx for idx, node in enumerate(node_features)}
+    active = [node[1] for node in node_features]
+    closed = [node[2] for node in node_features]
+    opened = [node[3] for node in node_features]
+    age = [node[4] for node in node_features]
+    # TODO: map to binary features
+    asn = [node[5] for node in node_features]
+    iso = [node[6] for node in node_features]
+    net_types = [node[7] for node in node_features]
+    sockets = [node[8] for node in node_features]
+    alias = [node[9] for node in node_features]
 
-    if addr.startswith("["):
-        # IPv6 format: [::1]:9735
-        idx = addr.rfind("]")
-        if idx != -1:
-            addr = addr[1:idx]  # Extract IP between [ and ]
-    else:
-        # IPv4 format: 1.2.3.4:9735
-        idx = addr.rfind(":")
-        if idx != -1:
-            addr = addr[:idx]  # Everything before last :
+    # add to graph
+    vprop_active = G.new_vertex_property("int")
+    vprop_closed = G.new_vertex_property("int")
+    vprop_opened = G.new_vertex_property("int")
+    vprop_age = G.new_vertex_property("int")
+    vprop_asn = G.new_vertex_property("string")
+    vprop_iso = G.new_vertex_property("string")
+    vprop_net_type = G.new_vertex_property("string")
+    vprop_sockets = G.new_vertex_property("string")
+    vprop_alias = G.new_vertex_property("string")
+    for v in G.vertices():
+        pubkey = G.vp.name[v]
+        if pubkey in pubkey_to_metadata_idx:
+            # Handle empty strings?
+            idx = pubkey_to_metadata_idx[pubkey]
+            vprop_active[v] = active[idx]
+            vprop_closed[v] = closed[idx]
+            vprop_opened[v] = opened[idx]
+            vprop_age[v] = age[idx]
+            vprop_asn[v] = asn[idx]
+            vprop_iso[v] = iso[idx]
+            vprop_net_type[v] = net_types[idx]
+            vprop_sockets[v] = sockets[idx]
+            vprop_alias[v] = alias[idx]
 
-    try:
-        ip_address(addr)
-        return True
-    except ValueError:
-        return False
+    G.vp.active = vprop_active
+    G.vp.closed = vprop_closed
+    G.vp.opened = vprop_opened
+    G.vp.age = vprop_age
+    G.vp.asn = vprop_asn
+    G.vp.iso = vprop_iso
+    G.vp.net_type = vprop_net_type
+    G.vp.sockets = vprop_sockets
+    G.vp.alias = vprop_alias
 
-
-def is_tor(addr):
-    if "onion" in addr:
-        return True
-    else:
-        return False
-
-
-def net_type(addr_list):
-    # ~500 nodes have "" for the socket field; so no addresses broadcast?
-    if addr_list is None or addr_list == "":
-        return "none"
-    addrs = addr_list.split(",")
-    has_clearnet = False
-    has_tor = False
-    for addr in addrs:
-        addr = addr.strip()  # Remove whitespace
-        if not addr:  # Skip empty strings
-            continue
-        if is_clearnet(addr):
-            has_clearnet = True
-        elif is_tor(addr):
-            has_tor = True
-
-    if has_clearnet and has_tor:
-        return "both"
-    elif has_clearnet:
-        return "clearnet"
-    elif has_tor:
-        return "tor"
-    # this shouldn't happen
-    else:
-        return "none"  # No valid addresses found
+    return G
 
 
 def plot_node_features():
@@ -245,7 +233,7 @@ def plot_node_features():
     axes[3].hist(age)
     axes[3].set_title("Age")
 
-    log_std_age = log1p_normalize(age)
+    log_std_age = log1p_normalize(age, "age")
 
     axes[4].hist(log_std_age)
     axes[4].set_title("Log age")
