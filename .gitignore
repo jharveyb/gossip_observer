@@ -25,4 +25,4 @@ collector_config*
 
 infra/ansible/vault.yml
 .ansible
-infra/ansible/inventory/hosts.ini
+infra/ansible/inventory/hosts.ini*

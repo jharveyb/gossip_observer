@@ -1,0 +1,189 @@
+# Add PostgreSQL PGDG repository for latest PostgreSQL versions
+# https://www.postgresql.org/download/linux/debian/
+- name: Check if PostgreSQL PGDG repo is configured
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/pgdg.sources
+  register: pgdg_repo
+
+- name: Get Tailscale IP address
+  # Pulled when we 'gather facts', as a prelude before tasks are run
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Install postgresql-common package for repo setup script
+  ansible.builtin.apt:
+    name: postgresql-common
+    state: present
+  when: not pgdg_repo.stat.exists
+
+- name: Run PostgreSQL PGDG repository setup script
+  ansible.builtin.shell: |
+    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+  args:
+    creates: /etc/apt/sources.list.d/pgdg.sources
+  when: not pgdg_repo.stat.exists
+
+- name: Check if TimescaleDB repo is configured
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/timescale.sources
+  register: timescale_repo
+
+- name: Download TimescaleDB GPG key
+  ansible.builtin.get_url:
+    url: https://packagecloud.io/timescale/timescaledb/gpgkey
+    dest: /tmp/timescale_gpgkey
+    mode: '0644'
+  when: not timescale_repo.stat.exists
+
+- name: Dearmor TimescaleDB GPG key
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/timescale_timescaledb-archive-keyring.gpg /tmp/timescale_gpgkey
+    creates: /etc/apt/keyrings/timescale_timescaledb-archive-keyring.gpg
+  when: not timescale_repo.stat.exists
+
+- name: Add TimescaleDB repository
+  ansible.builtin.deb822_repository:
+    name: timescale
+    types: deb
+    uris: https://packagecloud.io/timescale/timescaledb/debian/
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: main
+    signed_by: /etc/apt/keyrings/timescale_timescaledb-archive-keyring.gpg
+  when: not timescale_repo.stat.exists
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Install Postgres {{ postgresql_version }}
+  ansible.builtin.apt:
+    name:
+      - postgresql-{{ postgresql_version }}
+      - postgresql-client-{{ postgresql_version }}
+    state: present
+
+- name: Install TimescaleDB
+  ansible.builtin.apt:
+    name:
+      - timescaledb-2-postgresql-{{ postgresql_version }}
+      - timescaledb-2-loader-postgresql-{{ postgresql_version }}
+      - timescaledb-toolkit-postgresql-{{ postgresql_version }}
+    state: present
+
+# Run timescaledb-tune to configure PostgreSQL for TimescaleDB
+- name: Check if TimescaleDB is already in shared_preload_libraries
+  ansible.builtin.shell: |
+    grep -E "^shared_preload_libraries.*timescaledb" /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+  register: tsdb_preload_check
+  failed_when: false
+  changed_when: false
+
+- name: Run timescaledb-tune to configure PostgreSQL
+  ansible.builtin.shell: |
+    timescaledb-tune --quiet --yes
+  when: tsdb_preload_check.rc != 0
+  changed_when: true
+  notify: Restart PostgreSQL
+
+# Allow connections from Tailscale
+- name: Configure PostgreSQL listen_addresses
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+    regexp: "^#?listen_addresses"
+    line: "listen_addresses = 'localhost,{{ tailscale_ip }}'"
+  notify: Restart PostgreSQL
+
+- name: Add Tailscale network to pg_hba.conf
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql/{{ postgresql_version }}/main/pg_hba.conf
+    line: "host    all             all             100.64.0.0/10           scram-sha-256"
+    insertafter: "^# IPv4 local connections"
+  notify: Restart PostgreSQL
+
+# Ensure PostgreSQL is restarted before creating extensions
+- name: Flush handlers to restart PostgreSQL if needed
+  ansible.builtin.meta: flush_handlers
+
+- name: Check if postgres password is already set
+  ansible.builtin.shell: |
+    PGPASSWORD='{{ timescaledb_postgres_password }}' psql -U postgres -h localhost -c "SELECT 1" > /dev/null 2>&1
+  register: password_check
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Set postgres user password
+  ansible.builtin.shell: |
+    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ timescaledb_postgres_password }}';"
+  no_log: true
+  changed_when: true
+  when: password_check.rc != 0
+
+# Create application databases
+- name: Check if database exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '{{ item }}'" | grep -q 1
+  args:
+    executable: /bin/bash
+  loop:
+    - "{{ timescaledb_database_name }}"
+    - "{{ timescaledb_staging_database_name }}"
+  register: db_exists
+  failed_when: false
+  changed_when: false
+
+- name: Create application databases
+  ansible.builtin.shell: |
+    sudo -u postgres psql -c "CREATE DATABASE {{ item.item }} OWNER postgres;"
+  loop: "{{ db_exists.results }}"
+  when: item.rc != 0
+  changed_when: true
+
+# Enable TimescaleDB extension on the databases
+- name: Check if TimescaleDB extension exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    sudo -u postgres psql -d {{ item }} -tc "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'" | grep -q 1
+  args:
+    executable: /bin/bash
+  loop:
+    - "{{ timescaledb_database_name }}"
+    - "{{ timescaledb_staging_database_name }}"
+  register: tsdb_ext_exists
+  failed_when: false
+  changed_when: false
+
+- name: Enable TimescaleDB extension
+  ansible.builtin.shell: |
+    sudo -u postgres psql -d {{ item.item }} -c "CREATE EXTENSION timescaledb;"
+  loop: "{{ tsdb_ext_exists.results }}"
+  when: item.rc != 0
+  changed_when: true
+
+# Enable TimescaleDB toolkit extension (for advanced functions like approx_percentile_array)
+- name: Check if TimescaleDB toolkit extension exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    sudo -u postgres psql -d {{ item }} -tc "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb_toolkit'" | grep -q 1
+  args:
+    executable: /bin/bash
+  loop:
+    - "{{ timescaledb_database_name }}"
+    - "{{ timescaledb_staging_database_name }}"
+  register: tsdb_toolkit_ext_exists
+  failed_when: false
+  changed_when: false
+
+- name: Enable TimescaleDB toolkit extension
+  ansible.builtin.shell: |
+    sudo -u postgres psql -d {{ item.item }} -c "CREATE EXTENSION timescaledb_toolkit;"
+  loop: "{{ tsdb_toolkit_ext_exists.results }}"
+  when: item.rc != 0
+  changed_when: true
+
+# Ensure PostgreSQL is enabled on boot
+- name: Ensure PostgreSQL is enabled
+  ansible.builtin.systemd:
+    name: "postgresql@{{ postgresql_version }}-main"
+    enabled: true

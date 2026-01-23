@@ -7,9 +7,15 @@ base_pkgs:
   - tree
   - iftop
   - ufw
+  - gnupg
+  - apt-transport-https
+  - lsb-release
+  - wget
+  - debian-archive-keyring
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
+ansible_user: "{{ nonroot_username }}"
 hostfile_path: "/inventory/hosts.ini"
 # Every 4 hours
 apt_cache_stale: 14400
@@ -31,3 +37,7 @@ nats_instances:
     service_name: nats-server-prod
     port: 4224
     http_port: 8224
+
+postgresql_version: "18"
+timescaledb_database_name: "gossip_observer"
+timescaledb_staging_database_name: "gossip_observer_staging"

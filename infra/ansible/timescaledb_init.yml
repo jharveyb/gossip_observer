@@ -1,0 +1,17 @@
+- name: Configure TimescaleDB server
+  hosts: timescale
+  # Tailscale SSH
+  become: true
+
+  tasks:
+    - name: TimescaleDB setup
+      block:
+        # must contain 'timescaledb_postgres_password'
+        - name: Load vault variables
+          ansible.builtin.include_vars: vault.yml
+        - name: Import timescaledb tasks
+          ansible.builtin.import_tasks: tasks/timescaledb.yml
+
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml

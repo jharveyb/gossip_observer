@@ -16,10 +16,8 @@
       ansible.builtin.import_tasks: tasks/locale.yml
       tags: [locale]
       become: true
-      remote_user: "{{ nonroot_username }}"
 
     - name: Import base packages tasks
       become: true
-      remote_user: "{{ nonroot_username }}"
       ansible.builtin.import_tasks: tasks/base_pkgs.yml
       tags: [base_pkgs]

@@ -7,8 +7,20 @@
     append: true
     create_home: true
     generate_ssh_key: true
-    # TODO: print fingerprint for initial SSH later?
     ssh_key_type: ed25519
+  register: user_created
+
+- name: Get SSH key fingerprint
+  ansible.builtin.command:
+    cmd: ssh-keygen -lf /home/{{ nonroot_username }}/.ssh/id_ed25519.pub
+  register: ssh_fingerprint
+  changed_when: false
+  when: user_created.ssh_public_key is defined
+
+- name: Display SSH key fingerprint
+  ansible.builtin.debug:
+    msg: "SSH key fingerprint for {{ nonroot_username }}: {{ ssh_fingerprint.stdout }}"
+  when: user_created.ssh_public_key is defined
 
 - name: Register SSH key
   ansible.posix.authorized_key:

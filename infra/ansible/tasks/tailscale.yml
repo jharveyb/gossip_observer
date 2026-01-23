@@ -4,14 +4,13 @@
     name: tailscale
     types: deb
     uris: https://pkgs.tailscale.com/stable/debian
-    suites: bookworm
+    suites: trixie
     components: main
-    signed_by: https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg
+    signed_by: https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg
 
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
-    cache_valid_time: "{{ apt_cache_stale }}"
 
 - name: Install Tailscale
   ansible.builtin.apt:

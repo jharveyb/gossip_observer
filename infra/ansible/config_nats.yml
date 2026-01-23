@@ -1,11 +1,12 @@
 - name: Configure NATS servers
   hosts: nats
   # Tailscale SSH
-  remote_user: "{{ nonroot_username }}"
   become: true
 
   tasks:
-    - import_tasks: tasks/nats.yml
+    - name: NATS setup
+      ansible.builtin.import_tasks: tasks/nats.yml
 
   handlers:
-    - import_tasks: handlers/main.yml
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
