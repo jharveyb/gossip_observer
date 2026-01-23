@@ -141,6 +141,8 @@ def load_basic_channel_list(channel_file=None):
         channel_data = json.load(f)
 
     edge_features = list()
+    total_channels = len(channel_data)
+    one_sided_channels = 0
     for channel in channel_data:
         try:
             node1 = channel.get("node_one")
@@ -149,8 +151,15 @@ def load_basic_channel_list(channel_file=None):
             capacity = channel.get("capacity")
             if capacity:
                 edge_features.append((node1, node2, scid, capacity))
+            one_two = channel.get("one_to_two")
+            two_one = channel.get("two_to_one")
+            if (one_two is None) or (two_one is None):
+                one_sided_channels += 1
         except (KeyError, TypeError):
             continue
+
+    print(f"Number of one-sided channels: {one_sided_channels}")
+    print(f"Total number of channels: {total_channels}")
 
     return edge_features
 

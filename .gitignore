@@ -10,6 +10,8 @@
 /mainnet_data
 /gossip_dump
 /query_results/sbm_results
+/query_results/data/*.csv
+*.pyc
 
 *.duckdb*
 **/archiver_logs*
