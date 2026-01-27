@@ -1,3 +1,5 @@
+use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -6,6 +8,7 @@ use anyhow::anyhow;
 use bitcoin::Network;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
+use lightning::ln::msgs::SocketAddress;
 use rand::seq::SliceRandom;
 use std::fs::read_to_string;
 use tonic::transport::Server as TonicServer;
@@ -58,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
             background_sync_config: Some(sync_cfg),
         }),
     );
+    let ldk_listen_addr = cfg.ldk.listen_addr + ":" + &cfg.ldk.listen_port.to_string();
+    let ldk_listen_addr = SocketAddress::from_str(&ldk_listen_addr)?;
+    builder.set_listening_addresses(vec![ldk_listen_addr])?;
 
     let log_level = match cfg.ldk.log_level.to_lowercase().as_str() {
         "error" => LogLevel::Error,
@@ -123,7 +129,18 @@ async fn main() -> anyhow::Result<()> {
 
     builder.set_custom_logger(Arc::new(writer_exporter));
     builder.set_gossip_source_p2p();
+    let mnemonic_path = format!("{}/mnemonic.txt", &cfg.ldk.storage_dir);
     builder.set_storage_dir_path(cfg.ldk.storage_dir);
+    if let Ok(verified) = Path::new(&mnemonic_path).try_exists()
+        && verified
+    {
+        builder.set_entropy_bip39_mnemonic(
+            bip39::Mnemonic::from_str(&std::fs::read_to_string(&mnemonic_path)?)?,
+            None,
+        );
+    } else {
+        anyhow::bail!("Failed to read mnemonic from {}", mnemonic_path);
+    }
 
     let node = Arc::new(builder.build()?);
     node.start()?;
@@ -178,15 +195,19 @@ async fn main() -> anyhow::Result<()> {
                 println!("Signal handler: received shutdown signal");
             },
             _ = tokio::signal::ctrl_c() => {
-                println!("Signal handler: Ctrl-C received, shutting down");
+                // println!("Signal handler: Ctrl-C received, shutting down");
             },
         }
         let _ = node.clone().stop();
-        println!("Signal handler: shut down LDK node");
+        // println!("Signal handler: shut down LDK node");
         stop_signal.cancel();
-        println!("Signal handler: sent shutdown signal");
+        // println!("Signal handler: sent shutdown signal");
     });
 
+    // All tokio tasks spawned earlier should have a child cancellation token.
+    let _grpc_res = grpc_server.await?.map_err(anyhow::Error::new)?;
+
+    /*
     let final_res = tokio::join!(pending_conn_task, conn_monitor_task, deadline, grpc_server);
 
     // lol
@@ -194,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
     final_res.1?;
     final_res.2?;
     final_res.3??;
+    */
 
     Ok(())
 }

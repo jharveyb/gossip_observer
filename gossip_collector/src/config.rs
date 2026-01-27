@@ -9,6 +9,8 @@ pub struct Ldk {
     pub esplora: String,
     pub storage_dir: String,
     pub log_level: String,
+    pub listen_addr: String,
+    pub listen_port: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +74,8 @@ impl CollectorConfig {
             .set_default("ldk.network", "main")?
             .set_default("ldk.storage_dir", "./observer_ldk")?
             .set_default("ldk.log_level", "debug")?
+            .set_default("ldk.listen_addr", "0.0.0.0")?
+            .set_default("ldk.listen_port", 9735)?
             .set_default("apiserver.hostname", "127.0.0.1")?
             .set_default("apiserver.grpc_port", 50051)?
             .set_default("nats.server_addr", "localhost:4222")?
@@ -83,7 +87,8 @@ impl CollectorConfig {
             .set_default("collector.pending_connection_delay", 10 * 60)?
             .set_default("collector.peer_monitor_interval", 60)?
             // Aim for a 'normal' amount of peers, compared to the implementation defaults of 5-10.
-            .set_default("collector.target_peer_count", 10)?
+            // .set_default("collector.target_peer_count", 10)?
+            .set_default("collector.target_peer_count", 0)?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("COLLECTOR"))
             .build()?;
