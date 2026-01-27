@@ -4,6 +4,7 @@ use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
 use gossip_archiver::INTER_MSG_DELIM;
+use gossip_archiver::MessageHashMapping;
 use gossip_archiver::config::ArchiverConfig;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
@@ -39,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
     let (buf_raw_tx, buf_raw_rx) = unbounded_channel();
     let (buf_timings_tx, buf_timings_rx) = unbounded_channel();
     let (buf_meta_tx, buf_meta_rx) = unbounded_channel();
+    let (buf_hash_mapping_tx, buf_hash_mapping_rx) = unbounded_channel();
     let (buf_tick_tx, buf_tick_rx) = tokio_channel(1);
 
     let database_url = cfg.db_url.to_owned();
@@ -60,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
             buf_raw_rx,
             buf_timings_rx,
             buf_meta_rx,
+            buf_hash_mapping_rx,
             buf_tick_rx,
             cfg.database.batch_size,
         )
@@ -71,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
             buf_raw_tx,
             buf_timings_tx,
             buf_meta_tx,
+            buf_hash_mapping_tx,
             buf_tick_tx,
             cfg.database.flush_interval,
             cfg.database.batch_size,
@@ -97,6 +101,7 @@ pub async fn db_write_ticker(
     buf_raw_tx: UnboundedSender<RawMessage>,
     buf_timings_tx: UnboundedSender<MessageNodeTimings>,
     buf_meta_tx: UnboundedSender<MessageMetadata>,
+    buf_hash_mapping_tx: UnboundedSender<MessageHashMapping>,
     buf_tick_tx: Sender<()>,
     flush_interval: u32,
     batch_size: u32,
@@ -163,11 +168,12 @@ pub async fn db_write_ticker(
             }
 
             msg_counter += 1;
-            let (msg_entry, timings_entry, meta_entry) = split_exported_gossip(msg);
+            let (msg_entry, timings_entry, meta_entry, hash_mapping) = split_exported_gossip(msg);
 
             buf_raw_tx.send(msg_entry)?;
             buf_timings_tx.send(timings_entry)?;
             buf_meta_tx.send(meta_entry)?;
+            buf_hash_mapping_tx.send(hash_mapping)?;
             gossip_msg = None;
         }
     }
@@ -178,6 +184,7 @@ pub async fn db_write_handler(
     mut buf_raw_rx: UnboundedReceiver<RawMessage>,
     mut buf_timings_rx: UnboundedReceiver<MessageNodeTimings>,
     mut buf_meta_rx: UnboundedReceiver<MessageMetadata>,
+    mut buf_hash_mapping_rx: UnboundedReceiver<MessageHashMapping>,
     mut buf_tick_rx: Receiver<()>,
     batch_size: u32,
 ) -> anyhow::Result<()> {
@@ -187,6 +194,7 @@ pub async fn db_write_handler(
     let mut raw_msgs = Vec::with_capacity(batch_size);
     let mut timings = Vec::with_capacity(batch_size);
     let mut metas = Vec::with_capacity(batch_size);
+    let mut hash_mappings = Vec::with_capacity(batch_size);
     let mut should_flush = false;
     loop {
         // TODO: clean up our closed chan. handling
@@ -218,6 +226,15 @@ pub async fn db_write_handler(
                     }
                 }
             }
+            hash_mapping_msg = buf_hash_mapping_rx.recv() => {
+                match hash_mapping_msg {
+                    Some(msg) => hash_mappings.push(msg),
+                    None => {
+                        println!("internal: db_write_handler: hash mapping msg chan closed");
+                        return Ok(());
+                    }
+                }
+            }
             _ = buf_tick_rx.recv() => {
                 should_flush = true;
             }
@@ -239,8 +256,10 @@ pub async fn db_write_handler(
             let db_raws = std::mem::replace(&mut raw_msgs, Vec::with_capacity(batch_size));
             let db_timings = std::mem::replace(&mut timings, Vec::with_capacity(batch_size));
             let db_metas = std::mem::replace(&mut metas, Vec::with_capacity(batch_size));
+            let db_hash_mappings =
+                std::mem::replace(&mut hash_mappings, Vec::with_capacity(batch_size));
 
-            db_batch_write(&pool, db_raws, db_timings, db_metas).await?;
+            db_batch_write(&pool, db_raws, db_timings, db_metas, db_hash_mappings).await?;
         }
     }
 }
@@ -250,6 +269,7 @@ pub async fn db_batch_write(
     raws: Vec<RawMessage>,
     timings: Vec<MessageNodeTimings>,
     metas: Vec<MessageMetadata>,
+    hash_mapppings: Vec<MessageHashMapping>,
 ) -> anyhow::Result<()> {
     // UNNEST is the recommended way to do batch insertions with query!:
     // https://github.com/launchbadge/sqlx/blob/main/FAQ.md#how-can-i-bind-an-array-to-a-values-clause-how-can-i-do-bulk-inserts
@@ -270,9 +290,37 @@ pub async fn db_batch_write(
         .await?;
     }
 
+    // Insert the outer->inner hash mappings
+    if !hash_mapppings.is_empty() {
+        let (outer_hashes, inner_hashes): (Vec<_>, Vec<_>) = hash_mapppings
+            .into_iter()
+            .map(MessageHashMapping::unroll)
+            .multiunzip();
+
+        sqlx::query!(
+            "INSERT INTO message_hashes (outer_hash, inner_hash)
+             SELECT * FROM UNNEST($1::bytea[], $2::bytea[])
+             ON CONFLICT DO NOTHING",
+            &outer_hashes,
+            &inner_hashes
+        )
+        .execute(pool)
+        .await?;
+    }
+
     // Insert timings (time-series data)
     if !timings.is_empty() {
-        let (hashes, collectors, peers, peer_hashes, dirs, net_timestamps, orig_timestamps): (
+        let (
+            hashes,
+            inner_hashes,
+            collectors,
+            peers,
+            peer_hashes,
+            dirs,
+            net_timestamps,
+            orig_timestamps,
+        ): (
+            Vec<_>,
             Vec<_>,
             Vec<_>,
             Vec<_>,
@@ -286,10 +334,11 @@ pub async fn db_batch_write(
             .multiunzip();
 
         sqlx::query!(
-            "INSERT INTO timings (net_timestamp, hash, collector, peer, dir, peer_hash, orig_timestamp)
-             SELECT * FROM UNNEST($1::timestamptz[], $2::bytea[], $3::text[], $4::text[], $5::smallint[], $6::bytea[], $7::timestamptz[])",
+            "INSERT INTO timings (net_timestamp, hash, inner_hash, collector, peer, dir, peer_hash, orig_timestamp)
+             SELECT * FROM UNNEST($1::timestamptz[], $2::bytea[], $3::bytea[], $4::text[], $5::text[], $6::smallint[], $7::bytea[], $8::timestamptz[])",
             &net_timestamps,
             &hashes,
+            &inner_hashes,
             &collectors,
             &peers,
             &dirs,
@@ -302,14 +351,21 @@ pub async fn db_batch_write(
 
     // Insert metadata
     if !metas.is_empty() {
-        let (hashes, types, sizes, orig_nodes, scids): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
-            metas.into_iter().map(MessageMetadata::unroll).multiunzip();
+        let (hashes, inner_hashes, types, sizes, orig_nodes, scids): (
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+            Vec<_>,
+        ) = metas.into_iter().map(MessageMetadata::unroll).multiunzip();
 
         sqlx::query!(
-            "INSERT INTO metadata (hash, type, size, orig_node, scid)
-             SELECT * FROM UNNEST($1::bytea[], $2::smallint[], $3::integer[], $4::text[], $5::bytea[])
+            "INSERT INTO metadata (hash, inner_hash, type, size, orig_node, scid)
+             SELECT * FROM UNNEST($1::bytea[], $2::bytea[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])
              ON CONFLICT DO NOTHING",
             &hashes,
+            &inner_hashes,
             &types,
             &sizes,
             &orig_nodes as &[Option<String>],

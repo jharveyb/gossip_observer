@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO message_hashes (outer_hash, inner_hash)\n             SELECT * FROM UNNEST($1::bytea[], $2::bytea[])\n             ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "ByteaArray",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f853be33d0f061759c841bb2ff456a1dd757b92181f48471773ce63e35f474fb"
+}

@@ -9,10 +9,10 @@ mod test_constants;
 
 pub static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-static V0_MSG_PARTS: usize = 10;
+static V0_MSG_PARTS: usize = 11;
 
-// Format: format_args!("{now},{peer},{msg_type},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
-// ldk-node/src/logger.rs#L272, LdkLogger.export()
+// Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{inner_hash},{msg},{send_ts},{node_id},{scid},{collector_id}")
+// ldk-node/src/logger.rs#L395, LdkLogger.export()
 #[derive(Debug, Clone)]
 pub struct ExportedGossip {
     // stamp set by collector before sending a message over NATS
@@ -33,7 +33,10 @@ pub struct ExportedGossip {
     pub scid: Option<u64>,
     // full unsigned message
     pub msg: String,
+    // XXH3_64 hash of the encoded full message
     pub msg_hash: u64,
+    // XXH3_64 hash of the encoded message with any timestamp and signature removed
+    pub inner_hash: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,7 @@ impl RawMessage {
 #[derive(Debug, Clone)]
 pub struct MessageNodeTimings {
     pub msg_hash: u64,
+    pub inner_hash: u64,
     pub collector: String,
     pub peer: String,
     pub peer_hash: u64,
@@ -65,6 +69,7 @@ impl MessageNodeTimings {
         m: MessageNodeTimings,
     ) -> (
         Vec<u8>,
+        Vec<u8>,
         String,
         String,
         Vec<u8>,
@@ -74,6 +79,7 @@ impl MessageNodeTimings {
     ) {
         (
             m.msg_hash.to_le_bytes().to_vec(),
+            m.inner_hash.to_le_bytes().to_vec(),
             m.collector,
             m.peer,
             m.peer_hash.to_le_bytes().to_vec(),
@@ -87,6 +93,7 @@ impl MessageNodeTimings {
 #[derive(Debug, Clone)]
 pub struct MessageMetadata {
     pub msg_hash: u64,
+    pub inner_hash: u64,
     pub msg_type: u8,
     pub msg_size: u16,
     pub orig_node: Option<String>,
@@ -95,9 +102,12 @@ pub struct MessageMetadata {
 
 impl MessageMetadata {
     #[allow(clippy::type_complexity)]
-    pub fn unroll(m: MessageMetadata) -> (Vec<u8>, i16, i32, Option<String>, Option<Vec<u8>>) {
+    pub fn unroll(
+        m: MessageMetadata,
+    ) -> (Vec<u8>, Vec<u8>, i16, i32, Option<String>, Option<Vec<u8>>) {
         (
             m.msg_hash.to_le_bytes().to_vec(),
+            m.inner_hash.to_le_bytes().to_vec(),
             m.msg_type.into(),
             m.msg_size.into(),
             m.orig_node,
@@ -106,16 +116,38 @@ impl MessageMetadata {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MessageHashMapping {
+    pub outer_hash: u64,
+    pub inner_hash: u64,
+}
+
+impl MessageHashMapping {
+    #[allow(clippy::type_complexity)]
+    pub fn unroll(m: MessageHashMapping) -> (Vec<u8>, Vec<u8>) {
+        (
+            m.outer_hash.to_le_bytes().to_vec(),
+            m.inner_hash.to_le_bytes().to_vec(),
+        )
+    }
+}
+
 // Destructure our decoded message to match our DB schema; one struct per table.
 pub fn split_exported_gossip(
     msg: ExportedGossip,
-) -> (RawMessage, MessageNodeTimings, MessageMetadata) {
+) -> (
+    RawMessage,
+    MessageNodeTimings,
+    MessageMetadata,
+    MessageHashMapping,
+) {
     let raw = RawMessage {
         msg_hash: msg.msg_hash,
         msg: msg.msg,
     };
     let timings = MessageNodeTimings {
         msg_hash: msg.msg_hash,
+        inner_hash: msg.inner_hash,
         collector: msg.collector,
         peer: msg.peer,
         peer_hash: msg.peer_hash,
@@ -125,12 +157,17 @@ pub fn split_exported_gossip(
     };
     let metadata = MessageMetadata {
         msg_hash: msg.msg_hash,
+        inner_hash: msg.inner_hash,
         msg_type: msg.msg_type,
         msg_size: msg.msg_size,
         orig_node: msg.orig_node,
         scid: msg.scid,
     };
-    (raw, timings, metadata)
+    let hash_mapping = MessageHashMapping {
+        outer_hash: msg.msg_hash,
+        inner_hash: msg.inner_hash,
+    };
+    (raw, timings, metadata, hash_mapping)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,6 +213,8 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
 
     // Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
     // ldk-node/src/logger.rs#L281, LdkLogger.export_record()
+    // Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{inner_hash},{msg},{send_ts},{node_id},{scid},{collector_id}")
+    // ldk-node/src/logger.rs#L395, LdkLogger.export()
     let mut next_part = || -> anyhow::Result<&str> {
         parts.next().ok_or(anyhow::anyhow!(
             "decode_msg: incorrect number of parts: {msg}"
@@ -191,6 +230,7 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
     let msg_dir: u8 = next_part()?.parse::<ExportMessageDirection>()?.into();
 
     let msg_size = next_part()?.parse::<u16>()?;
+    let inner_hash = next_part()?.parse::<u64>()?;
     let msg = next_part()?;
     let msg_hash = XX3Hasher::oneshot(msg.as_bytes());
     let msg = msg.to_owned();
@@ -221,6 +261,7 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         scid,
         msg,
         msg_hash,
+        inner_hash,
     })
 }
 
