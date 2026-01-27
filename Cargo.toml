@@ -4,7 +4,8 @@ members = [
         "gossip_analyze",
         "gossip_archiver",
         "observer_common",
-        "tor_proxy", "electrum-cli",
+        "tor_proxy",
+        "electrum-cli",
 ]
 resolver = "3"
 
@@ -29,20 +30,76 @@ lightning-types                = { git = "https://github.com/jharveyb/rust-light
 [profile.dev.package.sqlx-macros]
 opt-level = 3
 
-# Apply the settings from the default release profile.
+# Apply the settings from the default release profile (except incremental).
 [profile.dev.package.ldk-node]
 codegen-units    = 16
-debug            = true
 debug-assertions = false
-incremental      = false
 opt-level        = 3
 overflow-checks  = false
 
 [profile.dev.package.lightning]
 codegen-units    = 16
-debug            = true
 debug-assertions = false
-incremental      = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-background-processor]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-block-sync]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-invoice]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-liquidity]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-macros]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-net-tokio]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-persister]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-rapid-gossip-sync]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-transaction-sync]
+codegen-units    = 16
+debug-assertions = false
+opt-level        = 3
+overflow-checks  = false
+
+[profile.dev.package.lightning-types]
+codegen-units    = 16
+debug-assertions = false
 opt-level        = 3
 overflow-checks  = false
 

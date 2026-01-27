@@ -1887,7 +1887,7 @@ dependencies = [
 [[package]]
 name = "ldk-node"
 version = "0.7.0"
-source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-v0.7.0#f8742958a9a387672e7c3d3f7a76366ec174e7e5"
+source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-v0.7.0#de42f40341d7b9cc19a76760a5fd1a2c9cbdd0ba"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",
@@ -1921,6 +1921,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "twox-hash",
  "vss-client-ng",
  "winapi",
 ]
