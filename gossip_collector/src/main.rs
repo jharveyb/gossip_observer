@@ -9,8 +9,6 @@ use bitcoin::Network;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
-use rand::seq::SliceRandom;
-use std::fs::read_to_string;
 use tonic::transport::Server as TonicServer;
 
 use tokio::time::interval;
@@ -33,16 +31,19 @@ async fn main() -> anyhow::Result<()> {
     console_subscriber::init();
 
     println!("Starting gossip collector");
-    dotenvy::dotenv()?;
+    // Load .env file if present (optional for production with systemd)
+    let _ = dotenvy::dotenv();
     let cfg = CollectorConfig::new()?;
     println!("Gossip collector: {}", cfg.uuid);
 
     // TODO: move peer selection to controller
+    /*
     let mut rng = rand::rng();
     let node_list = read_to_string("./node_addrs_clearnet.txt")?;
     let mut node_list = node_list.lines().map(String::from).collect::<Vec<_>>();
     node_list.shuffle(&mut rng);
     println!("Using node list of {} nodes", node_list.len());
+    */
 
     let stop_signal = CancellationToken::new();
 
@@ -91,23 +92,11 @@ async fn main() -> anyhow::Result<()> {
     // stable. An eligible peer list must be passed in by the Controller.
     let peer_conn_manager = PeerConnManagerHandle::new(stop_signal.child_token());
 
-    // Load an eligible peer list
-    // TODO: move to an RPC call
-    /*
-    let initial_peer_list_size = 250;
-    for _ in 0..initial_peer_list_size {
-        let peer_info = node_list.pop().unwrap();
-        let peer_info = parse_peer_specifier(&peer_info).unwrap();
-        peer_conn_manager.add_eligible_peer(peer_info);
-    }
-    */
-
     // The pending connection sweeper will maintain our message filter list by
     // removing peer pubkeys once we've been connected to them for enough time
     // to have (likely) finished any gossip query request/responses, which would
     // pollute our data.
-
-    let pending_conn_task = tokio::spawn(pending_conn_sweeper(
+    let _pending_conn_task = tokio::spawn(pending_conn_sweeper(
         peer_conn_manager.clone(),
         interval(Duration::from_secs(
             cfg.collector.connection_sweeper_interval.into(),
@@ -155,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // The peer connection monitor will use the eligible peer list to maintain
     // our connection count above a target value.
     let target_peer_count = Arc::new(AtomicUsize::new(cfg.collector.target_peer_count as usize));
-    let conn_monitor_task = tokio::spawn(peer_count_monitor(
+    let _conn_monitor_task = tokio::spawn(peer_count_monitor(
         node.clone(),
         peer_conn_manager.clone(),
         interval(Duration::from_secs(
@@ -189,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let ctrl_handler_stop_signal = stop_signal.child_token();
-    let deadline = tokio::spawn(async move {
+    let _deadline = tokio::spawn(async move {
         tokio::select! {
             _ = ctrl_handler_stop_signal.cancelled() => {
                 println!("Signal handler: received shutdown signal");

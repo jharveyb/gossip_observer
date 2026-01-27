@@ -19,7 +19,8 @@ static STATS_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv()?;
+    // Load .env file if present (optional for production with systemd)
+    let _ = dotenvy::dotenv();
     let cfg = ArchiverConfig::new()?;
 
     // Enable tokio-console
