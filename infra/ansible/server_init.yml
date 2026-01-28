@@ -1,5 +1,7 @@
 - name: Basic server setup
   hosts: all
+  vars:
+    ansible_user: root
 
   tasks:
     - name: Setup user with vault credentials
