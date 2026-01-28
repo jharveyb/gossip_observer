@@ -9,5 +9,10 @@ listen_port = {{ item.ldk_port }}
 hostname = "{{ tailscale_ip }}"
 grpc_port = {{ item.grpc_port }}
 
+[console]
+listen_addr = "{{ tailscale_ip }}"
+listen_port = {{ item.console_port }}
+retention_secs = 120
+
 [nats]
 server_addr = "{{ nats_server_addr_staging }}"

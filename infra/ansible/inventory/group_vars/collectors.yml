@@ -10,6 +10,7 @@ gossip_collectors:
   - uuid: "019bfdbc-10b8-794f-91cb-132c5f4cc390"
     grpc_port: 50051
     ldk_port: 9735
+    console_port: 6669
   # Add more collector instances as needed:
   # - uuid: "019c4870-6f5a-8g94-926b-d7d3628f843b"
   #   grpc_port: 50052
