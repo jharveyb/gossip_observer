@@ -1,0 +1,13 @@
+[ldk]
+network = "main"
+esplora = "{{ esplora_url }}"
+storage_dir = "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
+listen_addr = "0.0.0.0"
+listen_port = {{ item.ldk_port }}
+
+[apiserver]
+hostname = "{{ tailscale_ip }}"
+grpc_port = {{ item.grpc_port }}
+
+[nats]
+server_addr = "{{ nats_server_addr_staging }}"

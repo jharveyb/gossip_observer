@@ -28,3 +28,20 @@
     name: "postgresql@{{ postgresql_version }}-main"
     state: restarted
     daemon_reload: true
+
+- name: Reload systemd config
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart all gossip collectors
+  ansible.builtin.systemd:
+    name: "gossip-collector@{{ item.uuid }}"
+    state: restarted
+    daemon_reload: true
+  loop: "{{ gossip_collectors }}"
+
+- name: Restart gossip-archiver
+  ansible.builtin.systemd:
+    name: "gossip-archiver@{{ archiver_uuid }}"
+    state: restarted
+    daemon_reload: true

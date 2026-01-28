@@ -1,0 +1,85 @@
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  # Pulled when we 'gather facts', as a prelude before tasks are run
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Create base gossip collector directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop:
+    - /var/lib/gossip_collector
+    - /etc/gossip_collector
+
+- name: Create instance-specific directories
+  ansible.builtin.file:
+    path: "{{ item[0] }}/{{ item[1].uuid }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop: "{{ ['/var/lib/gossip_collector', '/etc/gossip_collector'] | product(gossip_collectors) }}"
+
+- name: Create LDK storage directories
+  ansible.builtin.file:
+    path: "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop: "{{ gossip_collectors }}"
+
+- name: Deploy mnemonic files
+  ansible.builtin.copy:
+    content: "{{ gossip_collector_mnemonics[item.uuid] }}\n"
+    dest: "/var/lib/gossip_collector/{{ item.uuid }}/ldk/mnemonic.txt"
+    owner: goss
+    group: goss
+    mode: '0600'
+  loop: "{{ gossip_collectors }}"
+  no_log: true
+
+- name: Deploy collector config files
+  ansible.builtin.template:
+    src: collector_config.toml.j2
+    dest: "/etc/gossip_collector/{{ item.uuid }}/config.toml"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ gossip_collectors }}"
+  notify: Restart all gossip collectors
+
+- name: Deploy gossip collector binary
+  ansible.builtin.copy:
+    src: "{{ gossip_collector_binary_path }}"
+    dest: /usr/local/bin/gossip_collector
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart all gossip collectors
+
+- name: Install gossip collector systemd template
+  ansible.builtin.template:
+    src: gossip-collector@.service.j2
+    dest: /etc/systemd/system/gossip-collector@.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd config
+    - Restart all gossip collectors
+
+- name: Enable and start gossip collector instances
+  ansible.builtin.systemd:
+    name: "gossip-collector@{{ item.uuid }}"
+    enabled: true
+    state: started
+  loop: "{{ gossip_collectors }}"

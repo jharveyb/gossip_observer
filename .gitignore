@@ -4,11 +4,13 @@
 **/ldk_node_data.sqlite
 **/keys_seed
 **/ldk_node.log
+/data/mainnet
 
 /target
 
 /mainnet_data
 /gossip_dump
+/db_dumps
 /query_results/sbm_results
 /query_results/data/*.csv
 *.pyc
@@ -19,10 +21,11 @@
 node_addrs*
 
 .env
-archiver_config*
-collector_config*
+/archiver_config*
+/collector_config*
 **/file_descriptor_set.bin
 
 infra/ansible/vault.yml
 .ansible
 infra/ansible/inventory/hosts.ini*
+infra/ansible/binaries/

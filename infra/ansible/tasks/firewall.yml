@@ -26,18 +26,34 @@
     proto: tcp
     port: 22
     interface_in: "{{ public_interface }}"
+    comment: "Fallback SSH"
 
-- name: Firewall - deny incoming public traffic
+# Always put these rules at the top, before any DENYs
+- name: Firewall - allow LDK P2P ports for collectors
   community.general.ufw:
-    rule: deny
+    rule: allow
     proto: any
+    port: "{{ item.ldk_port }}"
     interface_in: "{{ public_interface }}"
+    comment: "Collector-{{ item.uuid[:8] }}-P2P"
+    insert: 0
+  loop: "{{ gossip_collectors | default([9735]) }}"
+  when: gossip_collectors is defined
 
 - name: Firewall - allow Tailscale
   community.general.ufw:
     rule: allow
     proto: any
     interface_in: "tailscale0"
+    comment: "Tailscale"
+
+# IMPORTANT: Deny rule is last so it doesn't block the allows above
+- name: Firewall - deny incoming public traffic
+  community.general.ufw:
+    rule: deny
+    proto: any
+    interface_in: "{{ public_interface }}"
+    comment: "Deny-public"
 
 # TODO: check if this works; we may also want a reload in addition to enable
 - name: Firewall - Enable

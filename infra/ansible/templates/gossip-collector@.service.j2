@@ -1,0 +1,19 @@
+[Unit]
+Description=Gossip Collector %i
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goss
+Group=goss
+WorkingDirectory=/var/lib/gossip_collector/%i
+Environment="COLLECTOR_UUID=%i"
+Environment="COLLECTOR_MODE=production"
+ExecStart=/usr/local/bin/gossip_collector
+Restart=on-failure
+RestartSec=30
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=multi-user.target

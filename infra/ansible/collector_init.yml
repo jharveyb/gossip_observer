@@ -1,0 +1,15 @@
+- name: Configure Gossip Collector servers
+  hosts: collectors
+  become: true
+
+  pre_tasks:
+    - name: Load vault variables
+      ansible.builtin.include_vars: vault.yml
+
+  tasks:
+    - name: Gossip Collector setup
+      ansible.builtin.import_tasks: tasks/gossip_collector.yml
+
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
