@@ -4,6 +4,8 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{NodeError, PeerDetails};
 use std::str::FromStr;
 use std::sync::Arc;
+use tracing::error;
+use tracing::info;
 
 use observer_common::types::PeerSpecifier;
 
@@ -40,7 +42,7 @@ pub async fn node_peer_connect(
     // Never persist peers, we'll maange that outside of LDK
     match tokio::task::spawn_blocking(move || node_copy.connect(pubkey, addr, false)).await {
         Ok(Ok(_)) => {
-            println!("LDK: node {}: connected", peer_fmt);
+            info!(peer = %peer_fmt, "LDK: node connected");
             Ok(())
         }
         Ok(Err(e)) => match e {
@@ -49,12 +51,12 @@ pub async fn node_peer_connect(
                 anyhow::bail!("{}", err_str);
             }
             _ => {
-                println!("LDK: Unexpected error: {:#?}", e);
+                error!(error = ?e, peer = %peer_fmt, "LDK: Unexpected error");
                 Err(e.into())
             }
         },
         Err(e) => {
-            println!("Tokio: node_peer_connect: {:#?}", e);
+            error!(error = ?e, "Tokio: node_peer_connect error");
             Err(e.into())
         }
     }

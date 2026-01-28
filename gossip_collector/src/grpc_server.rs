@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use observer_common::collectorrpc;
+use tracing::debug;
 
 use crate::{node_manager::current_peers, peer_conn_manager::PeerConnManagerHandle};
 
@@ -91,13 +92,13 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
     ) -> Result<Response<collectorrpc::ShutdownResponse>, Status> {
         // TODO: what do we want to dump from node before shutdown?
         // nodelist, channel list, peer list, etc.
-        println!("Collector: grpc server: received shutdown request");
+        debug!("Collector: grpc server: received shutdown request");
         let _ = self.node.stop();
-        println!("Collector: grpc server: shut down LDK node");
+        debug!("Collector: grpc server: shut down LDK node");
 
         // Possible weird behavior since the gRPC server is using the same token?
         self.stop_token.cancel();
-        println!("Collector: grpc server: sent shutdown signal");
+        debug!("Collector: grpc server: sent shutdown signal");
         Ok(Response::new(collectorrpc::ShutdownResponse {}))
     }
 }

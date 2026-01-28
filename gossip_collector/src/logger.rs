@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 // TODO: Do we need to have this duplicated from ldk-node at all?
 /// Defines a writer for [`Logger`].
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Writer {
     /// Writes logs to the file system.
     FileWriter {
@@ -78,15 +79,20 @@ impl Writer {
     /// are the path to the log file, and the log level.
     pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Writer, ()> {
         if let Some(parent_dir) = Path::new(&file_path).parent() {
-            create_dir_all(parent_dir)
-                .map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {e}"))?;
+            create_dir_all(parent_dir).map_err(|e| {
+                // Use eprintln! here since tracing may not be initialized yet
+                eprintln!("ERROR: Failed to create log parent directory: {e}");
+            })?;
         }
 
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)
-            .map_err(|e| eprintln!("ERROR: Failed to open log file: {e}"))?;
+            .map_err(|e| {
+                // Use eprintln! here since tracing may not be initialized yet
+                eprintln!("ERROR: Failed to open log file: {e}");
+            })?;
 
         Ok(Writer::FileWriter {
             file: Arc::new(Mutex::new(file)),
@@ -94,3 +100,35 @@ impl Writer {
         })
     }
 }
+
+// OPTIONAL: Bridge LDK logs to tracing (currently commented out)
+// Uncomment this code if you want LDK node logs to go through the tracing system
+// instead of the existing file-based Writer implementation
+//
+// pub(crate) struct TracingLogWriter;
+//
+// impl LogWriter for TracingLogWriter {
+//     fn log(&self, record: LogRecord) {
+//         let level = match record.level {
+//             LogLevel::Gossip => tracing::Level::TRACE,
+//             LogLevel::Trace => tracing::Level::TRACE,
+//             LogLevel::Debug => tracing::Level::DEBUG,
+//             LogLevel::Info => tracing::Level::INFO,
+//             LogLevel::Warn => tracing::Level::WARN,
+//             LogLevel::Error => tracing::Level::ERROR,
+//         };
+//
+//         tracing::event!(
+//             level,
+//             target = record.module_path,
+//             file = record.file,
+//             line = record.line,
+//             "{}",
+//             record.args
+//         );
+//     }
+// }
+//
+// Usage in main.rs:
+// let writer = Arc::new(crate::logger::TracingLogWriter);
+// builder.set_custom_logger(writer);

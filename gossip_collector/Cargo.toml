@@ -17,7 +17,8 @@ ldk-node = { version = "0.7" }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.47", features = ["full", "tracing"] }
 
-log = { version = "0.4.22", default-features = false, features = ["std"] }
+log     = { version = "0.4.22", default-features = false, features = ["std"] }
+tracing = "0.1"
 
 async-nats         = "0.44.0"
 console-subscriber = { version = "0.5.0", features = ["parking_lot"] }

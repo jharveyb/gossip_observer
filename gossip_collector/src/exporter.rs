@@ -11,6 +11,10 @@ use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::trace;
 
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
@@ -37,7 +41,7 @@ pub struct StdoutExporter {}
 impl Exporter for StdoutExporter {
     fn export(&self, _msg: String) {
         let now = chrono::Utc::now().timestamp_micros();
-        println!("{now}: exported!");
+        debug!(timestamp = now, "Exported message");
     }
 
     fn set_export_metadata(&self, _meta: String) -> Result<(), String> {
@@ -61,7 +65,7 @@ impl Exporter for NATSExporter {
         // TODO: handle a closed channel (who would close it?)
         if let Err(e) = self.export_tx.send(msg) {
             // TODO: crash?
-            println!("internal exporter error: export(): {e}");
+            error!(error = %e, "Internal exporter error in export()");
         }
     }
 
@@ -96,7 +100,7 @@ impl NATSExporter {
 
     // Build connections + spawn any long-running tasks we need for export.
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        println!("Starting NATS exporter");
+        debug!("Starting NATS exporter");
 
         let export_rx = self.export_rx.take().unwrap();
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
@@ -151,8 +155,8 @@ impl NATSExporter {
                     let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
                     let filter_size = filter_fmt.len();
                     filter_fmt.sort_unstable();
-                    println!("exporter: loaded new filter cfg: size {}", filter_size);
-                    println!("{:?}", filter_fmt);
+                    trace!(size = filter_size, "Exporter: loaded new filter config");
+                    info!(filter = ?filter_fmt, "Filter config details");
 
                     // We don't want to return anything, so just skip any following logic.
                     continue;
@@ -165,7 +169,7 @@ impl NATSExporter {
                     rx_msg
                 }
                 None => {
-                    println!("internal: queue_exported_msg: rx chan closed");
+                    error!("Internal: queue_exported_msg: rx chan closed");
                     break;
                 }
             };
@@ -181,8 +185,8 @@ impl NATSExporter {
                 // Should not happen, this means msg formatting
                 // is broken.
                 None => {
-                    println!("internal: publish_msgs: rx msg format broken");
-                    println!("msg: {msg}");
+                    error!("Internal: publish_msgs: rx msg format broken");
+                    error!(msg = %msg, "Broken message");
                     break;
                 }
             }
@@ -192,7 +196,7 @@ impl NATSExporter {
                     match tx_permit {
                         Ok(permit) => permit.send(msg),
                         Err(e) => {
-                            println!("internal: queue_exported_msg: tx chan error: {e}");
+                            error!(error = %e, "Internal: queue_exported_msg: tx chan error");
                             break;
                         }
                     }
@@ -226,7 +230,7 @@ impl NATSExporter {
                             msg_batch.push(msg);
                         },
                         None => {
-                            println!("internal: publish_msgs: rx stream closed");
+                            error!("Internal: publish_msgs: rx stream closed");
                             break;
                         }
                     }
@@ -236,10 +240,11 @@ impl NATSExporter {
                 }
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
-                        println!(
-                            "Avg. NATS upload + ACK time: {}ms",
-                            total_upload_time / upload_count
+                        debug!(
+                            avg_time_ms = total_upload_time / upload_count,
+                            "Avg. NATS upload + ACK time"
                         );
+                        upload_count = 0;
                     }
                 }
             }
