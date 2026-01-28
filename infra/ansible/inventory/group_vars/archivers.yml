@@ -1,0 +1,17 @@
+# Gossip Archiver group variables
+
+# Binary path for deployment (points to staging directory)
+gossip_archiver_binary_path: "{{ binary_staging_dir }}/current/gossip_archiver"
+
+archiver_uuid: "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"
+
+# Database configuration
+# Connection URL is sensitive and should be in vault.yml as 'archiver_db_url'
+# Example: postgresql://goss:password@localhost:5432/gossip_observer
+archiver_db_batch_size: 10000
+archiver_db_flush_interval: 5
+
+# Deployment configuration
+health_check_enabled: true
+health_check_timeout: 30  # seconds
+service_startup_wait: 10  # seconds to wait after restart

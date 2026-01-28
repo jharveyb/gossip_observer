@@ -1,0 +1,18 @@
+[Unit]
+Description=Gossip Archiver %i
+After=network-online.target postgresql.service nats-server-prod.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goss
+Group=goss
+WorkingDirectory=/var/lib/gossip_archiver/%i
+Environment="ARCHIVER_UUID=%i"
+Environment="ARCHIVER_MODE=production"
+ExecStart=/usr/local/bin/gossip_archiver
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

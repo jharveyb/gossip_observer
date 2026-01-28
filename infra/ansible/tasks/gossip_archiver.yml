@@ -1,0 +1,60 @@
+# Gossip Archiver setup tasks
+# Sets up directories, config, systemd service for archiver
+
+- name: Create base gossip archiver directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop:
+    - /var/lib/gossip_archiver
+    - /etc/gossip_archiver
+
+- name: Create instance-specific directories
+  ansible.builtin.file:
+    path: "{{ item }}/{{ archiver_uuid }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop:
+    - /var/lib/gossip_archiver
+    - /etc/gossip_archiver
+
+- name: Deploy archiver config file
+  ansible.builtin.template:
+    src: archiver_config.toml.j2
+    dest: "/etc/gossip_archiver/{{ archiver_uuid }}/config.toml"
+    owner: goss
+    group: goss
+    mode: '0644'
+  notify: Restart gossip-archiver
+
+- name: Deploy gossip archiver binary
+  ansible.builtin.copy:
+    src: "{{ gossip_archiver_binary_path }}"
+    dest: /usr/local/bin/gossip_archiver
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart gossip-archiver
+
+- name: Install gossip archiver systemd template
+  ansible.builtin.template:
+    src: gossip-archiver@.service.j2
+    dest: /etc/systemd/system/gossip-archiver@.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd config
+    - Restart gossip-archiver
+  register: systemd_template_changed
+
+- name: Enable and start gossip archiver instance
+  ansible.builtin.systemd:
+    name: "gossip-archiver@{{ archiver_uuid }}"
+    enabled: true
+    state: started

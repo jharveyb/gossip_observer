@@ -38,6 +38,12 @@ nats_instances:
     port: 4224
     http_port: 8224
 
+# NATS server, used in both archiver and collector configs
+nats_server_addr_staging: "do-small-test:4223"
+
 postgresql_version: "18"
 timescaledb_database_name: "gossip_observer"
 timescaledb_staging_database_name: "gossip_observer_staging"
+
+# Binary staging directory for deployments
+binary_staging_dir: "{{ playbook_dir }}/binaries"

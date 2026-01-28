@@ -1,0 +1,18 @@
+# Gossip Archiver Configuration
+# UUID is set via ARCHIVER_UUID environment variable in systemd
+
+# Database connection URL
+# Can also be set via ARCHIVER_DB_URL environment variable
+# Format: postgresql://user:password@host:port/database
+db_url = "{{ archiver_db_url }}"
+
+[nats]
+server_addr = "{{ nats_server_addr_staging }}"
+subject_prefix = "observer.*"
+
+[database]
+# Maximum number of items to write to DB at once
+batch_size = {{ archiver_db_batch_size | default(10000) }}
+
+# Seconds between unconditional DB flushes
+flush_interval = {{ archiver_db_flush_interval | default(5) }}
