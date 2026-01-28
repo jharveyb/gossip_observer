@@ -17,5 +17,11 @@ tonic            = "0.14"
 tonic-prost      = "0.14"
 tonic-reflection = "0.14"
 
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time", "local-time"] }
+tracing-appender   = "0.2"
+tracing-journald   = "0.3"
+console-subscriber = { version = "0.5.0", features = ["parking_lot"] }
+
 [build-dependencies]
 tonic-prost-build = "0.14"

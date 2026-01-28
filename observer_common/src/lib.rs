@@ -1,5 +1,6 @@
 use tonic_reflection::server::{v1, v1alpha};
 
+pub mod logging;
 pub mod token_bucket;
 pub mod types;
 
