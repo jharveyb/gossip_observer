@@ -251,6 +251,18 @@ pub async fn peer_count_monitor(
         peer_count < target
     };
 
+    // TODO: configurable? May need to slow down for a smaller machine
+    let attempt_rate = 1;
+    let attempt_refill_delay = Duration::from_secs(2);
+    let total_attempts = 5;
+
+    // The task to refill the limiter is started inside new().
+    let connect_rate_limiter = Arc::new(TokenBucket::new(
+        attempt_refill_delay,
+        attempt_rate,
+        total_attempts,
+    ));
+
     let mut below_target;
     loop {
         // Check our peer count on the given interval.
@@ -267,17 +279,6 @@ pub async fn peer_count_monitor(
 
         // Inner loop to increase peer count until we reach our target.
         let mut cancelled = false;
-        // TODO: configurable? May need to slow down for a smaller machine
-        let attempt_rate = 1;
-        let attempt_refill_delay = Duration::from_secs(2);
-        let total_attempts = 5;
-
-        // The task to refill the limiter is started inside new().
-        let connect_rate_limiter = Arc::new(TokenBucket::new(
-            attempt_refill_delay,
-            attempt_rate,
-            total_attempts,
-        ));
 
         // Loop iteration speed & concurrent connection attempts are limited by our token bucket.
         while below_target {
