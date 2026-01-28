@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -27,14 +28,24 @@ use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pendin
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Enable tokio-console
-    console_subscriber::init();
-
     println!("Starting gossip collector");
     // Load .env file if present (optional for production with systemd)
     let _ = dotenvy::dotenv();
     let cfg = CollectorConfig::new()?;
     println!("Gossip collector: {}", cfg.uuid);
+
+    // Enable tokio-console
+    console_subscriber::ConsoleLayer::builder()
+        // Default is 102_400, let's go lower.
+        .event_buffer_capacity(1024 * 25)
+        // Default is one hour, let's go lower.
+        .retention(Duration::from_secs(cfg.console.retention_secs.into()))
+        // This should only be localhost or Tailscale.
+        .server_addr((
+            cfg.console.listen_addr.parse::<IpAddr>()?,
+            cfg.console.listen_port,
+        ))
+        .init();
 
     // TODO: move peer selection to controller
     /*
@@ -50,9 +61,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn LDK node; use longer sync intervals for chain watching.
     let mut builder = ldk_node::Builder::new();
     let sync_cfg = BackgroundSyncConfig {
-        onchain_wallet_sync_interval_secs: 600,
-        lightning_wallet_sync_interval_secs: 600,
-        fee_rate_cache_update_interval_secs: 600,
+        onchain_wallet_sync_interval_secs: 60 * 8,
+        lightning_wallet_sync_interval_secs: 60 * 4,
+        fee_rate_cache_update_interval_secs: 60 * 10,
     };
 
     builder.set_network(Network::from_core_arg(&cfg.ldk.network)?);

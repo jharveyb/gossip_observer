@@ -47,11 +47,19 @@ pub struct Collector {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Console {
+    pub listen_addr: String,
+    pub listen_port: u16,
+    pub retention_secs: u16,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CollectorConfig {
     pub ldk: Ldk,
     pub apiserver: Apiserver,
     pub nats: Nats,
     pub collector: Collector,
+    pub console: Console,
     pub uuid: String,
 }
 
@@ -82,6 +90,9 @@ impl CollectorConfig {
             .set_default("nats.stream", "observer")?
             // Our NATS messages should be ~500kB.
             .set_default("nats.batch_size", 1024)?
+            .set_default("console.listen_addr", "127.0.0.1")?
+            .set_default("console.listen_port", 6669)?
+            .set_default("console.retention_secs", 120)?
             .set_default("collector.connection_sweeper_interval", 60)?
             // Wait 10 minutes pefore exporting peer messages.
             .set_default("collector.pending_connection_delay", 10 * 60)?

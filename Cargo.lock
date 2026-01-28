@@ -619,6 +619,7 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "hyper-util",
+ "parking_lot",
  "prost 0.14.1",
  "prost-types 0.14.1",
  "serde",
@@ -4352,6 +4353,7 @@ checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
 dependencies = [
  "matchers",
  "once_cell",
+ "parking_lot",
  "regex-automata",
  "sharded-slab",
  "thread_local",

@@ -35,13 +35,13 @@ check-sql:
     cargo sqlx prepare --workspace --check
 
 tracing-collector-prod: build-prod
-    TOKIO_CONSOLE_BIND=127.0.0.1:6969 ./target/release/gossip_collector {{log_prefix}}{{collector_subdir}}{{log_suffix}}
+    ./target/release/gossip_collector {{log_prefix}}{{collector_subdir}}{{log_suffix}}
 
 tracing-collector: build
-    TOKIO_CONSOLE_BIND=127.0.0.1:6969 ./target/debug/gossip_collector {{log_prefix}}{{collector_subdir}}{{log_suffix}}
+    ./target/debug/gossip_collector {{log_prefix}}{{collector_subdir}}{{log_suffix}}
 
 tracing-archiver-prod: build-prod
-    TOKIO_CONSOLE_BIND=127.0.0.1:6970 ./target/release/gossip_archiver {{log_prefix}}{{archiver_subdir}}{{log_suffix}}
+    ./target/release/gossip_archiver {{log_prefix}}{{archiver_subdir}}{{log_suffix}}
 
 tracing-archiver: build
-    TOKIO_CONSOLE_BIND=127.0.0.1:6970 ./target/debug/gossip_archiver {{log_prefix}}{{archiver_subdir}}{{log_suffix}}
+    ./target/debug/gossip_archiver {{log_prefix}}{{archiver_subdir}}{{log_suffix}}
