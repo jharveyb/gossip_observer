@@ -1,0 +1,11 @@
+SQLX_OFFLINE=true
+
+# Used by SQLx
+DATABASE_URL=postgres://postgres:hunter2@vpshostname:5432/gossip_observer_staging
+
+# Set in systemd service files in deployed version
+ARCHIVER_UUID=fab4b62f-9ced-4d17-9c04-67e01c3d4b09
+ARCHIVER_MODE=local
+
+COLLECTOR_UUID=ebfd523b-af32-4ae5-a6e1-c41859e6b07b
+COLLECTOR_MODE=local

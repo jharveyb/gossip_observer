@@ -1,0 +1,10 @@
+tailscale_authkey: "tskey-auth-lotofbase64"
+ssh_pubkey_path: "/home/alice/.ssh/cloudkey.pub"
+timescaledb_postgres_password: "hunter2"
+# This password should match the password above
+archiver_db_url: "postgres://postgres:hunter2@vpshostname:5432/gossip_observer_staging"
+# Any UUIDs here must match the gossip_collectors object in
+# inventory/group_vars/collectors.yml; no need for dashes / '-'
+# since this is a dictionary, not a list
+gossip_collector_mnemonics:
+  "4d34181f-899c-49cc-a43d-2c39d54b1047": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
