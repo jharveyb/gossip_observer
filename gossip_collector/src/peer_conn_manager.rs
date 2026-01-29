@@ -14,6 +14,7 @@ use tokio::{
     time::{Interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use crate::node_manager::{current_peers, node_peer_connect};
 
@@ -179,12 +180,12 @@ pub async fn pending_conn_sweeper(
     loop {
         tokio::select! {
                 _ = waiter.tick() => {
-                    println!("Peer conn manager: sweeper: expiring pending connections");
+                    info!("Peer conn manager: sweeper: expiring pending connections");
                     let msg = ConnManagerMsg::SweepPendingConnections ( startup_delay );
                     handle.mailbox.send(msg).unwrap();
                 }
                 _ = cancel.cancelled() => {
-                    println!("Peer conn manager: sweeper: shutting down");
+                    info!("Peer conn manager: sweeper: shutting down");
                     break;
                 }
         }
@@ -216,7 +217,7 @@ pub async fn try_add_peer(
             }
             // LDK has a connection timeout of 10 seconds, so that will be our maximum delay per socket address.
             Err(e) => {
-                println!("Peer conn manager: Failed to connect to peer: {}", e);
+                debug!(error = %e, "Peer conn manager: Failed to connect to peer");
             }
         }
     }
@@ -247,7 +248,7 @@ pub async fn peer_count_monitor(
     let count_below_target = async || -> bool {
         let peer_count = peer_count().await;
         let target = peer_target.load(SeqCst);
-        println!("Peer count: {peer_count}, target: {target}");
+        info!(peer_count, target, "Peer count check");
         peer_count < target
     };
 
@@ -268,12 +269,12 @@ pub async fn peer_count_monitor(
         // Check our peer count on the given interval.
         tokio::select! {
                 _ = cancel.cancelled() => {
-                    println!("Peer conn manager: monitor: shutting down");
+                    info!("Peer conn manager: monitor: shutting down");
                     break;
                 }
                 _ = waiter.tick() => {
                     below_target = count_below_target().await;
-                    println!("Peer conn manager: monitor tick: below target: {below_target}");
+                    info!(below_target, "Peer conn manager: monitor tick");
                 }
         }
 
@@ -294,18 +295,18 @@ pub async fn peer_count_monitor(
 
             // Missing eligible peers; sleep and wait for some to get added. This should only happen on startup.
             } else {
-                println!("Peer conn manager: no eligible peers");
+                warn!("Peer conn manager: no eligible peers");
                 sleep(Duration::from_secs(15)).await;
             }
 
             cancelled = cancel.is_cancelled();
             if cancelled {
-                println!("Peer conn manager: monitor: shutting down");
+                info!("Peer conn manager: monitor: shutting down");
                 break;
             }
 
             below_target = count_below_target().await;
-            println!("Peer conn manager: below target: {below_target}");
+            debug!(below_target, "Peer conn manager status");
         }
 
         if cancelled {

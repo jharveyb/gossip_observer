@@ -15,9 +15,12 @@ chrono = { version = "0.4", default-features = false, features = [
 config = { version = "0.15.19", features = ["toml"] }
 console-subscriber = "0.5.0"
 dotenvy = "0.15.7"
+tracing = "0.1"
+
 futures = "0.3.31"
 itertools = "0.14"
 lightning = { version = "0.2", features = ["std"] }
+observer_common = { path = "../observer_common" }
 serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.8.0", features = [
   "runtime-tokio",

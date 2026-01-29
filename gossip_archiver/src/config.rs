@@ -1,4 +1,5 @@
 use config::{Config, Environment, File};
+use observer_common::logging::ConsoleConfig;
 use serde::Deserialize;
 use std::env;
 
@@ -30,7 +31,10 @@ pub struct Database {
 pub struct ArchiverConfig {
     pub nats: Nats,
     pub database: Database,
+    pub console: ConsoleConfig,
     pub db_url: String,
+    pub storage_dir: String,
+    pub log_level: String,
     pub uuid: String,
 }
 
@@ -49,6 +53,13 @@ impl ArchiverConfig {
             _ => anyhow::bail!("Unknown ARCHIVER_MODE: {mode}"),
         };
 
+        let storage_dir = match mode.as_str() {
+            "production" => format!("/var/lib/gossip_archiver/{id}"),
+            // We don't expect to use this default
+            "local" => "./archiver".to_string(),
+            _ => anyhow::bail!("Unknown ARCHIVER_MODE: {mode}"),
+        };
+
         let cfg = Config::builder()
             // All default config values
             .set_default("nats.server_addr", "localhost:4222")?
@@ -60,6 +71,11 @@ impl ArchiverConfig {
             .set_default("database.batch_size", 10000)?
             // We'll have mandatory flushes on this interval.
             .set_default("database.flush_interval", 5)?
+            .set_default("console.listen_addr", "127.0.0.1")?
+            .set_default("console.listen_port", 6670)?
+            .set_default("console.retention_secs", 120)?
+            .set_default("storage_dir", storage_dir)?
+            .set_default("log_level", "debug")?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("ARCHIVER"))
             .build()?;

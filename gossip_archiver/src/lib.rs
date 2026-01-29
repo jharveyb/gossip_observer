@@ -1,9 +1,11 @@
+use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
 use lightning::util::logger::ExportMessageDirection;
 use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
 pub mod config;
+pub mod nats;
 #[cfg(test)]
 mod test_constants;
 
@@ -211,8 +213,6 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         .ok_or(anyhow::anyhow!("Invalid message from collector: {msg}"))?;
     let mut parts = parts.into_iter();
 
-    // Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{msg},{send_ts},{node_id},{scid},{collector_id}")
-    // ldk-node/src/logger.rs#L281, LdkLogger.export_record()
     // Format: format_args!("{now},{peer},{msg_type},{msg_dir},{msg_size},{inner_hash},{msg},{send_ts},{node_id},{scid},{collector_id}")
     // ldk-node/src/logger.rs#L395, LdkLogger.export()
     let mut next_part = || -> anyhow::Result<&str> {
@@ -221,7 +221,8 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
         ))
     };
 
-    let net_timestamp = DateTime::from_timestamp_micros(next_part()?.parse::<i64>()?).unwrap();
+    let net_timestamp = DateTime::from_timestamp_micros(next_part()?.parse::<i64>()?)
+        .ok_or_else(|| anyhow!("Invalid net_timestamp"))?;
     // TODO: add another hash for the message, but omitting optional fields?
     let peer = next_part()?;
     let peer_hash = XX3Hasher::oneshot(peer.as_bytes());
@@ -236,7 +237,10 @@ pub fn decode_msg(msg: &str) -> anyhow::Result<ExportedGossip> {
     let msg = msg.to_owned();
     let orig_timestamp = match next_part()? {
         "" => None,
-        x => Some(DateTime::from_timestamp_micros(x.parse::<i64>()?).unwrap()),
+        x => Some(
+            DateTime::from_timestamp_micros(x.parse::<i64>()?)
+                .ok_or_else(|| anyhow!("Invalid orig_timestamp"))?,
+        ),
     };
     let orig_node = match next_part()? {
         "" => None,

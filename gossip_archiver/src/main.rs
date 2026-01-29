@@ -1,11 +1,12 @@
+use std::path::Path;
 use std::time::Duration;
 
+use anyhow::bail;
 use async_nats::Message;
-use async_nats::jetstream;
-use futures::StreamExt;
 use gossip_archiver::INTER_MSG_DELIM;
 use gossip_archiver::MessageHashMapping;
 use gossip_archiver::config::ArchiverConfig;
+use gossip_archiver::nats::nats_reader_with_reconnect;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
@@ -14,26 +15,40 @@ use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
+use tracing::{debug, error, info, warn};
 
 static STATS_INTERVAL: Duration = Duration::from_secs(60);
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Load .env file if present (optional for production with systemd)
     let _ = dotenvy::dotenv();
     let cfg = ArchiverConfig::new()?;
 
-    // Enable tokio-console
-    console_subscriber::init();
+    // Initialize structured logging with tokio-console support.
+    // This must be called BEFORE the tokio runtime is created to avoid
+    // conflicts with console-subscriber's internal tokio::spawn().
+    let _logger_guard = observer_common::logging::init_logging(
+        &cfg.log_level,
+        Path::new(&cfg.storage_dir),
+        "archiver",
+        Some(cfg.console.clone()),
+    )?;
 
-    println!("Gossip archiver: {}", cfg.uuid);
-    let nats_client = async_nats::connect(cfg.nats.server_addr).await?;
-    let stream_ctx = jetstream::new(nats_client);
-    let stream = upsert_stream(stream_ctx, &cfg.nats.stream_name, &cfg.nats.subject_prefix).await?;
-    let consumer =
-        upsert_consumer(stream, &cfg.nats.consumer_name, &cfg.nats.subject_prefix).await?;
-    let msg_stream = consumer.messages().await?;
-    println!("Set up NATS stream and consumer");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async_main(cfg))
+}
+
+async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
+    debug!(uuid = %cfg.uuid, "Gossip archiver initialized");
+
+    // Configure NATS client with extra retry; default ping interval is 60 seconds
+    let nats_options = async_nats::ConnectOptions::new().retry_on_initial_connect(); // Enable reconnection attempts
+    let nats_client = async_nats::connect_with_options(&cfg.nats.server_addr, nats_options).await?;
+    info!("Connected to NATS server");
 
     let (raw_msg_tx, raw_msg_rx) = unbounded_channel();
     let (msg_tx, msg_rx) = unbounded_channel();
@@ -45,17 +60,22 @@ async fn main() -> anyhow::Result<()> {
     let (buf_tick_tx, buf_tick_rx) = tokio_channel(1);
 
     let database_url = cfg.db_url.to_owned();
-    // Ensure database exists
     ensure_database_exists(&database_url).await?;
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&database_url)
         .await?;
-    println!("Initialized TimescaleDB connection");
+    info!("Initialized TimescaleDB connection");
 
-    let nats_recv = raw_msg_tx.clone();
-    let nats_handle = tokio::spawn(async move { nats_reader(msg_stream, nats_recv).await });
+    let nats_reader_cfg = (
+        cfg.nats.stream_name.clone(),
+        cfg.nats.consumer_name.clone(),
+        cfg.nats.subject_prefix.clone(),
+    );
+    let nats_handle = tokio::spawn(async move {
+        nats_reader_with_reconnect(nats_client, nats_reader_cfg, raw_msg_tx).await
+    });
     let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
     let db_handle = tokio::spawn(async move {
         db_write_handler(
@@ -91,12 +111,13 @@ async fn main() -> anyhow::Result<()> {
     ) {
         Ok(_) => Ok(()),
         Err(e) => {
-            println!("Join error: {e}");
+            error!(error = %e, "Join error");
             Err(e.into())
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn db_write_ticker(
     mut msg_rx: UnboundedReceiver<ExportedGossip>,
     buf_raw_tx: UnboundedSender<RawMessage>,
@@ -122,10 +143,12 @@ pub async fn db_write_ticker(
         Ok(0)
     };
 
-    println!("Starting DB write ticker");
-    println!("Flush interval: {flush_interval:?}");
-    println!("Batch size: {batch_size:?}");
-    println!("Stats interval: {STATS_INTERVAL:?}");
+    info!(
+        flush_interval_secs = flush_interval,
+        batch_size,
+        stats_interval_secs = STATS_INTERVAL.as_secs(),
+        "Starting DB write ticker"
+    );
 
     let mut gossip_msg = None;
     let mut flush_tick = false;
@@ -138,9 +161,9 @@ pub async fn db_write_ticker(
                 match msg {
                     Some(msg) => gossip_msg = Some(msg),
                     None => {
-                        // TODO: crash?
-                        println!("internal: db_write_ticker: decoded msg chan closed");
-                        return Ok(());
+                        let errmsg = "Internal: db_write_ticker: msg chan closed";
+                        warn!(errmsg);
+                        bail!(errmsg);
                     }
                 }
             }
@@ -148,7 +171,7 @@ pub async fn db_write_ticker(
                 flush_tick = true;
             }
             _ = stats_waiter.tick() => {
-                println!("Flush count: {poll_counter}, Full buffer count: {full_counter}");
+                debug!(flush_count = poll_counter, full_buffer_count = full_counter, "DB write ticker stats");
                 poll_counter = 0;
                 full_counter = 0;
             }
@@ -189,8 +212,7 @@ pub async fn db_write_handler(
     mut buf_tick_rx: Receiver<()>,
     batch_size: u32,
 ) -> anyhow::Result<()> {
-    println!("Starting DB writer");
-    println!("Batch size: {batch_size:?}");
+    info!(batch_size, "Starting DB writer");
     let batch_size = batch_size as usize;
     let mut raw_msgs = Vec::with_capacity(batch_size);
     let mut timings = Vec::with_capacity(batch_size);
@@ -204,8 +226,9 @@ pub async fn db_write_handler(
                 match raw_msg {
                     Some(msg) => raw_msgs.push(msg),
                     None => {
-                        println!("internal: db_write_handler: raw msg chan closed");
-                        return Ok(());
+                        let errmsg = "Internal: db_write_handler: raw msg chan closed";
+                        warn!(errmsg);
+                        bail!(errmsg);
                     }
                 }
             }
@@ -213,8 +236,9 @@ pub async fn db_write_handler(
                 match timings_msg {
                     Some(msg) => timings.push(msg),
                     None => {
-                        println!("internal: db_write_handler: timings msg chan closed");
-                        return Ok(());
+                        let errmsg = "Internal: db_write_handler: timings msg chan closed";
+                        warn!(errmsg);
+                        bail!(errmsg);
                     }
                 }
             }
@@ -222,8 +246,9 @@ pub async fn db_write_handler(
                 match meta_msg {
                     Some(msg) => metas.push(msg),
                     None => {
-                        println!("internal: db_write_handler: meta msg chan closed");
-                        return Ok(());
+                        let errmsg = "Internal: db_write_handler: meta msg chan closed";
+                        warn!(errmsg);
+                        bail!(errmsg);
                     }
                 }
             }
@@ -231,8 +256,9 @@ pub async fn db_write_handler(
                 match hash_mapping_msg {
                     Some(msg) => hash_mappings.push(msg),
                     None => {
-                        println!("internal: db_write_handler: hash mapping msg chan closed");
-                        return Ok(());
+                        let errmsg = "Internal: db_write_handler: hash mapping msg chan closed";
+                        warn!(errmsg);
+                        bail!(errmsg);
                     }
                 }
             }
@@ -379,48 +405,6 @@ pub async fn db_batch_write(
     Ok(())
 }
 
-// pull msgs from NATS, and ACK the sender / collector so they can continue
-pub async fn nats_reader(
-    mut stream: jetstream::consumer::pull::Stream,
-    raw_msg_tx: UnboundedSender<Message>,
-) -> anyhow::Result<()> {
-    println!("Starting NATS reader");
-
-    let mut msg_count = 0;
-    let mut stats_waiter = time::interval(STATS_INTERVAL);
-    loop {
-        let mut msg_ack_pair = None;
-        tokio::select! {
-            nats_msg = stream.next() => {
-                match nats_msg {
-                    Some(msg) => {
-                        // TODO: if we crash while holding an ACK handle, will
-                        // that hang the collector? I think so, with the current
-                        // stream policy
-                        msg_ack_pair = Some(msg.map_err(anyhow::Error::msg)?.split());
-                    }
-                    None => {
-                        // TODO: crash?
-                        println!("internal: nats_reader: NATS stream closed");
-                        return Ok(());
-                    }
-                }
-            }
-            _ = stats_waiter.tick() => {
-                println!("Avg. NATS msg/min: {}", msg_count);
-                msg_count = 0;
-            }
-        };
-
-        // ACK before we actually write to DB; yeet
-        if let Some((message, ack_handle)) = msg_ack_pair {
-            raw_msg_tx.send(message)?;
-            ack_handle.ack().await.map_err(anyhow::Error::msg)?;
-            msg_count += 1;
-        }
-    }
-}
-
 // split a big NATS msg into multiple decoded msgs
 // TODO: add cancel token
 pub async fn msg_decoder(
@@ -429,64 +413,48 @@ pub async fn msg_decoder(
 ) -> anyhow::Result<()> {
     let mut stats_waiter = time::interval(STATS_INTERVAL);
     loop {
-        tokio::select! {
-            rx_msg = raw_msg_rx.recv() => {
-                match rx_msg {
-                    Some(raw_msg) => {
-                        let inner_msgs = str::from_utf8(&raw_msg.payload)?.split(INTER_MSG_DELIM);
-                        for raw_msg in inner_msgs {
-                            msg_tx.send(decode_msg(raw_msg)?)?;
-                        }
+        let msg = tokio::select! {
+            rx_msg = raw_msg_rx.recv() => rx_msg,
+            _ = stats_waiter.tick() => {
+                debug!(queue_size = raw_msg_rx.len(), "NATS pull queue stats");
+                continue;
+            }
+        };
+
+        match msg {
+            Some(raw_msg) => {
+                let inner_msgs = match str::from_utf8(&raw_msg.payload) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let errmsg = "Failed to decode NATS message as UTF-8";
+                        error!(error = %e, errmsg);
+                        bail!(errmsg);
                     }
-                    None => {
-                        println!("internal: msg_decoder: rx chan closed");
-                        return Ok(());
+                };
+
+                for raw_msg in inner_msgs.split(INTER_MSG_DELIM) {
+                    match decode_msg(raw_msg) {
+                        Ok(decoded) => {
+                            if let Err(e) = msg_tx.send(decoded) {
+                                error!(error = %e, "Failed to send decoded message to downstream");
+                                bail!("Downstream channel closed");
+                            }
+                        }
+                        Err(e) => {
+                            let errmsg = "Failed to decode gossip message";
+                            error!(error = %e, raw_msg_preview = &raw_msg[..raw_msg.len().min(100)], errmsg);
+                            bail!(errmsg);
+                        }
                     }
                 }
             }
-            _ = stats_waiter.tick() => {
-                println!("NATS pull queue size: {}", raw_msg_rx.len());
+            None => {
+                let errmsg = "Internal: msg_decoder: rx chan closed";
+                error!(errmsg);
+                bail!(errmsg);
             }
-        };
+        }
     }
-}
-
-pub async fn upsert_stream(
-    ctx: jetstream::Context,
-    stream_name: &str,
-    subjects: &str,
-) -> anyhow::Result<jetstream::stream::Stream> {
-    let stream = ctx
-        .get_or_create_stream(jetstream::stream::Config {
-            name: stream_name.to_string(),
-            subjects: vec![subjects.to_string()],
-            retention: jetstream::stream::RetentionPolicy::WorkQueue,
-            storage: jetstream::stream::StorageType::Memory,
-            ..Default::default()
-        })
-        .await?;
-    Ok(stream)
-}
-
-pub async fn upsert_consumer(
-    ctx: jetstream::stream::Stream,
-    cons_name: &str,
-    filter_subject: &str,
-) -> anyhow::Result<jetstream::consumer::PullConsumer> {
-    // TODO: review ack policy, behavior if collector is down for maintenance
-    let consumer = ctx
-        .get_or_create_consumer(
-            cons_name,
-            jetstream::consumer::pull::Config {
-                durable_name: Some(cons_name.to_string()),
-                name: Some(cons_name.to_string()),
-                ack_policy: jetstream::consumer::AckPolicy::Explicit,
-                filter_subject: filter_subject.to_string(),
-                ..Default::default()
-            },
-        )
-        .await?;
-    Ok(consumer)
 }
 
 pub async fn ensure_database_exists(database_url: &str) -> anyhow::Result<()> {
@@ -510,10 +478,12 @@ pub async fn ensure_database_exists(database_url: &str) -> anyhow::Result<()> {
     pool.close().await;
 
     if !exists {
-        println!("Database '{}' does not exist", db_name);
-        Err(anyhow::Error::msg("Database does not exist"))
+        let errmsg = "Database does not exist";
+        error!(database = db_name, errmsg);
+        bail!(errmsg);
     } else {
-        println!("Database '{}' already exists", db_name);
+        let errmsg = "Database already exists";
+        info!(database = db_name, errmsg);
         Ok(())
     }
 }

@@ -32,19 +32,12 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let cfg = CollectorConfig::new()?;
 
-    // Build console config for tokio-console integration
-    let console_config = observer_common::logging::ConsoleConfig {
-        listen_addr: cfg.console.listen_addr.clone(),
-        listen_port: cfg.console.listen_port,
-        retention_secs: cfg.console.retention_secs,
-    };
-
     // Initialize structured logging with tokio-console support
     let _logger_guard = observer_common::logging::init_logging(
         &cfg.collector.log_level,
         Path::new(&cfg.collector.storage_dir),
         "collector",
-        Some(console_config),
+        Some(cfg.console.clone()),
     )?;
 
     // Use separate runtimes for ldk-node and our collector tasks.

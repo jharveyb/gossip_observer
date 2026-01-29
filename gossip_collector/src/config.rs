@@ -117,7 +117,7 @@ impl CollectorConfig {
             .set_default("collector.runtime_worker_threads", 2)?
             .set_default("collector.ldk_runtime_worker_threads", 2)?
             .set_default("collector.storage_dir", storage_dir)?
-            .set_default("collector.log_level", "info")?
+            .set_default("collector.log_level", "debug")?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("COLLECTOR"))
             .build()?;
