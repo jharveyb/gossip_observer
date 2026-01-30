@@ -2,15 +2,18 @@
 esplora = "{{ esplora_url }}"
 storage_dir = "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
 listen_addr = "0.0.0.0"
-listen_port = {{ item.ldk_port }}
+listen_port = {{ item.ldk_port | default(9735) }}
+tor_proxy_addr = "{{ item.tor_proxy_addr | default('127.0.0.1') }}"
+tor_proxy_port = {{ item.tor_proxy_port | default(9050) }}
+enable_tor = {{ item.enable_tor | default('true') }}
 
 [apiserver]
 hostname = "{{ tailscale_ip }}"
-grpc_port = {{ item.grpc_port }}
+grpc_port = {{ item.grpc_port | default(50051) }}
 
 [console]
 listen_addr = "{{ tailscale_ip }}"
-listen_port = {{ item.console_port }}
+listen_port = {{ item.console_port | default(6669) }}
 retention_secs = 120
 
 [nats]

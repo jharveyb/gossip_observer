@@ -1,3 +1,11 @@
+- name: Filter collectors for this host
+  ansible.builtin.set_fact:
+    host_collectors: "{{ gossip_collectors | selectattr('host', 'equalto', inventory_hostname) | list }}"
+
+- name: Skip host if no collectors assigned
+  ansible.builtin.meta: end_host
+  when: host_collectors | length == 0
+
 - name: Check Tailscale is available
   ansible.builtin.fail:
     msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
@@ -26,7 +34,7 @@
     owner: goss
     group: goss
     mode: '0755'
-  loop: "{{ ['/var/lib/gossip_collector', '/etc/gossip_collector'] | product(gossip_collectors) }}"
+  loop: "{{ ['/var/lib/gossip_collector', '/etc/gossip_collector'] | product(host_collectors) }}"
 
 - name: Create LDK storage directories
   ansible.builtin.file:
@@ -35,7 +43,7 @@
     owner: goss
     group: goss
     mode: '0755'
-  loop: "{{ gossip_collectors }}"
+  loop: "{{ host_collectors }}"
 
 - name: Deploy mnemonic files
   ansible.builtin.copy:
@@ -44,7 +52,7 @@
     owner: goss
     group: goss
     mode: '0600'
-  loop: "{{ gossip_collectors }}"
+  loop: "{{ host_collectors }}"
   no_log: true
 
 - name: Deploy collector config files
@@ -54,7 +62,7 @@
     owner: goss
     group: goss
     mode: '0644'
-  loop: "{{ gossip_collectors }}"
+  loop: "{{ host_collectors }}"
   notify: Restart all gossip collectors
 
 - name: Deploy gossip collector binary
@@ -82,4 +90,4 @@
     name: "gossip-collector@{{ item.uuid }}"
     enabled: true
     state: started
-  loop: "{{ gossip_collectors }}"
+  loop: "{{ host_collectors }}"

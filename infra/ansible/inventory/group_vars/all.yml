@@ -13,6 +13,7 @@ base_pkgs:
   - wget
   - debian-archive-keyring
   - mosh
+  - tor
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"

@@ -3,16 +3,16 @@
 # Binary path for deployment (points to staging directory)
 gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector"
 
-# Collector instances per host
-# Each collector instance has a unique UUID, gRPC port, and LDK P2P port
-# Multiple collectors can run on the same host using different UUIDs and ports
+# Collector instances - deployed to hosts based on 'host' property
+# Each collector instance has a unique UUID and specifies which host to deploy to
+# For multiple collectors per machine, use unique gRPC port and LDK P2P port
 gossip_collectors:
   - uuid: "019bfdbc-10b8-794f-91cb-132c5f4cc390"
-    grpc_port: 50051
-    ldk_port: 9735
-    console_port: 6669
-  # Add more collector instances as needed:
+    host: "collectors-nyc3-2cpu"  # Must match inventory_hostname
+    # console_port: 6669
+    # grpc_port: 50051
   # - uuid: "019c4870-6f5a-8g94-926b-d7d3628f843b"
+  #   host: "collectors-cluster-2"
   #   grpc_port: 50052
   #   ldk_port: 9736
 
