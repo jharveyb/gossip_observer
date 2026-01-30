@@ -1,3 +1,4 @@
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -55,7 +56,13 @@ fn main() -> anyhow::Result<()> {
             .build()?,
     );
 
-    collector_runtime.block_on(async_main(cfg, ldk_runtime))
+    // Pass a clone of the Arc to async_main; keep ownership here so the runtime
+    // is dropped in main() (sync context) rather than inside block_on (async context).
+    // Dropping a runtime from an async context causes a panic and non-zero exit code.
+    let result = collector_runtime.block_on(async_main(cfg, ldk_runtime.clone()));
+    drop(ldk_runtime);
+
+    result
 }
 
 async fn async_main(
@@ -94,6 +101,15 @@ async fn async_main(
             background_sync_config: Some(sync_cfg),
         }),
     );
+    if cfg.ldk.enable_tor {
+        builder.set_tor_proxy_address(
+            (
+                cfg.ldk.tor_proxy_addr.parse::<Ipv4Addr>()?,
+                cfg.ldk.tor_proxy_port,
+            )
+                .into(),
+        );
+    }
     let ldk_listen_addr = cfg.ldk.listen_addr + ":" + &cfg.ldk.listen_port.to_string();
     let ldk_listen_addr = SocketAddress::from_str(&ldk_listen_addr)?;
     builder.set_listening_addresses(vec![ldk_listen_addr])?;

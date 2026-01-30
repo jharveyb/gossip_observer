@@ -12,6 +12,9 @@ pub struct Ldk {
     pub log_level: String,
     pub listen_addr: String,
     pub listen_port: u16,
+    pub tor_proxy_addr: String,
+    pub tor_proxy_port: u16,
+    pub enable_tor: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +100,9 @@ impl CollectorConfig {
             .set_default("ldk.log_level", "debug")?
             .set_default("ldk.listen_addr", "0.0.0.0")?
             .set_default("ldk.listen_port", 9735)?
+            .set_default("ldk.tor_proxy_addr", "127.0.0.1")?
+            .set_default("ldk.tor_proxy_port", 9050)?
+            .set_default("ldk.enable_tor", false)?
             .set_default("apiserver.hostname", "127.0.0.1")?
             .set_default("apiserver.grpc_port", 50051)?
             .set_default("nats.server_addr", "localhost:4222")?

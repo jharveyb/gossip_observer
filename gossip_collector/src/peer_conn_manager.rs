@@ -296,7 +296,7 @@ pub async fn peer_count_monitor(
             // Missing eligible peers; sleep and wait for some to get added. This should only happen on startup.
             } else {
                 warn!("Peer conn manager: no eligible peers");
-                sleep(Duration::from_secs(15)).await;
+                sleep(Duration::from_secs(30)).await;
             }
 
             cancelled = cancel.is_cancelled();
