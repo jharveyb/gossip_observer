@@ -10,6 +10,11 @@ db_url = "{{ archiver_db_url }}"
 server_addr = "{{ nats_server_addr_staging }}"
 subject_prefix = "observer.*"
 
+[console]
+listen_addr = "{{ tailscale_ip }}"
+listen_port = {{ archiver_console_port }}
+retention_secs = 120
+
 [database]
 # Maximum number of items to write to DB at once
 batch_size = {{ archiver_db_batch_size | default(10000) }}

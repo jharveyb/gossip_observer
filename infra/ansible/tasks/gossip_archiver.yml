@@ -1,5 +1,12 @@
-# Gossip Archiver setup tasks
-# Sets up directories, config, systemd service for archiver
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  # Pulled when we 'gather facts', as a prelude before tasks are run
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
 - name: Create base gossip archiver directories
   ansible.builtin.file:

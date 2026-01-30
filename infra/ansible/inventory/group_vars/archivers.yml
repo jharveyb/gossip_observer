@@ -4,6 +4,7 @@
 gossip_archiver_binary_path: "{{ binary_staging_dir }}/current/gossip_archiver"
 
 archiver_uuid: "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"
+archiver_console_port: 6670
 
 # Database configuration
 # Connection URL is sensitive and should be in vault.yml as 'archiver_db_url'

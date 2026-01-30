@@ -12,6 +12,7 @@ base_pkgs:
   - lsb-release
   - wget
   - debian-archive-keyring
+  - mosh
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
