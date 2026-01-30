@@ -140,6 +140,26 @@ The `product()` filter creates all combinations: `[path1, instance1], [path1, in
 
 This works correctly with Rust's `.trim()` which strips the newline before parsing.
 
+### TOML Template Values
+
+**Quote string values in Jinja2 TOML templates:**
+
+TOML has distinct types - strings must be quoted, but integers and booleans must not:
+
+```jinja2
+# Strings (IPs, URLs, paths) - MUST quote
+tor_proxy_addr = "{{ item.tor_proxy_addr | default('127.0.0.1') }}"
+server_url = "{{ server_url }}"
+
+# Integers - NO quotes
+listen_port = {{ item.port | default(9735) }}
+
+# Booleans - NO quotes
+enable_tor = {{ item.enable_tor | default(true) }}
+```
+
+Unquoted `127.0.0.1` causes TOML to parse it as an invalid float (multiple decimal points).
+
 ### Systemd Service Templates
 
 **Use systemd template units for multi-instance services:**
@@ -159,6 +179,22 @@ Spreads startups over 0-120 seconds to avoid simultaneous resource access.
 
 ## Rust Code Patterns
 
+### Import Style
+
+**Import frequently-used types directly instead of using fully-qualified paths:**
+
+```rust
+// ✅ Good - import the type, use short form
+use tonic::Request;
+
+let request = Request::new(MyRequest {});
+
+// ❌ Avoid - repetitive fully-qualified paths
+let request = tonic::Request::new(MyRequest {});
+```
+
+When a type like `Request` is used multiple times in a file, add it to the imports rather than repeating the full path.
+
 ### Optional File Loading
 
 **Make .env and config files optional for production:**
@@ -177,6 +213,167 @@ let node_list = read_to_string("./nodes.txt")
 ```
 
 Use `let _ =` to ignore `Result` for truly optional operations.
+
+### Error Handling in Async Task Pipelines
+
+**Critical: Don't let single errors crash entire async tasks**
+
+When processing streams of data in async tasks, one malformed message shouldn't kill the entire pipeline:
+
+```rust
+// ❌ Bad - one error exits the entire task
+for msg in messages {
+    process_message(msg)?;  // Exits on first error
+}
+
+// ✅ Good - skip bad messages, continue processing
+for msg in messages {
+    match process_message(msg) {
+        Ok(result) => {
+            // Process result
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to process message, skipping");
+            continue;  // Skip this message, process others
+        }
+    }
+}
+```
+
+**Avoid `.unwrap()` and `.expect()` in production code:**
+
+```rust
+// ❌ Bad - panics on out-of-range values
+DateTime::from_timestamp_micros(ts).unwrap()
+
+// ✅ Good - proper error handling
+DateTime::from_timestamp_micros(ts)
+    .ok_or_else(|| anyhow::anyhow!("Invalid timestamp: {}", ts))?
+```
+
+**Handle channel closures properly:**
+
+When an async task exits, it drops its channel receivers/senders, which closes channels to other tasks. This can cascade:
+
+```rust
+// ❌ Bad - channel closure propagates as error
+raw_msg_tx.send(message)?;  // If receiver dropped, this exits
+
+// ✅ Good - distinguish between channel closure and send errors
+if let Err(e) = raw_msg_tx.send(message) {
+    error!(error = %e, "Downstream channel closed");
+    bail!("Downstream task has exited");
+}
+```
+
+### Network Service Resilience
+
+**Implement reconnection loops for network services:**
+
+Don't exit when connections close - reconnect automatically:
+
+```rust
+pub async fn service_with_reconnect(client: Client) -> anyhow::Result<()> {
+    loop {
+        info!("Connecting to service");
+
+        let connection = match client.connect().await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "Connection failed, retrying in 5s");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // Run service; if it returns, reconnect
+        match run_service(connection).await {
+            Ok(_) => {
+                warn!("Service exited normally, reconnecting");
+            }
+            Err(e) => {
+                error!(error = %e, "Service error, reconnecting");
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+```
+
+**Configure appropriate timeouts for NATS connections:**
+
+- Default ping interval: 60s
+- Max pending pings before disconnect: 2
+- Connection closes after: ~180s without PONG responses (3 missed pings × 60s)
+- Reduce ping interval for faster failure detection:
+
+```rust
+let nats_options = async_nats::ConnectOptions::new()
+    .ping_interval(Duration::from_secs(30))  // Detect failures at 90s instead of 180s
+    .retry_on_initial_connect();
+```
+
+### Message Validation and Parsing
+
+**Validate UTF-8 payloads before processing:**
+
+```rust
+let payload = match str::from_utf8(&raw_msg.payload) {
+    Ok(s) => s,
+    Err(e) => {
+        error!(error = %e, "Non-UTF8 payload, skipping");
+        continue;  // Don't crash, skip this message
+    }
+};
+```
+
+**Log diagnostic information for parse failures:**
+
+```rust
+Err(e) => {
+    warn!(
+        error = %e,
+        msg_preview = &raw_msg[..raw_msg.len().min(100)],
+        "Failed to parse message, skipping"
+    );
+}
+```
+
+### Debugging Distributed Systems
+
+**Common failure patterns:**
+
+1. **Cascade failures**: One task crashes → drops channels → other tasks error on send/recv → entire system fails
+   - Solution: Implement reconnection loops and graceful error handling
+
+2. **Network asymmetry**: Client can send but not receive (firewall/NAT issues)
+   - Symptom: PING sent, no PONG received, connection timeout after 3 missed pings
+   - Debug: Test bidirectional connectivity with `nats rtt`
+
+3. **Stale un-ACKed messages**: Service crashes before ACKing messages
+   - Symptom: Same messages redelivered repeatedly
+   - Check: `nats consumer info` shows high `Outstanding Acks` and `Redelivered Messages`
+
+**Diagnostic logging checklist:**
+
+- Connection state changes (connected, disconnected, reconnecting)
+- Message processing stats (messages/min, queue sizes)
+- Error rates (failed parses, send failures, skip counts)
+- Channel closure events with context
+
+**Useful NATS debugging commands:**
+
+```bash
+# Test connection round-trip time
+nats --server=host:port rtt
+
+# Check consumer state
+nats consumer info -s host:port stream_name consumer_name
+
+# Check stream state
+nats stream info -s host:port stream_name
+```
 
 ### Configuration Patterns
 
