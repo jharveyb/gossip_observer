@@ -11,7 +11,7 @@ use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
 use tonic::transport::Server as TonicServer;
-use tracing::{debug, info};
+use tracing::info;
 
 use tokio::time::interval;
 use tokio::time::sleep;
@@ -70,7 +70,7 @@ async fn async_main(
     ldk_runtime: Arc<tokio::runtime::Runtime>,
 ) -> anyhow::Result<()> {
     info!("Starting gossip collector");
-    debug!(%cfg.uuid, "Gossip collector initialized");
+    info!(%cfg.uuid, "Gossip collector initialized");
 
     // TODO: move peer selection to controller
     /*
@@ -202,7 +202,7 @@ async fn async_main(
         target_peer_count.clone(),
     ));
 
-    debug!(start_time = %chrono::Utc::now().to_rfc3339(), "Collector start time");
+    info!(start_time = %chrono::Utc::now().to_rfc3339(), "Collector start time");
 
     // Start gRPC server
     let grpc_addr = format!("{}:{}", cfg.apiserver.hostname, cfg.apiserver.grpc_port).parse()?;
@@ -215,7 +215,7 @@ async fn async_main(
     let grpc_reflect_compat = observer_common::collector_reflection_service_v1alpha()?;
     let grpc_reflect = observer_common::collector_reflection_service_v1()?;
     let grpc_stop_signal = stop_signal.child_token();
-    debug!(%grpc_addr, "Starting gRPC server");
+    info!(%grpc_addr, "Starting gRPC server");
     let grpc_server = tokio::spawn(async move {
         TonicServer::builder()
             .add_service(grpc_service)
@@ -236,9 +236,9 @@ async fn async_main(
             },
         }
         let _ = node.clone().stop();
-        debug!("Signal handler: shut down LDK node");
+        info!("Signal handler: shut down LDK node");
         stop_signal.cancel();
-        debug!("Signal handler: sent shutdown signal");
+        info!("Signal handler: sent shutdown signal");
     });
 
     // All tokio tasks spawned earlier should have a child cancellation token.

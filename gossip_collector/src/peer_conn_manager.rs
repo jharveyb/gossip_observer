@@ -217,7 +217,7 @@ pub async fn try_add_peer(
             }
             // LDK has a connection timeout of 10 seconds, so that will be our maximum delay per socket address.
             Err(e) => {
-                debug!(error = %e, "Peer conn manager: Failed to connect to peer");
+                info!(error = %e, "Peer conn manager: Failed to connect to peer");
             }
         }
     }
@@ -306,7 +306,7 @@ pub async fn peer_count_monitor(
             }
 
             below_target = count_below_target().await;
-            debug!(below_target, "Peer conn manager status");
+            info!(below_target, "Peer conn manager status");
         }
 
         if cancelled {

@@ -14,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-use tracing::trace;
 
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
@@ -100,7 +99,7 @@ impl NATSExporter {
 
     // Build connections + spawn any long-running tasks we need for export.
     pub async fn start(&mut self) -> anyhow::Result<()> {
-        debug!("Starting NATS exporter");
+        info!("Starting NATS exporter");
 
         let export_rx = self.export_rx.take().unwrap();
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
@@ -153,10 +152,8 @@ impl NATSExporter {
 
                     // Sort for readability.
                     let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
-                    let filter_size = filter_fmt.len();
                     filter_fmt.sort_unstable();
-                    trace!(size = filter_size, "Exporter: loaded new filter config");
-                    info!(filter = ?filter_fmt, "Filter config details");
+                    info!(filter = ?filter_fmt, "Exporter: New filter config details");
 
                     // We don't want to return anything, so just skip any following logic.
                     continue;
@@ -240,7 +237,7 @@ impl NATSExporter {
                 }
                 _ = stats_waiter.tick() => {
                     if upload_count > 0 {
-                        debug!(
+                        info!(
                             avg_time_ms = total_upload_time / upload_count,
                             "Avg. NATS upload + ACK time"
                         );
