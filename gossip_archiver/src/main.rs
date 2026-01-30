@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
-    debug!(uuid = %cfg.uuid, "Gossip archiver initialized");
+    info!(uuid = %cfg.uuid, "Gossip archiver initialized");
 
     // Configure NATS client with extra retry; default ping interval is 60 seconds
     let nats_options = async_nats::ConnectOptions::new().retry_on_initial_connect(); // Enable reconnection attempts
@@ -171,7 +171,7 @@ pub async fn db_write_ticker(
                 flush_tick = true;
             }
             _ = stats_waiter.tick() => {
-                debug!(flush_count = poll_counter, full_buffer_count = full_counter, "DB write ticker stats");
+                info!(flush_count = poll_counter, full_buffer_count = full_counter, "DB write ticker stats");
                 poll_counter = 0;
                 full_counter = 0;
             }
@@ -416,7 +416,7 @@ pub async fn msg_decoder(
         let msg = tokio::select! {
             rx_msg = raw_msg_rx.recv() => rx_msg,
             _ = stats_waiter.tick() => {
-                debug!(queue_size = raw_msg_rx.len(), "NATS pull queue stats");
+                info!(queue_size = raw_msg_rx.len(), "NATS pull queue stats");
                 continue;
             }
         };

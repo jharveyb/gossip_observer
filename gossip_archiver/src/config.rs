@@ -75,7 +75,7 @@ impl ArchiverConfig {
             .set_default("console.listen_port", 6670)?
             .set_default("console.retention_secs", 120)?
             .set_default("storage_dir", storage_dir)?
-            .set_default("log_level", "debug")?
+            .set_default("log_level", "info")?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("ARCHIVER"))
             .build()?;
