@@ -450,7 +450,7 @@ def draw_communities_sfdp(
         )
 
 
-def draw_graph_tool_from_graphml_sbm(graphml_file, sbm_file, level=0):
+def draw_graph_tool_from_graphml_sbm(graphml_file, sbm_file, level=0, interact=False):
     print(f"Loading graph from {graphml_file}...")
     G = gt.load_graph(graphml_file)
 
@@ -474,12 +474,15 @@ def draw_graph_tool_from_graphml_sbm(graphml_file, sbm_file, level=0):
     print(f"Loading NestedBlockState from {sbm_file}...")
     state = load_sbm_state(G, sbm_file)
 
-    for level_idx in range(level + 1):
-        # main draw
-        if level_idx == level:
-            draw_communities_sfdp(G, state, level_idx, interactive=True)
-        else:
-            draw_communities_sfdp(G, state, level_idx)
+    if interact:
+        draw_communities_sfdp(G, state, level, interactive=True)
+    else:
+        for level_idx in range(level + 1):
+            # main draw
+            if level_idx == level:
+                draw_communities_sfdp(G, state, level_idx, interactive=True)
+            else:
+                draw_communities_sfdp(G, state, level_idx)
     return
 
 
@@ -502,6 +505,12 @@ Examples:
         "--draw",
         metavar="GRAPHML",
         help="Load a GraphML file and produce interactive HTML (skip SBM detection)",
+    )
+    parser.add_argument(
+        "--interact",
+        type=bool,
+        default=False,
+        help="Open the interactive graph without saving any images",
     )
     parser.add_argument(
         "--levels",
@@ -644,7 +653,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         draw_graph_tool_from_graphml_sbm(
-            str(graphml_path), str(sbm_path), args.levels - 1
+            str(graphml_path), str(sbm_path), args.levels - 1, args.interact
         )
 
     else:
