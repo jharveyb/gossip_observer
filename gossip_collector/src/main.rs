@@ -212,8 +212,8 @@ async fn async_main(
         stop_signal.clone(),
         target_peer_count.clone(),
     );
-    let grpc_reflect_compat = observer_common::collector_reflection_service_v1alpha()?;
-    let grpc_reflect = observer_common::collector_reflection_service_v1()?;
+    let grpc_reflect_compat = observer_common::reflection_service_v1alpha()?;
+    let grpc_reflect = observer_common::reflection_service_v1()?;
     let grpc_stop_signal = stop_signal.child_token();
     info!(%grpc_addr, "Starting gRPC server");
     let grpc_server = tokio::spawn(async move {
