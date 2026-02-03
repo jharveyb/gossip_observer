@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package common;
+
+message Pubkey {
+  string pubkey = 1;
+}
+
+message SocketAddress {
+  string address = 1;
+}
+
+message NodeAlias {
+        bytes alias = 1;
+}
+
+message OnchainAddress {
+  string address = 1;
+}
+
+message PeerConnectionInfo {
+  Pubkey pubkey = 1;
+  repeated SocketAddress socket_addrs = 2;
+}
+
+// channel info? can be separate message
+// balances? could also be separate
+message CollectorInfo {
+        string uuid = 1;
+        Pubkey pubkey = 2;
+        optional NodeAlias alias = 3;
+        repeated SocketAddress listen_addrs = 4;
+        OnchainAddress onchain_addr = 5;
+        uint32 peer_count = 6;
+        uint32 target_count = 7;
+        uint32 eligible_peers = 8;
+        string grpc_socket = 9;
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}

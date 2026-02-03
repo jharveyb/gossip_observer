@@ -5,23 +5,37 @@ version = "0.1.0"
 
 [dependencies]
 
-anyhow           = "1.0"
-bitcoin          = "0.32.4"
-ldk-node         = { version = "0.7" }
-lightning        = { version = "0.2", features = ["std"] }
-prost            = "0.14"
-serde            = { version = "1.0", features = ["derive"] }
-serde_with       = { version = "3.16.1", features = ["json"] }
-tokio            = { version = "1.47", features = ["full", "tracing"] }
-tonic            = "0.14"
-tonic-prost      = "0.14"
+anyhow = "1.0"
+bitcoin = { version = "0.32.4", features = ["std", "secp-recovery", "serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+        "clock",
+        "serde",
+] }
+ldk-node = { version = "0.7" }
+lightning = { version = "0.2", features = ["std"] }
+prost = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_with = { version = "3.16.1", features = ["json", "hex"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
+tonic = { version = "0.14", features = [
+        "router",
+        "transport",
+        "codegen",
+        "zstd",
+] }
+tonic-prost = "0.14"
 tonic-reflection = "0.14"
 
-tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time", "local-time"] }
-tracing-appender   = "0.2"
-tracing-journald   = "0.3"
 console-subscriber = { version = "0.5.0", features = ["parking_lot"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-journald = "0.3"
+tracing-subscriber = { version = "0.3", features = [
+        "env-filter",
+        "json",
+        "time",
+        "local-time",
+] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package controllerrpc;
+
+import "common.proto";
+
+service ControllerService {
+        // Endpoints for collectors to call.
+        rpc RegisterCollector(common.CollectorInfo) returns (RegisterCollectorResponse);
+        rpc CollectorStatus(common.CollectorInfo) returns (CollectorStatusResponse);
+        // Endpoints for the operator to use.
+        rpc Status(StatusRequest) returns (StatusResponse);
+        rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);
+}
+
+// We'll reply to the collector by calling their endpoints, not in these replies.
+message RegisterCollectorResponse {}
+
+message CollectorStatusResponse {}
+
+message StatusRequest {}
+
+message CollectorHeartbeat {
+        uint64 timestamp = 1;
+        common.CollectorInfo info = 2;
+}
+
+// list collectors, peer count, target count
+message StatusResponse {
+        uint32 total_target_peer_count = 1;
+        uint32 current_peer_count = 2;
+        uint32 online_collector_count = 3;
+        uint32 offline_collector_count = 4;
+        repeated string offline_collectors = 5;
+        repeated CollectorHeartbeat statuses = 6;
+}

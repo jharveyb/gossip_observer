@@ -2,44 +2,34 @@ syntax = "proto3";
 
 package collectorrpc;
 
+import "common.proto";
+
+// TODO: make some of these streaming?
 service CollectorService {
   rpc GetNodeConfig(NodeConfigRequest) returns (NodeConfigResponse);
   rpc PostEligiblePeers(EligiblePeersRequest) returns (EligiblePeersResponse);
   rpc PostTargetPeerCount(TargetPeerCountRequest) returns (TargetPeerCountResponse);
   rpc GetCurrentPeers(CurrentPeersRequest) returns (CurrentPeersResponse);
-  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
-}
-
-message Pubkey {
-  string pubkey = 1;
-}
-
-message SocketAddress {
-  string address = 1;
+  rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);
 }
 
 message NodeConfigRequest {}
 
 message NodeConfigResponse {
-  repeated SocketAddress listen_addrs = 1;
-  optional bytes node_alias = 2;
-  Pubkey node_id = 3;
-}
-
-message PeerConnectionInfo {
-  Pubkey pubkey = 1;
-  repeated SocketAddress socket_addrs = 2;
+  repeated common.SocketAddress listen_addrs = 1;
+  optional common.NodeAlias node_alias = 2;
+  common.Pubkey node_id = 3;
 }
 
 message PeerDetails {
-  Pubkey pubkey = 1;
-  SocketAddress socket_addr = 2;
+  common.Pubkey pubkey = 1;
+  common.SocketAddress socket_addr = 2;
   bool is_persisted = 3;
   bool is_connected = 4;
 }
 
 message EligiblePeersRequest {
-  repeated PeerConnectionInfo peers = 1;
+  repeated common.PeerConnectionInfo peers = 1;
 }
 
 message EligiblePeersResponse {}
@@ -55,7 +45,3 @@ message TargetPeerCountRequest {
 }
 
 message TargetPeerCountResponse {}
-
-message ShutdownRequest {}
-
-message ShutdownResponse {}

@@ -18,12 +18,6 @@ pub struct ConsoleConfig {
 
 /// Initialize structured logging with JSON file output and journald/stderr console output.
 ///
-/// # Arguments
-/// * `log_level` - Default log level (e.g., "info", "debug", "trace")
-/// * `log_dir` - Directory where log files will be written
-/// * `file_prefix` - Prefix for log filenames (e.g., "collector", "archiver")
-/// * `console_config` - Optional tokio-console configuration
-///
 /// # Log Outputs
 /// - **JSON file**: `{log_dir}/{file_prefix}.YYYY-MM-DD.log` (daily rotation)
 /// - **Console**: Native journald if available, otherwise pretty stderr with colors
@@ -35,11 +29,6 @@ pub struct ConsoleConfig {
 /// - `RUST_LOG=gossip_collector=trace` - Trace for collector, default for rest
 /// - `RUST_LOG=gossip_collector::exporter=debug` - Debug just for exporter module
 /// - `RUST_LOG=gossip_collector=debug,ldk_node=warn` - Different levels for different crates
-///
-/// If `RUST_LOG` is not set, falls back to the provided `log_level`.
-///
-/// # UTC Timestamps
-/// All timestamps are in UTC using RFC 3339 format.
 pub fn init_logging(
     log_level: &str,
     log_dir: &Path,

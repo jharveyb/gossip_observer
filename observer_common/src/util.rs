@@ -1,4 +1,4 @@
-use crate::collectorrpc;
+use crate::common;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 
@@ -40,8 +40,8 @@ macro_rules! impl_string_wrapper_conversions {
 }
 
 // Apply the macro to our wrapper types
-impl_string_wrapper_conversions!(collectorrpc::Pubkey, pubkey, PublicKey);
-impl_string_wrapper_conversions!(collectorrpc::SocketAddress, address, SocketAddress);
+impl_string_wrapper_conversions!(common::Pubkey, pubkey, PublicKey);
+impl_string_wrapper_conversions!(common::SocketAddress, address, SocketAddress);
 
 // Generic helper functions that work with any convertible type
 pub fn try_convert_vec<T, U, E>(items: Vec<T>) -> Result<Vec<U>, E>
