@@ -4,7 +4,7 @@ members = [
         "gossip_analyze",
         "gossip_archiver",
         "observer_common",
-        "tor_proxy",
+        "observer_controller",
         "electrum-cli",
 ]
 resolver = "3"
@@ -32,81 +32,54 @@ opt-level = 3
 
 # Apply the settings from the default release profile (except incremental).
 [profile.dev.package.ldk-node]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-background-processor]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-block-sync]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-invoice]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-liquidity]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-macros]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-net-tokio]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-persister]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-rapid-gossip-sync]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-transaction-sync]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 [profile.dev.package.lightning-types]
-codegen-units    = 16
-debug-assertions = false
-opt-level        = 3
-overflow-checks  = false
+codegen-units = 16
+opt-level     = 1
 
 # Add oil
 [profile.dev]
-opt-level = 1
-
-# Remove oil
-[profile.release]
-debug = true
+codegen-units = 16
+opt-level     = 1

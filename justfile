@@ -1,6 +1,4 @@
-
 export SQLX_OFFLINE := "true"
-export RUSTFLAGS := "--cfg tokio_unstable"
 
 build:
     cargo build
@@ -33,3 +31,9 @@ tracing-archiver-prod: build-prod
 
 tracing-archiver: build
     ./target/debug/gossip_archiver
+
+tracing-controller: build
+    ./target/debug/observer_controller
+
+tracing-controller-prod: build
+    ./target/release/observer_controller

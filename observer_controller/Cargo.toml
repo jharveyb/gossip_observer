@@ -1,0 +1,24 @@
+[package]
+edition = "2024"
+name    = "observer_controller"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1.0"
+bitcoin = "0.32.4"
+chrono = { version = "0.4", default-features = false, features = [
+        "clock",
+        "serde",
+] }
+config = { version = "0.15.19", features = ["toml"] }
+console-subscriber = "0.5.0"
+csv = "1.3"
+dotenvy = "0.15.7"
+observer_common = { path = "../observer_common" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.47", features = ["full", "tracing"] }
+tokio-util = { version = "0.7.16", features = ["rt"] }
+toml = "0.9.11"
+tonic = "0.14"
+tracing = "0.1"
