@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, TimeDelta, Utc};
 use observer_common::{
     token_bucket::TokenBucket,
@@ -14,7 +15,7 @@ use tokio::{
     time::{Interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::node_manager::{current_peers, node_peer_connect};
 
@@ -27,6 +28,7 @@ pub struct PendingConnection {
 type PendingConnections = VecDeque<PendingConnection>;
 type PendingConnFilter = HashSet<String>;
 type EligiblePeers = VecDeque<PeerConnectionInfo>;
+type EligiblePeerPubkeys = HashSet<PublicKey>;
 
 pub enum ConnManagerMsg {
     AddPendingConn(PendingConnection),
@@ -35,6 +37,7 @@ pub enum ConnManagerMsg {
     GetPendingConnections(oneshot::Sender<Option<PendingConnections>>),
     PeekEligiblePeer(oneshot::Sender<Option<PeerConnectionInfo>>),
     AddEligiblePeer(PeerConnectionInfo),
+    GetEligiblePeerCount(oneshot::Sender<u32>),
     RotateEligiblePeers,
     EmptyEligiblePeers,
 }
@@ -45,6 +48,7 @@ pub enum ConnManagerMsg {
 struct PeerConnManager {
     mailbox: mpsc::UnboundedReceiver<ConnManagerMsg>,
     eligible_peers: EligiblePeers,
+    eligible_peer_pubkeys: EligiblePeerPubkeys,
     pending_conns: PendingConnections,
     pending_notifier: watch::Sender<PendingConnFilter>,
 }
@@ -57,6 +61,7 @@ impl PeerConnManager {
         PeerConnManager {
             mailbox,
             eligible_peers: VecDeque::new(),
+            eligible_peer_pubkeys: HashSet::new(),
             pending_conns: VecDeque::new(),
             pending_notifier,
         }
@@ -95,7 +100,15 @@ impl PeerConnManager {
                 let _ = resp.send(self.eligible_peers.front().cloned());
             }
             ConnManagerMsg::AddEligiblePeer(peer) => {
-                self.eligible_peers.push_back(peer);
+                // Only add peers we don't already know about.
+                // TODO: add support for updating socket addresses
+                if !self.eligible_peer_pubkeys.contains(&peer.pubkey) {
+                    self.eligible_peer_pubkeys.insert(peer.pubkey);
+                    self.eligible_peers.push_back(peer);
+                }
+            }
+            ConnManagerMsg::GetEligiblePeerCount(resp) => {
+                let _ = resp.send(self.eligible_peers.len() as u32);
             }
             ConnManagerMsg::RotateEligiblePeers => {
                 if !self.eligible_peers.is_empty() {
@@ -104,6 +117,7 @@ impl PeerConnManager {
             }
             ConnManagerMsg::EmptyEligiblePeers => {
                 self.eligible_peers.clear();
+                self.eligible_peer_pubkeys.clear();
             }
         }
     }
@@ -155,6 +169,13 @@ impl PeerConnManagerHandle {
     pub fn add_eligible_peer(&self, info: PeerConnectionInfo) {
         let msg = ConnManagerMsg::AddEligiblePeer(info);
         self.mailbox.send(msg).unwrap();
+    }
+
+    pub async fn get_eligible_peer_count(&self) -> u32 {
+        let (tx, rx) = oneshot::channel();
+        let msg = ConnManagerMsg::GetEligiblePeerCount(tx);
+        self.mailbox.send(msg).unwrap();
+        rx.await.unwrap()
     }
 
     fn add_pending_conn(&self, peer: &PeerSpecifier) {
