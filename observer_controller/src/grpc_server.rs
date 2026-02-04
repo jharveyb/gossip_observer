@@ -130,10 +130,18 @@ pub async fn collector_registration_reply(
         util::try_convert_vec(members_with_sockets)?;
     let eligible_peers = util::try_convert_vec(peer_list)?;
     client.send_eligible_peers(&eligible_peers).await?;
+    info!(
+        "Controller: sent {} peer to collector",
+        eligible_peers.len()
+    );
 
     // Allow the collector to update, then set the appropriate target peer count.
     sleep(Duration::from_millis(250)).await;
     client.set_target_peer_count(stats.connection_count).await?;
+    info!(
+        "Controller: set target peer count to {}",
+        stats.connection_count
+    );
     Ok(())
 }
 

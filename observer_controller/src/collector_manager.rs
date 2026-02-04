@@ -1,25 +1,24 @@
+use rand::prelude::*;
 use std::{
     boxed::Box,
-    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
-    time::Duration,
+    collections::{HashMap, HashSet, hash_map::Entry},
 };
 
-use bitcoin::secp256k1::PublicKey;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{TimeDelta, Utc};
 use observer_common::types::{CollectorHeartbeat, CollectorInfo, ManagerStatus};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Interval, sleep},
+    time::Interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{CommunityStats, csv_reader::NodeAnnotatedRecord};
 
 type CommunityMembers = HashMap<u32, Vec<NodeAnnotatedRecord>>;
 type CollectorCommunityMapping = HashMap<String, u32>;
 type CommunityStatistics = HashMap<u32, CommunityStats>;
-type RegisteredCollectors = HashMap<String, VecDeque<CollectorHeartbeat>>;
+type RegisteredCollectors = HashMap<String, Vec<CollectorHeartbeat>>;
 type ExpectedCollectors = HashSet<String>;
 
 // The three collections (ha) we need to define how we will try to collect data
@@ -87,7 +86,7 @@ impl CollectorManager {
                 let collector_id = info.uuid.clone();
                 match self.registered_collectors.entry(collector_id) {
                     Entry::Occupied(heartbeats) => {
-                        heartbeats.into_mut().push_back(CollectorHeartbeat {
+                        heartbeats.into_mut().push(CollectorHeartbeat {
                             info,
                             timestamp: Utc::now(),
                         });
@@ -98,7 +97,7 @@ impl CollectorManager {
                             info,
                             timestamp: Utc::now(),
                         };
-                        empty.insert(VecDeque::from([hb]));
+                        empty.insert(Vec::from([hb]));
                         let _ = resp.send(CollectorState::New);
                     }
                 }
@@ -108,13 +107,19 @@ impl CollectorManager {
                 for (_, heartbeats) in self.registered_collectors.iter_mut() {
                     heartbeats.retain(|hb| now - hb.timestamp < heartbeat_expiry);
                 }
+                for (uuid, heartbeats) in self.registered_collectors.iter_mut() {
+                    if heartbeats.is_empty() {
+                        info!(collecter_uuid = %uuid, "Collector manager: heartbeat sweeper: collector is inactive");
+                        self.expected_collectors.remove(uuid);
+                    }
+                }
                 self.registered_collectors
                     .retain(|_, heartbeats| !heartbeats.is_empty());
             }
             CollectorManagerMsg::GetRegisteredCollectors(resp) => {
                 let mut latest = Vec::new();
                 self.registered_collectors.values().for_each(|heartbeats| {
-                    if let Some(hb) = heartbeats.front() {
+                    if let Some(hb) = heartbeats.last() {
                         latest.push(hb.clone())
                     }
                 });
@@ -253,7 +258,7 @@ pub async fn handle_collector_info(
         // within the heartbeat sweeping interval, it would still be considered
         // 'Active', but it would also need its community assignment. In that case,
         // provide should be true, and we'll continue on below.
-        info!(collector_uuid = &collector_id, "Collector is active");
+        debug!(collector_uuid = &collector_id, "Collector is active");
         if !provide_info {
             return Ok(None);
         } else {
@@ -301,7 +306,9 @@ pub async fn handle_collector_info(
         community_stats.connection_count
     );
 
-    let community_members = match handle.get_community_members(assigned_community).await? {
+    // Shuffle list order here so we don't sample in the same order between
+    // collector starts.
+    let mut community_members = match handle.get_community_members(assigned_community).await? {
         Some(members) => members,
         None => {
             warn!(
@@ -318,6 +325,7 @@ pub async fn handle_collector_info(
         "Collector community members: {}",
         community_members.len()
     );
+    community_members.shuffle(&mut StdRng::from_os_rng());
 
     Ok(Some((community_stats, community_members)))
 }

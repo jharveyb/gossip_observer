@@ -2,7 +2,7 @@ use ldk_node::PeerDetails;
 use tonic::Request;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tracing::info;
+use tracing::debug;
 
 use crate::collectorrpc;
 use crate::collectorrpc::collector_service_client::CollectorServiceClient;
@@ -18,10 +18,12 @@ pub struct CollectorClient {
 }
 
 impl CollectorClient {
-    pub async fn connect(endpoint: &str) -> anyhow::Result<Self> {
-        info!(endpoint, "Connecting to collector");
+    // TODO: should we enable lazy connection, keepalives, etc.?
+    // Or just recreate clients for each call
+    pub async fn connect(endpoint: &str) -> Result<Self, tonic::transport::Error> {
+        debug!(endpoint, "Connecting to collector");
         let initial_client = CollectorServiceClient::connect(endpoint.to_string()).await?;
-        info!(endpoint, "Connected to collector");
+        debug!(endpoint, "Connected to collector");
         let client = initial_client
             .send_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Zstd)

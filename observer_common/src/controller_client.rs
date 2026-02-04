@@ -1,7 +1,7 @@
 use tonic::Request;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tracing::info;
+use tracing::debug;
 
 use crate::controllerrpc::controller_service_client::ControllerServiceClient;
 use crate::types as observer_types;
@@ -13,10 +13,10 @@ pub struct ControllerClient {
 }
 
 impl ControllerClient {
-    pub async fn connect(endpoint: &str) -> anyhow::Result<Self> {
-        info!(endpoint, "Connecting to controller");
+    pub async fn connect(endpoint: &str) -> Result<Self, tonic::transport::Error> {
+        debug!(endpoint, "Connecting to controller");
         let initial_client = ControllerServiceClient::connect(endpoint.to_string()).await?;
-        info!(endpoint, "Connected to controller");
+        debug!(endpoint, "Connected to controller");
         let client = initial_client
             .send_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Zstd)

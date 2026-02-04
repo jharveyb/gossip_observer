@@ -151,9 +151,11 @@ impl NATSExporter {
                     msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
 
                     // Sort for readability.
-                    let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
-                    filter_fmt.sort_unstable();
-                    info!(filter = ?filter_fmt, "Exporter: New filter config details");
+                    if !msg_filter_rules.is_empty() {
+                        let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
+                        filter_fmt.sort_unstable();
+                        info!(filter = ?filter_fmt, "Exporter: New filter config details");
+                    }
 
                     // We don't want to return anything, so just skip any following logic.
                     continue;
