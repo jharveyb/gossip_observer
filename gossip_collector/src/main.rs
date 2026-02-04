@@ -1,8 +1,7 @@
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering::SeqCst};
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -11,11 +10,13 @@ use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
 use tonic::transport::Server as TonicServer;
-use tracing::info;
+use tracing::{error, info};
 
 use tokio::time::interval;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+
+use observer_common::controller_client::ControllerClient;
 
 mod config;
 mod exporter;
@@ -26,6 +27,7 @@ mod peer_conn_manager;
 use crate::config::CollectorConfig;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
+use crate::node_manager::{connected_peer_count, next_address};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
 fn main() -> anyhow::Result<()> {
@@ -111,8 +113,12 @@ async fn async_main(
         );
     }
     let ldk_listen_addr = cfg.ldk.listen_addr + ":" + &cfg.ldk.listen_port.to_string();
-    let ldk_listen_addr = SocketAddress::from_str(&ldk_listen_addr)?;
-    builder.set_listening_addresses(vec![ldk_listen_addr])?;
+    let ldk_listen_addrs = vec![SocketAddress::from_str(&ldk_listen_addr)?];
+    builder.set_listening_addresses(ldk_listen_addrs.clone())?;
+
+    // Use the first few chars of our UUID for our node alias, for now.
+    let ldk_raw_alias = cfg.uuid.chars().take(24).collect::<String>();
+    builder.set_node_alias(ldk_raw_alias.clone())?;
 
     let mnemonic_path = format!("{}/mnemonic.txt", &cfg.ldk.storage_dir);
     if let Ok(verified) = Path::new(&mnemonic_path).try_exists()
@@ -225,6 +231,30 @@ async fn async_main(
             .await
     });
 
+    // Start task to send register and send heartbeat messages to the controller.
+    let ldk_alias = node.node_alias();
+    let initial_onchain_address = next_address(node.clone())?;
+    let info_template = observer_common::types::CollectorInfo {
+        uuid: cfg.uuid.clone(),
+        pubkey: node.node_id(),
+        alias: ldk_alias,
+        listen_addrs: ldk_listen_addrs,
+        onchain_addr: initial_onchain_address,
+        peer_count: 0,
+        target_count: target_peer_count.load(SeqCst) as u32,
+        eligible_peers: 0,
+        grpc_socket: format!("http://{}", grpc_addr),
+    };
+
+    let _controller_task = tokio::spawn(ping_controller(
+        node.clone(),
+        peer_conn_manager.clone(),
+        target_peer_count.clone(),
+        cfg.collector.controller_addr.clone(),
+        stop_signal.child_token(),
+        info_template,
+    ));
+
     let ctrl_handler_stop_signal = stop_signal.child_token();
     let _signal_handler = tokio::spawn(async move {
         tokio::select! {
@@ -254,5 +284,116 @@ async fn async_main(
     final_res.3??;
     */
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CollectorState {
+    Running,
+    ReceivedPeers,
+    Connecting,
+    Active,
+}
+
+pub async fn ping_controller(
+    node: Arc<ldk_node::Node>,
+    peer_conn_manager: PeerConnManagerHandle,
+    peer_target: observer_common::types::SharedUsize,
+    controller_addr: String,
+    cancel: CancellationToken,
+    initial_info: observer_common::types::CollectorInfo,
+) -> anyhow::Result<()> {
+    let mut state = CollectorState::Running;
+    let mut info = initial_info;
+
+    // Within this task, we expect all other subsystems of the controller to be running
+    // (LDK node, peer connection manager). We also assume that the controller address
+    // is always resolvable. If it's not reachable, we should be retrying.
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Collector: controller ping task: shutting down");
+                break;
+            }
+            _ = sleep(Duration::from_secs(90)) => {
+            }
+        }
+
+        info.peer_count = connected_peer_count(node.clone()).await as u32;
+        info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await;
+        info.target_count = peer_target.load(SeqCst) as u32;
+        info.onchain_addr = next_address(node.clone())?;
+
+        // If we fail to connect to the controller, retry indefinitely. The collector
+        // can't do anything without its peer list.
+        let mut client = match ControllerClient::connect(&controller_addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = ?e, endpoint = %controller_addr, state = ?state, "Failed to connect to controller");
+                continue;
+            }
+        };
+
+        // For each state, we'll progress as we make peer connections. Otherwise, we should
+        // stay in the same state.
+        match state {
+            CollectorState::Running => {
+                // If we have any peers, then some previous registration worked.
+                if info.eligible_peers > 0 {
+                    state = CollectorState::ReceivedPeers;
+                } else {
+                    // We've just started; register with the controller; our server will receive
+                    // the peer list.
+                    match client.register(info.clone()).await {
+                        Ok(_) => {
+                            info!(
+                                "Collector: controller ping task: successfully registered with controller"
+                            );
+                        }
+                        Err(e) => {
+                            error!(error = ?e, "Collector: controller ping task: failed to register with controller");
+                        }
+                    }
+                    continue;
+                }
+            }
+            CollectorState::ReceivedPeers => {
+                // We have at least one connection.
+                if info.peer_count > 0 {
+                    state = CollectorState::Connecting;
+                }
+            }
+            CollectorState::Connecting => {
+                // We have enough connections.
+                if info.peer_count >= info.target_count {
+                    state = CollectorState::Active;
+                }
+            }
+            CollectorState::Active => {
+                // Move back a state if our peer count drops.
+                if info.peer_count < info.target_count {
+                    state = CollectorState::Connecting;
+                }
+            }
+        }
+
+        // Peer list may have been emptied, we should re-register / go back to initial state.
+        if info.eligible_peers == 0 {
+            state = CollectorState::Running;
+            continue;
+        }
+
+        // Send our heartbeat.
+        match client.send_status(info.clone()).await {
+            Ok(_) => {
+                info!(state = ?state, "Collector: controller ping task: successfully sent heartbeat");
+            }
+            Err(e) => {
+                error!(error = ?e, state = ?state, "Collector: controller ping task: failed to send heartbeat");
+            }
+        }
+    }
+
+    //
     Ok(())
 }

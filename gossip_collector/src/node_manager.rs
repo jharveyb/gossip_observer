@@ -1,7 +1,9 @@
 use anyhow::anyhow;
+use bitcoin::Address;
 use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::config::ChannelConfig;
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::{NodeError, PeerDetails};
+use ldk_node::{BalanceDetails, NodeError, PeerDetails, UserChannelId};
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::error;
@@ -66,4 +68,46 @@ pub async fn current_peers(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Vec
     tokio::task::spawn_blocking(move || node_copy.list_peers())
         .await
         .map_err(anyhow::Error::msg)
+}
+
+pub async fn connected_peer_count(node_copy: Arc<ldk_node::Node>) -> usize {
+    let peer_list = current_peers(node_copy).await.unwrap_or_default();
+    peer_list
+        .iter()
+        .fold(0, |acc, i| if i.is_connected { acc + 1 } else { acc })
+}
+
+pub fn next_address(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Address> {
+    let addr = node_copy.onchain_payment().new_address()?;
+    Ok(addr)
+}
+
+pub fn balances(node_copy: Arc<ldk_node::Node>) -> BalanceDetails {
+    node_copy.list_balances()
+}
+
+pub async fn open_channel(
+    node_copy: Arc<ldk_node::Node>,
+    peer: PeerSpecifier,
+    amount_sats: u64,
+    push_amount_msat: Option<u64>,
+    channel_cfg: Option<ChannelConfig>,
+) -> anyhow::Result<UserChannelId> {
+    let pubkey = peer.pubkey;
+    let addr = peer.addr.clone();
+    match tokio::task::spawn_blocking(move || {
+        node_copy.open_announced_channel(pubkey, addr, amount_sats, push_amount_msat, channel_cfg)
+    })
+    .await
+    {
+        Ok(Ok(id)) => Ok(id),
+        Ok(Err(e)) => {
+            error!(error = ?e, peer = ?peer, amount = %amount_sats, "Collector: LDK: Unexpected error");
+            Err(e.into())
+        }
+        Err(e) => {
+            error!(error = ?e, "Tokio: open_channel error");
+            Err(e.into())
+        }
+    }
 }

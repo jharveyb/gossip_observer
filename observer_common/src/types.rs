@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize};
 
@@ -65,6 +66,23 @@ pub struct PeerSpecifier {
     pub pubkey: PublicKey,
     #[serde_as(as = "DisplayFromStr")]
     pub addr: SocketAddress,
+}
+
+// Use this to prefer connecting to clearnet addresses, for peers with multiple addresses.
+pub fn compare_for_sort(a: &PeerSpecifier, b: &PeerSpecifier) -> Ordering {
+    let is_tor = |addr: &SocketAddress| -> bool {
+        matches!(
+            addr,
+            SocketAddress::OnionV2(_) | SocketAddress::OnionV3 { .. }
+        )
+    };
+    let a_tor = is_tor(&a.addr);
+    let b_tor = is_tor(&b.addr);
+    match (a_tor, b_tor) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) | (true, true) => Ordering::Equal,
+    }
 }
 
 // All the network addresses we have for a specific peer.

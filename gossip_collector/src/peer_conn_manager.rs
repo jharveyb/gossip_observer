@@ -8,16 +8,16 @@ use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, TimeDelta, Utc};
 use observer_common::{
     token_bucket::TokenBucket,
-    types::{PeerConnectionInfo, PeerSpecifier, SharedUsize},
+    types::{PeerConnectionInfo, PeerSpecifier, SharedUsize, compare_for_sort},
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{Interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::node_manager::{current_peers, node_peer_connect};
+use crate::node_manager::{connected_peer_count, node_peer_connect};
 
 #[derive(Clone)]
 pub struct PendingConnection {
@@ -201,7 +201,7 @@ pub async fn pending_conn_sweeper(
     loop {
         tokio::select! {
                 _ = waiter.tick() => {
-                    info!("Peer conn manager: sweeper: expiring pending connections");
+                    debug!("Peer conn manager: sweeper: expiring pending connections");
                     let msg = ConnManagerMsg::SweepPendingConnections ( startup_delay );
                     handle.mailbox.send(msg).unwrap();
                 }
@@ -220,7 +220,8 @@ pub async fn try_add_peer(
     node: Arc<ldk_node::Node>,
     peer: PeerConnectionInfo,
 ) {
-    let peer_specifiers = peer.split();
+    let mut peer_specifiers = peer.split();
+    peer_specifiers.sort_by(compare_for_sort);
     for spec in peer_specifiers.iter() {
         cm.add_pending_conn(spec);
     }
@@ -260,16 +261,10 @@ pub async fn peer_count_monitor(
     cancel: CancellationToken,
     peer_target: SharedUsize,
 ) {
-    let peer_count = async || -> usize {
-        let peer_list = current_peers(node_handle.clone()).await.unwrap_or_default();
-        peer_list
-            .iter()
-            .fold(0, |acc, i| if i.is_connected { acc + 1 } else { acc })
-    };
     let count_below_target = async || -> bool {
-        let peer_count = peer_count().await;
+        let peer_count = connected_peer_count(node_handle.clone()).await;
         let target = peer_target.load(SeqCst);
-        info!(peer_count, target, "Peer count check");
+        debug!(peer_count, target, "Peer count check");
         peer_count < target
     };
 

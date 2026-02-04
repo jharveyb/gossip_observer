@@ -25,6 +25,11 @@ pub const SERVER_FD_SET: &[u8] = include_bytes!("gen/file_descriptor_set.bin");
 // is already unbounded.
 pub const MAX_RECV_MSG_SIZE: usize = 1024 * 1024 * 32;
 
+// TODO: Default settings for our gRPC clients.
+pub const KEEPALIVE_INTERVAL: usize = 30;
+pub const REQUEST_TIMEOUT: usize = 15;
+pub const KEEPALIVE_RETRIES: usize = 3;
+
 /// v1 reflection; stabilized, newer version
 pub fn reflection_service_v1()
 -> anyhow::Result<v1::ServerReflectionServer<impl v1::ServerReflection>> {

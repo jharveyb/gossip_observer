@@ -60,6 +60,8 @@ pub struct Collector {
     pub ldk_runtime_worker_threads: usize,
 
     pub log_level: String,
+
+    pub controller_addr: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,7 +122,7 @@ impl CollectorConfig {
             // .set_default("collector.target_peer_count", 10)?
             .set_default("collector.target_peer_count", 0)?
             // Default to 2 workers for collector and LDK; may want to bump LDK up for tons of peers
-            .set_default("collector.runtime_worker_threads", 2)?
+            .set_default("collector.runtime_worker_threads", 3)?
             .set_default("collector.ldk_runtime_worker_threads", 2)?
             .set_default("collector.storage_dir", storage_dir)?
             .set_default("collector.log_level", "info")?
