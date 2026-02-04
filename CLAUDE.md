@@ -172,10 +172,11 @@ Unquoted `127.0.0.1` causes TOML to parse it as an invalid float (multiple decim
 
 ```ini
 [Service]
-RandomizedDelaySec=120
+RandomizedDelaySec=120  # For collectors with many instances
+RandomizedDelaySec=30   # For controllers with few instances
 ```
 
-Spreads startups over 0-120 seconds to avoid simultaneous resource access.
+Spreads startups over 0-N seconds to avoid simultaneous resource access. Use larger values (120s) for services with many instances that may restart together (collectors). Use smaller values (30s) for services with few instances (controllers, archivers) where faster startup is preferred.
 
 ## Rust Code Patterns
 
@@ -456,6 +457,64 @@ ansible_python_interpreter=/usr/bin/python3
 5. Deploy systemd template (single, affects all)
 6. Enable and start each instance (loop)
 
+### Deploying Data Files with Services
+
+**Some services need data files (CSVs, JSON, TOML) copied to their storage directories:**
+
+1. **Store files in `infra/ansible/files/{service}/`** - Committed to version control
+2. **Define file paths in group_vars** - Per-instance paths for flexibility
+3. **Use separate copy tasks** - One per file type for clear error messages
+4. **Reference in config templates using basename** - Config points to deployed location
+
+**Example: Observer Controller with shared CSVs and per-environment mapping**
+
+Group vars pattern:
+
+```yaml
+observer_controllers:
+  - uuid: "abc-123"
+    host: "do-medium"
+    # Shared data files (same for all environments)
+    node_clusterings_file: "{{ playbook_dir }}/files/controller/nodes.csv"
+    node_communities_file: "{{ playbook_dir }}/files/controller/communities.csv"
+    # Environment-specific files
+    collector_mapping_file: "{{ playbook_dir }}/files/controller/staging/mapping.toml"
+```
+
+Task pattern (separate tasks for clarity):
+
+```yaml
+- name: Deploy node clusterings
+  ansible.builtin.copy:
+    src: "{{ item.node_clusterings_file }}"
+    dest: "/var/lib/service/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }} - node_clusterings"
+  notify: Restart all controllers
+
+# Repeat for node_communities_file, collector_mapping_file, etc.
+```
+
+Config template pattern:
+
+```jinja2
+[network_info]
+# Reference deployed files using basename filter
+node_clusterings = "/var/lib/service/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
+node_communities = "/var/lib/service/{{ item.uuid }}/{{ item.node_communities_file | basename }}"
+```
+
+#### Benefits
+
+- Per-instance file paths allow staging/prod to use different files
+- Separate copy tasks provide clear error messages when files are missing
+- Using `basename` in templates ensures correct filename regardless of source path
+- Files are versioned in git alongside Ansible playbooks
+
 ### Handler Strategy for Multi-Instance Services
 
 When binary/template changes, restart ALL instances together (simpler, predictable). Individual config changes can restart all or implement granular per-instance restarts depending on complexity needs.
@@ -497,3 +556,11 @@ ansible-playbook playbook.yml --ask-vault-pass
 ```
 
 Store mnemonics and DB passwords in vault, keyed by instance UUID.
+
+**Not all services need vault secrets:**
+
+- Collectors: Need mnemonics (private keys) in vault
+- Archivers: Need database connection strings in vault
+- Controllers: No secrets needed (reads public network data, exposes internal gRPC only)
+
+If a playbook includes `vault.yml` but doesn't use any vault variables, the vault file will still be loaded (no harm, just unnecessary).
