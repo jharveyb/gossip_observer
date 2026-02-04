@@ -48,3 +48,11 @@
     daemon_reload: true
   loop: "{{ host_archivers }}"
   when: host_archivers is defined and host_archivers | length > 0
+
+- name: Restart all observer controllers
+  ansible.builtin.systemd:
+    name: "observer-controller@{{ item.uuid }}"
+    state: restarted
+    daemon_reload: true
+  loop: "{{ host_controllers }}"
+  when: host_controllers is defined and host_controllers | length > 0

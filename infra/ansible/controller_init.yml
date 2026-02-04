@@ -1,0 +1,12 @@
+---
+- name: Configure Observer Controller servers
+  hosts: controllers
+  become: true
+
+  tasks:
+    - name: Observer Controller setup
+      ansible.builtin.import_tasks: tasks/observer_controller.yml
+
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml

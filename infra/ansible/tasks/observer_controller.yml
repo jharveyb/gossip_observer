@@ -1,0 +1,111 @@
+---
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Filter controllers for this host
+  ansible.builtin.set_fact:
+    host_controllers: "{{ observer_controllers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+
+- name: Skip host if no controllers assigned
+  ansible.builtin.meta: end_host
+  when: host_controllers | length == 0
+
+- name: Create base observer controller directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop:
+    - /var/lib/observer_controller
+    - /etc/observer_controller
+
+- name: Create instance-specific directories
+  ansible.builtin.file:
+    path: "{{ item[0] }}/{{ item[1].uuid }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop: "{{ ['/var/lib/observer_controller', '/etc/observer_controller'] | product(host_controllers) }}"
+
+- name: Deploy controller input files (node clusterings)
+  ansible.builtin.copy:
+    src: "{{ item.node_clusterings_file }}"
+    dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }} - node_clusterings"
+  notify: Restart all observer controllers
+
+- name: Deploy controller input files (node communities)
+  ansible.builtin.copy:
+    src: "{{ item.node_communities_file }}"
+    dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_communities_file | basename }}"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }} - node_communities"
+  notify: Restart all observer controllers
+
+- name: Deploy controller input files (collector mapping)
+  ansible.builtin.copy:
+    src: "{{ item.collector_mapping_file }}"
+    dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.collector_mapping_file | basename }}"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }} - collector_mapping"
+  notify: Restart all observer controllers
+
+- name: Deploy controller config files
+  ansible.builtin.template:
+    src: controller_config.toml.j2
+    dest: "/etc/observer_controller/{{ item.uuid }}/config.toml"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_controllers }}"
+  notify: Restart all observer controllers
+
+- name: Deploy observer controller binary
+  ansible.builtin.copy:
+    src: "{{ observer_controller_binary_path }}"
+    dest: /usr/local/bin/observer_controller
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart all observer controllers
+
+- name: Install observer controller systemd template
+  ansible.builtin.template:
+    src: observer-controller@.service.j2
+    dest: /etc/systemd/system/observer-controller@.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd config
+    - Restart all observer controllers
+  register: systemd_template_changed
+
+- name: Enable and start observer controller instances
+  ansible.builtin.systemd:
+    name: "observer-controller@{{ item.uuid }}"
+    enabled: true
+    state: started
+  loop: "{{ host_controllers }}"

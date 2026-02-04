@@ -1,0 +1,27 @@
+# Observer Controller group variables
+
+# Binary path for deployment
+observer_controller_binary_path: "{{ binary_staging_dir }}/current/observer_controller"
+
+# List of controller instances
+# Each controller manages one environment (staging or production)
+observer_controllers:
+  # Staging controller
+  - uuid: "019c26e9-cb39-78ad-bb60-93d04942017b"
+    host: "do-medium"
+    grpc_port: 50060
+    console_port: 6680
+    total_connections: 100
+    node_clusterings_file: "{{ playbook_dir }}/files/controller/nodes_normalized_initial.csv"
+    node_communities_file: "{{ playbook_dir }}/files/controller/ln_communities_nested_all_levels.csv"
+    collector_mapping_file: "{{ playbook_dir }}/files/controller/staging/collector_mapping.toml"
+
+  # Production controller
+  - uuid: "019c26ea-281a-71eb-b14a-dce305b168c8"
+    host: "do-medium"
+    grpc_port: 50061
+    console_port: 6681
+    total_connections: 700
+    node_clusterings_file: "{{ playbook_dir }}/files/controller/nodes_normalized_initial.csv"
+    node_communities_file: "{{ playbook_dir }}/files/controller/ln_communities_nested_all_levels.csv"
+    collector_mapping_file: "{{ playbook_dir }}/files/controller/prod/collector_mapping.toml"

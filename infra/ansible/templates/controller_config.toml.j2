@@ -1,0 +1,19 @@
+[controller]
+storage_dir = "/var/lib/observer_controller/{{ item.uuid }}"
+log_level = "{{ item.log_level | default('info') }}"
+total_connections = {{ item.total_connections | default(700) }}
+heartbeat_expiry = {{ item.heartbeat_expiry | default(600) }}
+
+[grpc]
+hostname = "{{ tailscale_ip }}"
+port = {{ item.grpc_port | default(50061) }}
+
+[console]
+listen_addr = "{{ tailscale_ip }}"
+listen_port = {{ item.console_port | default(6681) }}
+retention_secs = 120
+
+[network_info]
+node_clusterings = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
+node_communities = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_communities_file | basename }}"
+collector_mapping = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.collector_mapping_file | basename }}"

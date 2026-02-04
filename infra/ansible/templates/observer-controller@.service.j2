@@ -1,0 +1,19 @@
+[Unit]
+Description=Observer Controller %i
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goss
+Group=goss
+WorkingDirectory=/var/lib/observer_controller/%i
+Environment="CONTROLLER_UUID=%i"
+Environment="CONTROLLER_MODE=production"
+ExecStart=/usr/local/bin/observer_controller
+Restart=on-failure
+RestartSec=30
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=multi-user.target
