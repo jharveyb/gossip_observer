@@ -36,9 +36,11 @@
     port: "{{ item.ldk_port }}"
     interface_in: "{{ public_interface }}"
     comment: "Collector-{{ item.uuid[:8] }}-P2P"
-    insert: 0
-  loop: "{{ gossip_collectors | default([9735]) }}"
-  when: gossip_collectors is defined
+    insert: 1
+  loop: "{{ gossip_collectors | default([]) }}"
+  when:
+    - "'collectors' in group_names"
+    - gossip_collectors is defined
 
 - name: Firewall - allow Tailscale
   community.general.ufw:
