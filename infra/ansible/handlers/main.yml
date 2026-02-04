@@ -41,8 +41,10 @@
   loop: "{{ host_collectors }}"
   when: host_collectors is defined and host_collectors | length > 0
 
-- name: Restart gossip-archiver
+- name: Restart all gossip archivers
   ansible.builtin.systemd:
-    name: "gossip-archiver@{{ archiver_uuid }}"
+    name: "gossip-archiver@{{ item.uuid }}"
     state: restarted
     daemon_reload: true
+  loop: "{{ host_archivers }}"
+  when: host_archivers is defined and host_archivers | length > 0

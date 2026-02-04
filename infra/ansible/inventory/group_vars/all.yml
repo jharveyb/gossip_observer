@@ -14,6 +14,7 @@ base_pkgs:
   - debian-archive-keyring
   - mosh
   - tor
+  - rsync
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
@@ -42,6 +43,7 @@ nats_instances:
 
 # NATS server, used in both archiver and collector configs
 nats_server_addr_staging: "do-small-test:4223"
+nats_server_addr_prod: "do-small-test:4224"
 
 postgresql_version: "18"
 timescaledb_database_name: "gossip_observer"

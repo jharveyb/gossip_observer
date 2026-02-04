@@ -8,6 +8,14 @@
   ansible.builtin.set_fact:
     tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
+- name: Filter archivers for this host
+  ansible.builtin.set_fact:
+    host_archivers: "{{ gossip_archivers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+
+- name: Skip host if no archivers assigned
+  ansible.builtin.meta: end_host
+  when: host_archivers | length == 0
+
 - name: Create base gossip archiver directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -21,23 +29,22 @@
 
 - name: Create instance-specific directories
   ansible.builtin.file:
-    path: "{{ item }}/{{ archiver_uuid }}"
+    path: "{{ item[0] }}/{{ item[1].uuid }}"
     state: directory
     owner: goss
     group: goss
     mode: '0755'
-  loop:
-    - /var/lib/gossip_archiver
-    - /etc/gossip_archiver
+  loop: "{{ ['/var/lib/gossip_archiver', '/etc/gossip_archiver'] | product(host_archivers) }}"
 
-- name: Deploy archiver config file
+- name: Deploy archiver config files
   ansible.builtin.template:
     src: archiver_config.toml.j2
-    dest: "/etc/gossip_archiver/{{ archiver_uuid }}/config.toml"
+    dest: "/etc/gossip_archiver/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
     mode: '0644'
-  notify: Restart gossip-archiver
+  loop: "{{ host_archivers }}"
+  notify: Restart all gossip archivers
 
 - name: Deploy gossip archiver binary
   ansible.builtin.copy:
@@ -46,7 +53,7 @@
     owner: root
     group: root
     mode: '0755'
-  notify: Restart gossip-archiver
+  notify: Restart all gossip archivers
 
 - name: Install gossip archiver systemd template
   ansible.builtin.template:
@@ -57,11 +64,12 @@
     mode: '0644'
   notify:
     - Reload systemd config
-    - Restart gossip-archiver
+    - Restart all gossip archivers
   register: systemd_template_changed
 
-- name: Enable and start gossip archiver instance
+- name: Enable and start gossip archiver instances
   ansible.builtin.systemd:
-    name: "gossip-archiver@{{ archiver_uuid }}"
+    name: "gossip-archiver@{{ item.uuid }}"
     enabled: true
     state: started
+  loop: "{{ host_archivers }}"

@@ -3,12 +3,20 @@
 # Binary path for deployment (points to staging directory)
 gossip_archiver_binary_path: "{{ binary_staging_dir }}/current/gossip_archiver"
 
-archiver_uuid: "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"
-archiver_console_port: 6670
+# List of archiver instances
+# Each archiver can point to a different database (staging vs production)
+# Database URLs are stored in vault.yml as 'archiver_db_urls' dictionary keyed by UUID
+gossip_archivers:
+  - uuid: "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"
+    host: "do-medium"  # Must match inventory_hostname
+    console_port: 6670
+    nats_server: "{{ nats_server_addr_staging }}"
+  - uuid: "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e"
+    host: "do-medium"
+    console_port: 6671
+    nats_server: "{{ nats_server_addr_prod }}"
 
-# Database configuration
-# Connection URL is sensitive and should be in vault.yml as 'archiver_db_url'
-# Example: postgresql://goss:password@localhost:5432/gossip_observer
+# Database configuration (shared by all archivers)
 archiver_db_batch_size: 10000
 archiver_db_flush_interval: 5
 

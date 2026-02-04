@@ -4,15 +4,15 @@
 # Database connection URL
 # Can also be set via ARCHIVER_DB_URL environment variable
 # Format: postgresql://user:password@host:port/database
-db_url = "{{ archiver_db_url }}"
+db_url = "{{ archiver_db_urls[item.uuid] }}"
 
 [nats]
-server_addr = "{{ nats_server_addr_staging }}"
+server_addr = "{{ item.nats_server }}"
 subject_prefix = "observer.*"
 
 [console]
 listen_addr = "{{ tailscale_ip }}"
-listen_port = {{ archiver_console_port }}
+listen_port = {{ item.console_port | default(6670) }}
 retention_secs = 120
 
 [database]
