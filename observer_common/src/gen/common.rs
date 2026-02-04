@@ -50,6 +50,17 @@ pub struct CollectorInfo {
     pub grpc_socket: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BalancesRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BalancesResponse {
+    #[prost(uint64, tag = "1")]
+    pub total_onchain: u64,
+    #[prost(uint64, tag = "2")]
+    pub spendable_onchain: u64,
+    #[prost(uint64, tag = "3")]
+    pub total_lightning_balance: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShutdownRequest {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShutdownResponse {}

@@ -10,6 +10,8 @@ service CollectorService {
   rpc PostEligiblePeers(EligiblePeersRequest) returns (EligiblePeersResponse);
   rpc PostTargetPeerCount(TargetPeerCountRequest) returns (TargetPeerCountResponse);
   rpc GetCurrentPeers(CurrentPeersRequest) returns (CurrentPeersResponse);
+  // rpc Balances(common.BalancesRequest) returns (common.BalancesResponse);
+  // rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
   rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);
 }
 
@@ -45,3 +47,14 @@ message TargetPeerCountRequest {
 }
 
 message TargetPeerCountResponse {}
+
+message OpenChannelRequest {
+  // This should only be one socket for now
+  common.PeerConnectionInfo peer = 1;
+  uint64 capacity = 2;
+  optional uint64 push_amount_msat = 3;
+}
+
+message OpenChannelResponse {
+  bytes local_channel_id = 1;
+}

@@ -42,6 +42,21 @@ pub struct TargetPeerCountRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TargetPeerCountResponse {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenChannelRequest {
+    /// This should only be one socket for now
+    #[prost(message, optional, tag = "1")]
+    pub peer: ::core::option::Option<super::common::PeerConnectionInfo>,
+    #[prost(uint64, tag = "2")]
+    pub capacity: u64,
+    #[prost(uint64, optional, tag = "3")]
+    pub push_amount_msat: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenChannelResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub local_channel_id: ::prost::alloc::vec::Vec<u8>,
+}
 /// Generated client implementations.
 pub mod collector_service_client {
     #![allow(
@@ -241,6 +256,8 @@ pub mod collector_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// rpc Balances(common.BalancesRequest) returns (common.BalancesResponse);
+        /// rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
         pub async fn shutdown(
             &mut self,
             request: impl tonic::IntoRequest<super::super::common::ShutdownRequest>,
@@ -308,6 +325,8 @@ pub mod collector_service_server {
             tonic::Response<super::CurrentPeersResponse>,
             tonic::Status,
         >;
+        /// rpc Balances(common.BalancesRequest) returns (common.BalancesResponse);
+        /// rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
         async fn shutdown(
             &self,
             request: tonic::Request<super::super::common::ShutdownRequest>,

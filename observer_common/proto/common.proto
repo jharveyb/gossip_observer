@@ -37,6 +37,14 @@ message CollectorInfo {
         string grpc_socket = 9;
 }
 
+message BalancesRequest{}
+
+message BalancesResponse{
+  uint64 total_onchain = 1;
+  uint64 spendable_onchain = 2;
+  uint64 total_lightning_balance = 3;
+}
+
 message ShutdownRequest {}
 
 message ShutdownResponse {}
