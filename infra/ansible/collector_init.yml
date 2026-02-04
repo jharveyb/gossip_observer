@@ -6,6 +6,9 @@
     - name: Load vault variables
       ansible.builtin.include_vars: vault.yml
 
+    - name: Validate collector configuration
+      ansible.builtin.import_tasks: tasks/validate_collectors.yml
+
   tasks:
     - name: Gossip Collector setup
       ansible.builtin.import_tasks: tasks/gossip_collector.yml

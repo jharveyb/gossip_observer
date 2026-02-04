@@ -1,3 +1,7 @@
+[collector]
+controller_addr = "{{ item.controller_addr }}"
+ldk_runtime_worker_threads = {{ item.ldk_runtime_worker_threads | default(2) }}
+
 [ldk]
 esplora = "{{ esplora_url }}"
 storage_dir = "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
@@ -17,4 +21,4 @@ listen_port = {{ item.console_port | default(6669) }}
 retention_secs = 120
 
 [nats]
-server_addr = "{{ nats_server_addr_staging }}"
+server_addr = "{{ item.nats_server }}"

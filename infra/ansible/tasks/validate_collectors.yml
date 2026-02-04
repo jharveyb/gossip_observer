@@ -1,0 +1,31 @@
+# Validate collector configuration before deployment
+# Run this task early in playbooks that deploy collectors or controllers
+#
+# Optional variable:
+#   collector_mapping_file - path to collector_mapping.toml (defaults to prod)
+
+- name: Check if notes.md exists
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../query_results/notes.md"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: notes_file
+
+- name: Validate collector configuration
+  ansible.builtin.command:
+    cmd: >-
+      python3 {{ playbook_dir }}/scripts/validate_collectors.py
+      {{ playbook_dir }}/inventory/group_vars/collectors.yml
+      {{ collector_mapping_file | default(playbook_dir ~ '/files/controller/prod/collector_mapping.toml') }}
+      {{ notes_file.stat.exists | ternary(playbook_dir ~ '/../query_results/notes.md', '') }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  register: collector_validation
+
+- name: Display validation result
+  ansible.builtin.debug:
+    msg: "{{ collector_validation.stdout }}"
+  run_once: true
