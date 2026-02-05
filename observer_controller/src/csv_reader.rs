@@ -26,6 +26,13 @@ pub struct NodeAnnotatedRecord {
     pub alias: Option<String>,
 }
 
+impl NodeAnnotatedRecord {
+    // Somehow we had records with Some(""), or similar. Filter those out.
+    pub fn has_sockets(&self) -> bool {
+        self.sockets.as_ref().is_some_and(|s| !s.is_empty())
+    }
+}
+
 impl TryFrom<NodeAnnotatedRecord> for observer_common::common::PeerConnectionInfo {
     type Error = anyhow::Error;
 

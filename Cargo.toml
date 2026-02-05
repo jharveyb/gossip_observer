@@ -78,8 +78,3 @@ opt-level     = 1
 [profile.dev.package.lightning-types]
 codegen-units = 16
 opt-level     = 1
-
-# Add oil
-[profile.dev]
-codegen-units = 16
-opt-level     = 1

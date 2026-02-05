@@ -124,7 +124,7 @@ pub async fn collector_registration_reply(
     // PeerConnectionInfo type.
     let members_with_sockets = members
         .into_iter()
-        .filter(|m| m.sockets.is_some())
+        .filter(|m| m.has_sockets())
         .collect::<Vec<NodeAnnotatedRecord>>();
     let peer_list: Vec<observer_common::common::PeerConnectionInfo> =
         util::try_convert_vec(members_with_sockets)?;
