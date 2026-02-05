@@ -1,6 +1,7 @@
 use crate::common;
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
+use tracing::warn;
 
 /// Macro to implement bidirectional conversions between proto string wrapper types
 /// and Rust types that implement Display + FromStr.
@@ -49,6 +50,29 @@ where
     U: TryFrom<T, Error = E>,
 {
     items.into_iter().map(U::try_from).collect()
+}
+
+// Skip failed conversions instead of propating errors
+pub fn try_convert_vec_permissive<T, U, E>(items: Vec<T>) -> Vec<U>
+where
+    T: std::fmt::Debug,
+    U: TryFrom<T, Error = E>,
+    E: std::fmt::Debug,
+{
+    let mut converted = Vec::with_capacity(items.len());
+    let mut errstr: String;
+    for item in items {
+        errstr = format!("{:?}", item);
+        match U::try_from(item) {
+            Ok(u) => converted.push(u),
+            // This may end up spamming logs
+            Err(e) => {
+                warn!(error = ?e, item = errstr, "Failed to convert");
+            }
+        }
+    }
+
+    converted
 }
 
 pub fn convert_vec<T, U>(items: Vec<T>) -> Vec<U>

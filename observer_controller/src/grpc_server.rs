@@ -128,7 +128,8 @@ pub async fn collector_registration_reply(
         .collect::<Vec<NodeAnnotatedRecord>>();
     let peer_list: Vec<observer_common::common::PeerConnectionInfo> =
         util::try_convert_vec(members_with_sockets)?;
-    let eligible_peers = util::try_convert_vec(peer_list)?;
+    // Don't fail on OnionV2 addresses, just omit them.
+    let eligible_peers = util::try_convert_vec_permissive(peer_list);
     client.send_eligible_peers(&eligible_peers).await?;
     info!(
         "Controller: sent {} peer to collector",
