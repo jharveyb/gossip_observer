@@ -18,7 +18,7 @@ grpc_port = {{ item.grpc_port | default(50051) }}
 [console]
 listen_addr = "{{ tailscale_ip }}"
 listen_port = {{ item.console_port | default(6669) }}
-retention_secs = 120
+retention_secs = 60
 
 [nats]
 server_addr = "{{ item.nats_server }}"

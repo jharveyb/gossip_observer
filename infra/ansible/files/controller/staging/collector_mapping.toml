@@ -1,0 +1,5 @@
+# Staging collector to community mappings
+# Format: "collector-uuid" = community_id
+# add local or ad-hoc collectors here maybe
+# Test local collector first
+"019b3769-5e49-7f93-815a-c6c2517e732a" = 6269

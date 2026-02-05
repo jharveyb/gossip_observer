@@ -6,15 +6,177 @@ gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector
 # Collector instances - deployed to hosts based on 'host' property
 # Each collector instance has a unique UUID and specifies which host to deploy to
 # For multiple collectors per machine, use unique gRPC port and LDK P2P port
+
+# TODO: autogenerate this from our collector mapping somehow
 gossip_collectors:
+  # Solo collector for the largest community
+  - uuid: "019c26b4-9efe-7333-9c5e-7b3336d9b733"
+    host: "collectors-3-big"
+    grpc_port: 50051
+    ldk_port: 9735
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    ldk_runtime_worker_threads: 4
+    # Team Corn, midsize
   - uuid: "019bfdbc-10b8-794f-91cb-132c5f4cc390"
-    host: "collectors-nyc3-2cpu"  # Must match inventory_hostname
-    # console_port: 6669
-    # grpc_port: 50051
-  # - uuid: "019c4870-6f5a-8g94-926b-d7d3628f843b"
-  #   host: "collectors-cluster-2"
-  #   grpc_port: 50052
-  #   ldk_port: 9736
+    host: "collectors-3-big"  # Must match inventory_hostname
+    grpc_port: 50059
+    ldk_port: 9743
+    console_port: 6677
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LNT hub 1
+  - uuid: "019c26b5-3e05-7d13-91ab-182eb98219e1"
+    host: "collectors-3-big"
+    grpc_port: 50052
+    ldk_port: 9736
+    console_port: 6670
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LNT hub 2
+  - uuid: "019c26b5-a344-7be0-91a5-8221c53446a2"
+    host: "collectors-3-big"
+    grpc_port: 50053
+    ldk_port: 9737
+    console_port: 6671
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Wizened
+  - uuid: "019c26b8-3118-72db-9059-d0d7eab225ba"
+    host: "collectors-3-big"
+    grpc_port: 50054
+    ldk_port: 9738
+    console_port: 6672
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Big Chungus
+  - uuid: "019c26b8-3137-7cb2-bf48-250a5ce79d8d"
+    host: "collectors-3-big"
+    grpc_port: 50055
+    ldk_port: 9739
+    console_port: 6673
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Balanced Hubs
+  - uuid: "019c26b8-3148-759c-8494-454ce6b62c57"
+    host: "collectors-3-big"
+    grpc_port: 50056
+    ldk_port: 9740
+    console_port: 6674
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Jerset Cty 2
+  - uuid: "019c26b8-315a-77b2-9e80-61f45ec40f15"
+    host: "collectors-3-big"
+    grpc_port: 50057
+    ldk_port: 9741
+    console_port: 6675
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Jerset Cty 3
+  - uuid: "019c26b8-31d4-7973-b55f-b6218e03d7ea"
+    host: "collectors-3-big"
+    grpc_port: 50058
+    ldk_port: 9742
+    console_port: 6676
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LNT leaf 1
+  - uuid: "019c26b6-aff9-74e0-935f-0cd39683850f"
+    host: "collectors-2"
+    grpc_port: 50052
+    ldk_port: 9735
+    console_port: 6669
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LNT leaf 2
+  - uuid: "019c26b7-1636-73e7-aa3b-a9ca4020d220"
+    host: "collectors-2"
+    grpc_port: 50053
+    ldk_port: 9736
+    console_port: 6670
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LIC 2
+  - uuid: "019c26b8-3125-798a-afbf-cf3f308089cd"
+    host: "collectors-2"
+    grpc_port: 50054
+    ldk_port: 9737
+    console_port: 6671
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # LIC 1
+  - uuid: "019c26b8-316d-7d55-9e6d-18990aed72a2"
+    host: "collectors-2"
+    grpc_port: 50055
+    ldk_port: 9738
+    console_port: 6672
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Central-Adjacent
+  - uuid: "019c26b8-3180-7332-b0fe-a48931990692"
+    host: "collectors-2"
+    grpc_port: 50056
+    ldk_port: 9739
+    console_port: 6673
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Level 2
+  - uuid: "019c26b8-3191-7fff-895f-5ed752c53bdc"
+    host: "collectors-2"
+    grpc_port: 50057
+    ldk_port: 9740
+    console_port: 6674
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Brooklyn 2
+  - uuid: "019c26b8-31a6-7954-9de7-881d681e742e"
+    host: "collectors-2"
+    grpc_port: 50058
+    ldk_port: 9741
+    console_port: 6675
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Lower East Side 2
+  - uuid: "019c26b8-31b8-7cc9-bb95-1b0223d7b5b1"
+    host: "collectors-2"
+    grpc_port: 50059
+    ldk_port: 9742
+    console_port: 6676
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Brooklyn 3
+  - uuid: "019c26b8-3219-7c9b-aa3f-312979fffa20"
+    host: "collectors-2"
+    grpc_port: 50060
+    ldk_port: 9743
+    console_port: 6677
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Brooklyn 2
+  - uuid: "019c26b8-31e4-741f-9034-71f14cdb8753"
+    host: "collectors-2"
+    grpc_port: 50061
+    ldk_port: 9744
+    console_port: 6678
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Midsize
+  - uuid: "019c26b8-31f2-7969-9266-3536fc515d27"
+    host: "collectors-2"
+    grpc_port: 50062
+    ldk_port: 9745
+    console_port: 6679
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
+    # Well Connected
+  - uuid: "019c26b8-3205-7c55-8236-24db921b665e"
+    host: "collectors-2"
+    grpc_port: 50064
+    ldk_port: 9746
+    console_port: 6680
+    nats_server: "{{ nats_server_addr_prod }}"
+    controller_addr: "{{ controller_prod }}"
 
 # Esplora API endpoint for blockchain data
 esplora_url: "https://blockstream.info/api"

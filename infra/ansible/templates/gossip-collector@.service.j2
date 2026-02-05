@@ -12,8 +12,8 @@ Environment="COLLECTOR_UUID=%i"
 Environment="COLLECTOR_MODE=production"
 ExecStart=/usr/local/bin/gossip_collector
 Restart=on-failure
-RestartSec=30
-RandomizedDelaySec=120
+RestartSec=90
+RandomizedDelaySec=360
 
 [Install]
 WantedBy=multi-user.target
