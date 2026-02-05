@@ -197,7 +197,7 @@ pub async fn pending_conn_sweeper(
     mut waiter: Interval,
     cancel: CancellationToken,
     startup_delay: TimeDelta,
-) {
+) -> anyhow::Result<()> {
     loop {
         tokio::select! {
                 _ = waiter.tick() => {
@@ -211,6 +211,8 @@ pub async fn pending_conn_sweeper(
                 }
         }
     }
+
+    Ok(())
 }
 
 // To try and add a new peer, we'll first add it to our filter list. Then, we'll ask our LDK node to
@@ -260,7 +262,7 @@ pub async fn peer_count_monitor(
     mut waiter: Interval,
     cancel: CancellationToken,
     peer_target: SharedUsize,
-) {
+) -> anyhow::Result<()> {
     let count_below_target = async || -> bool {
         let peer_count = connected_peer_count(node_handle.clone()).await;
         let target = peer_target.load(SeqCst);
@@ -271,7 +273,7 @@ pub async fn peer_count_monitor(
     // TODO: configurable? May need to slow down for a smaller machine
     let attempt_rate = 1;
     let attempt_refill_delay = Duration::from_secs(2);
-    let total_attempts = 5;
+    let total_attempts = 2;
 
     // The task to refill the limiter is started inside new().
     let connect_rate_limiter = Arc::new(TokenBucket::new(
@@ -290,7 +292,7 @@ pub async fn peer_count_monitor(
                 }
                 _ = waiter.tick() => {
                     below_target = count_below_target().await;
-                    info!(below_target, "Peer conn manager: monitor tick");
+                    debug!(below_target, "Peer conn manager: monitor tick");
                 }
         }
 
@@ -329,4 +331,6 @@ pub async fn peer_count_monitor(
             break;
         }
     }
+
+    Ok(())
 }

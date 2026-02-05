@@ -9,6 +9,7 @@ use bitcoin::Network;
 use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
+use tokio::task::JoinSet;
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info};
 
@@ -74,15 +75,7 @@ async fn async_main(
     info!("Starting gossip collector");
     info!(%cfg.uuid, "Gossip collector initialized");
 
-    // TODO: move peer selection to controller
-    /*
-    let mut rng = rand::rng();
-    let node_list = read_to_string("./node_addrs_clearnet.txt")?;
-    let mut node_list = node_list.lines().map(String::from).collect::<Vec<_>>();
-    node_list.shuffle(&mut rng);
-    println!("Using node list of {} nodes", node_list.len());
-    */
-
+    let mut main_tasks = JoinSet::new();
     let stop_signal = CancellationToken::new();
 
     let mut builder = ldk_node::Builder::new();
@@ -117,7 +110,7 @@ async fn async_main(
     builder.set_listening_addresses(ldk_listen_addrs.clone())?;
 
     // Use the first few chars of our UUID for our node alias, for now.
-    let ldk_raw_alias = cfg.uuid.chars().take(24).collect::<String>();
+    let ldk_raw_alias = cfg.uuid.chars().rev().take(32).collect::<String>();
     builder.set_node_alias(ldk_raw_alias.clone())?;
 
     let mnemonic_path = format!("{}/mnemonic.txt", &cfg.ldk.storage_dir);
@@ -161,7 +154,7 @@ async fn async_main(
     // removing peer pubkeys once we've been connected to them for enough time
     // to have (likely) finished any gossip query request/responses, which would
     // pollute our data.
-    let _pending_conn_task = tokio::spawn(pending_conn_sweeper(
+    main_tasks.spawn(pending_conn_sweeper(
         peer_conn_manager.clone(),
         interval(Duration::from_secs(
             cfg.collector.connection_sweeper_interval.into(),
@@ -172,12 +165,13 @@ async fn async_main(
 
     // Build our custom exporter, that gets a message filter list from the peer
     // connection manager and exports messages via NATS.
+    let exporter_stop_signal = stop_signal.clone();
     let mut nats_exporter = NATSExporter::new(
         cfg.nats.clone(),
         peer_conn_manager.clone(),
-        stop_signal.child_token(),
+        exporter_stop_signal,
     );
-    nats_exporter.start().await?;
+    main_tasks = nats_exporter.start(main_tasks).await?;
     let nats_exporter = Arc::new(nats_exporter);
     let writer_exporter = crate::exporter::LogWriterExporter::new(fs_logger, nats_exporter.clone());
 
@@ -198,7 +192,7 @@ async fn async_main(
     // The peer connection monitor will use the eligible peer list to maintain
     // our connection count above a target value.
     let target_peer_count = Arc::new(AtomicUsize::new(cfg.collector.target_peer_count as usize));
-    let _conn_monitor_task = tokio::spawn(peer_count_monitor(
+    main_tasks.spawn(peer_count_monitor(
         node.clone(),
         peer_conn_manager.clone(),
         interval(Duration::from_secs(
@@ -222,13 +216,14 @@ async fn async_main(
     let grpc_reflect = observer_common::reflection_service_v1()?;
     let grpc_stop_signal = stop_signal.child_token();
     info!(%grpc_addr, "Starting gRPC server");
-    let grpc_server = tokio::spawn(async move {
+    main_tasks.spawn(async move {
         TonicServer::builder()
             .add_service(grpc_service)
             .add_service(grpc_reflect)
             .add_service(grpc_reflect_compat)
             .serve_with_shutdown(grpc_addr, grpc_stop_signal.cancelled())
             .await
+            .map_err(anyhow::Error::msg)
     });
 
     // Start task to send register and send heartbeat messages to the controller.
@@ -246,7 +241,7 @@ async fn async_main(
         grpc_socket: format!("http://{}", grpc_addr),
     };
 
-    let _controller_task = tokio::spawn(ping_controller(
+    main_tasks.spawn(ping_controller(
         node.clone(),
         peer_conn_manager.clone(),
         target_peer_count.clone(),
@@ -255,10 +250,11 @@ async fn async_main(
         info_template,
     ));
 
-    let ctrl_handler_stop_signal = stop_signal.child_token();
-    let _signal_handler = tokio::spawn(async move {
+    let ctrl_handler_stop_recv = stop_signal.child_token();
+    let ctrl_handle_stop_send = stop_signal.clone();
+    main_tasks.spawn(async move {
         tokio::select! {
-            _ = ctrl_handler_stop_signal.cancelled() => {
+            _ = ctrl_handler_stop_recv.cancelled() => {
                 info!("Signal handler: received shutdown signal");
             },
             _ = tokio::signal::ctrl_c() => {
@@ -267,24 +263,31 @@ async fn async_main(
         }
         let _ = node.clone().stop();
         info!("Signal handler: shut down LDK node");
-        stop_signal.cancel();
+        ctrl_handle_stop_send.cancel();
         info!("Signal handler: sent shutdown signal");
+        Ok(())
     });
 
     // All tokio tasks spawned earlier should have a child cancellation token.
-    let _grpc_res = grpc_server.await?.map_err(anyhow::Error::new)?;
-
-    /*
-    let final_res = tokio::join!(pending_conn_task, conn_monitor_task, deadline, grpc_server);
-
-    // lol
-    final_res.0?;
-    final_res.1?;
-    final_res.2?;
-    final_res.3??;
-    */
-
-    Ok(())
+    return if let Some(res) = main_tasks.join_next().await {
+        let mut task_res = vec![res?];
+        stop_signal.cancel();
+        task_res.append(&mut main_tasks.join_all().await);
+        let mut final_err = false;
+        for task in task_res {
+            if let Err(e) = task {
+                error!(error = %e, "Task failed");
+                final_err = true;
+            }
+        }
+        if final_err {
+            Err(anyhow!("Final task error"))
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
+    };
 }
 
 #[derive(Debug, Clone, Copy)]

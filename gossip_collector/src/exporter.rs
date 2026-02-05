@@ -1,13 +1,17 @@
 use crate::config::Nats;
 use crate::logger::Writer;
 use crate::peer_conn_manager::PeerConnManagerHandle;
+use anyhow::bail;
+use async_nats::ConnectOptions;
 use async_nats::jetstream;
+use async_nats::jetstream::ContextBuilder;
 use ldk_node::logger::{LogRecord, LogWriter};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +21,7 @@ use tracing::info;
 
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
-pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(600);
 static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
 static NODEKEY: OnceLock<String> = OnceLock::new();
 static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
@@ -51,7 +55,6 @@ impl Exporter for StdoutExporter {
 pub struct NATSExporter {
     cfg: Nats,
     // TODO: How do we join on this later?
-    pub tasks: JoinSet<()>,
     conn_manager: PeerConnManagerHandle,
     export_tx: UnboundedSender<String>,
     export_rx: Option<UnboundedReceiver<String>>,
@@ -65,6 +68,7 @@ impl Exporter for NATSExporter {
         if let Err(e) = self.export_tx.send(msg) {
             // TODO: crash?
             error!(error = %e, "Internal exporter error in export()");
+            self.stop_signal.cancel();
         }
     }
 
@@ -85,11 +89,9 @@ impl NATSExporter {
     ) -> Self {
         // Bridge sync -> async, since a sync send won't block for an unbounded channel.
         let (export_tx, export_rx) = tokio::sync::mpsc::unbounded_channel();
-        let tasks = JoinSet::new();
 
         Self {
             cfg,
-            tasks,
             conn_manager,
             export_tx,
             export_rx: Some(export_rx),
@@ -98,29 +100,54 @@ impl NATSExporter {
     }
 
     // Build connections + spawn any long-running tasks we need for export.
-    pub async fn start(&mut self) -> anyhow::Result<()> {
+    pub async fn start(
+        &mut self,
+        mut task_pool: JoinSet<anyhow::Result<()>>,
+    ) -> anyhow::Result<JoinSet<anyhow::Result<()>>> {
         info!("Starting NATS exporter");
 
         let export_rx = self.export_rx.take().unwrap();
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
+        // Allow longer timeout in case we get stalled. Also support reconnects.
+        /*
+        let nats_client_options = ConnectOptions::new()
+            .connection_timeout(Duration::from_secs(120))
+            .max_reconnects(None);
+
+        let nats_client =
+            async_nats::connect_with_options(self.cfg.server_addr.clone(), nats_client_options)
+                .await?;
+        // Extend the timeouts here as well.
+        let stream_ctx = ContextBuilder::new()
+            .timeout(Duration::from_secs(120))
+            .ack_timeout(Duration::from_secs(60))
+            .build(nats_client);
+        */
 
         let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(self.cfg.batch_size as usize);
         {
             let conn_manager = self.conn_manager.clone();
-            let queue_stop_signal = self.stop_signal.child_token();
-            self.tasks.spawn(async move {
-                Self::queue_exported_msg(export_rx, nats_tx, conn_manager, queue_stop_signal).await
-            });
+            let queue_stop_signal = self.stop_signal.clone();
+            task_pool.spawn(Self::queue_exported_msg(
+                export_rx,
+                nats_tx,
+                conn_manager,
+                queue_stop_signal,
+            ));
         }
         {
-            let export_stop_signal = self.stop_signal.child_token();
+            let export_stop_signal = self.stop_signal.clone();
             let batch_size = self.cfg.batch_size as usize;
-            self.tasks.spawn(async move {
-                Self::publish_msgs(stream_ctx, batch_size, nats_rx, export_stop_signal).await
-            });
+            task_pool.spawn(Self::publish_msgs(
+                stream_ctx,
+                batch_size,
+                nats_rx,
+                export_stop_signal,
+            ));
         }
-        Ok(())
+
+        Ok(task_pool)
     }
 
     // Move msg from our unbounded buffer fed by ldk-node, to our fixed-size buffer.
@@ -131,11 +158,12 @@ impl NATSExporter {
         tx: Sender<String>,
         mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
-    ) {
+    ) -> anyhow::Result<()> {
         // Local version of the peer filter set; mark the initial value as
         // changed before we start.
         let mut msg_filter_rules = HashSet::new();
         msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
+        let _drop_guard = stop_signal.drop_guard_ref();
         loop {
             let msg = match tokio::select! {
                 // Prioritize receiving config updates over other events.
@@ -154,7 +182,8 @@ impl NATSExporter {
                     if !msg_filter_rules.is_empty() {
                         let mut filter_fmt = msg_filter_rules.iter().collect::<Vec<_>>();
                         filter_fmt.sort_unstable();
-                        info!(filter = ?filter_fmt, "Exporter: New filter config details");
+                        debug!(filter = ?filter_fmt, "Exporter: New filter config details");
+                        info!(filter_len = filter_fmt.len(), "Exporter: New filter config");
                     }
 
                     // We don't want to return anything, so just skip any following logic.
@@ -169,7 +198,7 @@ impl NATSExporter {
                 }
                 None => {
                     error!("Internal: queue_exported_msg: rx chan closed");
-                    break;
+                    bail!("Internal: queue_exported_msg: rx chan closed");
                 }
             };
 
@@ -186,7 +215,7 @@ impl NATSExporter {
                 None => {
                     error!("Internal: publish_msgs: rx msg format broken");
                     error!(msg = %msg, "Broken message");
-                    break;
+                    bail!("Internal: publish_msgs: rx msg format broken");
                 }
             }
 
@@ -196,7 +225,7 @@ impl NATSExporter {
                         Ok(permit) => permit.send(msg),
                         Err(e) => {
                             error!(error = %e, "Internal: queue_exported_msg: tx chan error");
-                            break;
+                            bail!("Internal: queue_exported_msg: tx chan error");
                         }
                     }
                 }
@@ -205,6 +234,8 @@ impl NATSExporter {
                 }
             }
         }
+
+        Ok(())
     }
 
     // Drain our fixed-size buffer of msgs by publishing to NATS.
@@ -213,13 +244,14 @@ impl NATSExporter {
         batch_size: usize,
         mut rx: Receiver<String>,
         stop_signal: CancellationToken,
-    ) {
+    ) -> anyhow::Result<()> {
         let mut total_upload_time = 0;
         let mut msg_send_time;
         let mut msg_submit_interval;
         let mut upload_count = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
         let mut msg_batch = Vec::with_capacity(batch_size);
+        let _drop_guard = stop_signal.drop_guard_ref();
 
         loop {
             tokio::select! {
@@ -230,7 +262,7 @@ impl NATSExporter {
                         },
                         None => {
                             error!("Internal: publish_msgs: rx stream closed");
-                            break;
+                            bail!("Internal: publish_msgs: rx stream closed");
                         }
                     }
                 }
@@ -276,6 +308,8 @@ impl NATSExporter {
                 upload_count += 1;
             }
         }
+
+        Ok(())
     }
 }
 
