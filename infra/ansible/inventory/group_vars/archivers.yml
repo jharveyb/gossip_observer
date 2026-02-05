@@ -17,8 +17,9 @@ gossip_archivers:
     nats_server: "{{ nats_server_addr_prod }}"
 
 # Database configuration (shared by all archivers)
-archiver_db_batch_size: 10000
-archiver_db_flush_interval: 5
+# Lower than we used in dev due to high traffic and slow inserts into timings
+archiver_db_batch_size: 2500
+archiver_db_flush_interval: 2
 
 # Deployment configuration
 health_check_enabled: true

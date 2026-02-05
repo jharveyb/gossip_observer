@@ -1,12 +1,14 @@
+use anyhow::bail;
 use async_nats::Message;
 use async_nats::jetstream;
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{self};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-static STATS_INTERVAL: Duration = Duration::from_secs(60);
+static STATS_INTERVAL: Duration = Duration::from_secs(600);
 
 // Wrapper that handles reconnection when the stream closes
 // This shouldn't really be needed, let's see
@@ -14,11 +16,18 @@ pub async fn nats_reader_with_reconnect(
     nats_client: async_nats::Client,
     cfg: (String, String, String),
     raw_msg_tx: UnboundedSender<Message>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let (stream_name, consumer_name, subject_prefix) = cfg;
+    let _drop_guard = cancel_token.drop_guard_ref();
 
     loop {
         info!("Setting up NATS JetStream consumer");
+
+        if cancel_token.is_cancelled() {
+            info!("NATS JetStream consumer reconnect cancelled");
+            return Ok(());
+        }
 
         let stream_ctx = jetstream::new(nats_client.clone());
         let stream = match upsert_stream(stream_ctx, &stream_name, &subject_prefix).await {
@@ -57,8 +66,11 @@ pub async fn nats_reader_with_reconnect(
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
-                error!(error = %e, "NATS reader error, reconnecting in 5s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                error!(error = %e, "NATS reader error");
+                cancel_token.cancel();
+                bail!(e);
+
+                // tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }
@@ -145,7 +157,6 @@ pub async fn upsert_stream(
             name: stream_name.to_string(),
             subjects: vec![subjects.to_string()],
             retention: jetstream::stream::RetentionPolicy::WorkQueue,
-            storage: jetstream::stream::StorageType::Memory,
             ..Default::default()
         })
         .await?;

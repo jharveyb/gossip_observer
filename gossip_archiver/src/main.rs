@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use anyhow::bail;
 use async_nats::Message;
 use gossip_archiver::INTER_MSG_DELIM;
@@ -15,9 +16,10 @@ use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-static STATS_INTERVAL: Duration = Duration::from_secs(60);
+static STATS_INTERVAL: Duration = Duration::from_secs(600);
 
 fn main() -> anyhow::Result<()> {
     // Load .env file if present (optional for production with systemd)
@@ -35,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(6)
         .enable_all()
         .build()?;
 
@@ -68,15 +70,21 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
         .await?;
     info!("Initialized TimescaleDB connection");
 
+    let root_cancel_token = CancellationToken::new();
     let nats_reader_cfg = (
         cfg.nats.stream_name.clone(),
         cfg.nats.consumer_name.clone(),
         cfg.nats.subject_prefix.clone(),
     );
+    let nats_cancel_token = root_cancel_token.clone();
     let nats_handle = tokio::spawn(async move {
-        nats_reader_with_reconnect(nats_client, nats_reader_cfg, raw_msg_tx).await
+        nats_reader_with_reconnect(nats_client, nats_reader_cfg, raw_msg_tx, nats_cancel_token)
+            .await
     });
-    let decode_handle = tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx).await });
+    let decode_cancel_token = root_cancel_token.clone();
+    let decode_handle =
+        tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx, decode_cancel_token).await });
+    let db_cancel_token = root_cancel_token.clone();
     let db_handle = tokio::spawn(async move {
         db_write_handler(
             pool,
@@ -86,9 +94,11 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
             buf_hash_mapping_rx,
             buf_tick_rx,
             cfg.database.batch_size,
+            db_cancel_token,
         )
         .await
     });
+    let db_write_ticker_cancel_token = root_cancel_token.clone();
     let db_write_ticker_handle = tokio::spawn(async move {
         db_write_ticker(
             msg_rx,
@@ -99,6 +109,7 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
             buf_tick_tx,
             cfg.database.flush_interval,
             cfg.database.batch_size,
+            db_write_ticker_cancel_token,
         )
         .await
     });
@@ -109,7 +120,22 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
         db_handle,
         db_write_ticker_handle,
     ) {
-        Ok(_) => Ok(()),
+        Ok((nats_res, decode_res, db_handle_res, db_write_res)) => {
+            info!(nats = ?nats_res, decode = ?decode_res, db_handle = ?db_handle_res, db_write = ?db_write_res, "Final task output");
+            let res = vec![nats_res, decode_res, db_handle_res, db_write_res];
+            let mut final_err = false;
+            for r in res {
+                if let Err(e) = r {
+                    error!(error = %e, "Task error");
+                    final_err = true;
+                }
+            }
+            if final_err {
+                Err(anyhow!("Final task error"))
+            } else {
+                Ok(())
+            }
+        }
         Err(e) => {
             error!(error = %e, "Join error");
             Err(e.into())
@@ -127,6 +153,7 @@ pub async fn db_write_ticker(
     buf_tick_tx: Sender<()>,
     flush_interval: u32,
     batch_size: u32,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut flush_waiter = time::interval(Duration::from_secs(flush_interval.into()));
     let mut stats_waiter = time::interval(STATS_INTERVAL);
@@ -136,11 +163,20 @@ pub async fn db_write_ticker(
     let mut msg_counter = 0;
     let batch_size = batch_size as usize;
 
+    // Send cancel signal if this task exits. It should never exit under normal operation.
+    let _drop_guard = cancel_token.clone().drop_guard();
+
     // Signal another task to write buffered values to the DB.
     let signal_flush = async || -> anyhow::Result<usize> {
         let tick_permit = buf_tick_tx.reserve().await?;
         tick_permit.send(());
         Ok(0)
+    };
+
+    let critical_error = |e: anyhow::Error, msg: &str| {
+        error!(error = %e, msg = %msg, "Internal: db_write_ticker");
+        cancel_token.cancel();
+        e
     };
 
     info!(
@@ -156,19 +192,26 @@ pub async fn db_write_ticker(
         // Receive a new message, or perform a scheduled flush of values to the
         // DB. We should never end up trying to do both in the same loop iteration.
         tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                warn!("Internal: db_write_ticker: cancel signal received");
+                return Ok(());
+            }
+            _ = flush_waiter.tick() => {
+                flush_tick = true;
+            }
             // TODO: we could probably put this on a timer and use recv_many
             msg = msg_rx.recv() => {
                 match msg {
                     Some(msg) => gossip_msg = Some(msg),
                     None => {
+                        // Critical error, shut down the archiver.
                         let errmsg = "Internal: db_write_ticker: msg chan closed";
-                        warn!(errmsg);
+                        error!(message = ?msg, errmsg);
+                        cancel_token.cancel();
                         bail!(errmsg);
                     }
                 }
-            }
-            _ = flush_waiter.tick() => {
-                flush_tick = true;
             }
             _ = stats_waiter.tick() => {
                 info!(flush_count = poll_counter, full_buffer_count = full_counter, "DB write ticker stats");
@@ -194,10 +237,18 @@ pub async fn db_write_ticker(
             msg_counter += 1;
             let (msg_entry, timings_entry, meta_entry, hash_mapping) = split_exported_gossip(msg);
 
-            buf_raw_tx.send(msg_entry)?;
-            buf_timings_tx.send(timings_entry)?;
-            buf_meta_tx.send(meta_entry)?;
-            buf_hash_mapping_tx.send(hash_mapping)?;
+            if let Err(e) = buf_raw_tx.send(msg_entry) {
+                bail!(critical_error(e.into(), "buf_raw_tx send error",));
+            }
+            if let Err(e) = buf_timings_tx.send(timings_entry) {
+                bail!(critical_error(e.into(), "buf_timings_tx send error",));
+            }
+            if let Err(e) = buf_meta_tx.send(meta_entry) {
+                bail!(critical_error(e.into(), "buf_meta_tx send error",));
+            }
+            if let Err(e) = buf_hash_mapping_tx.send(hash_mapping) {
+                bail!(critical_error(e.into(), "buf_hash_mapping_tx send error",));
+            }
             gossip_msg = None;
         }
     }
@@ -211,6 +262,7 @@ pub async fn db_write_handler(
     mut buf_hash_mapping_rx: UnboundedReceiver<MessageHashMapping>,
     mut buf_tick_rx: Receiver<()>,
     batch_size: u32,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(batch_size, "Starting DB writer");
     let batch_size = batch_size as usize;
@@ -219,16 +271,32 @@ pub async fn db_write_handler(
     let mut metas = Vec::with_capacity(batch_size);
     let mut hash_mappings = Vec::with_capacity(batch_size);
     let mut should_flush = false;
+    let _drop_guard = cancel_token.drop_guard_ref();
+
+    // Log and send cancel signal before we exit.
+    let critical_error = |msg: String| {
+        error!(message = ?msg, "Internal: db_write_handler");
+        cancel_token.cancel();
+        msg + "Internal: db_write_handler"
+    };
+
     loop {
         // TODO: clean up our closed chan. handling
         tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                warn!("Internal: db_write_handler: cancel signal received");
+                return Ok(());
+            }
+            _ = buf_tick_rx.recv() => {
+                should_flush = true;
+            }
             raw_msg = buf_raw_rx.recv() => {
                 match raw_msg {
                     Some(msg) => raw_msgs.push(msg),
                     None => {
-                        let errmsg = "Internal: db_write_handler: raw msg chan closed";
-                        warn!(errmsg);
-                        bail!(errmsg);
+                        let errmsg = "raw msg chan closed";
+                        bail!(critical_error(errmsg.into()));
                     }
                 }
             }
@@ -236,9 +304,8 @@ pub async fn db_write_handler(
                 match timings_msg {
                     Some(msg) => timings.push(msg),
                     None => {
-                        let errmsg = "Internal: db_write_handler: timings msg chan closed";
-                        warn!(errmsg);
-                        bail!(errmsg);
+                        let errmsg = "timings msg chan closed";
+                        bail!(critical_error(errmsg.into()));
                     }
                 }
             }
@@ -246,9 +313,8 @@ pub async fn db_write_handler(
                 match meta_msg {
                     Some(msg) => metas.push(msg),
                     None => {
-                        let errmsg = "Internal: db_write_handler: meta msg chan closed";
-                        warn!(errmsg);
-                        bail!(errmsg);
+                        let errmsg = "meta msg chan closed";
+                        bail!(critical_error(errmsg.into()));
                     }
                 }
             }
@@ -256,14 +322,10 @@ pub async fn db_write_handler(
                 match hash_mapping_msg {
                     Some(msg) => hash_mappings.push(msg),
                     None => {
-                        let errmsg = "Internal: db_write_handler: hash mapping msg chan closed";
-                        warn!(errmsg);
-                        bail!(errmsg);
+                        let errmsg = "hash mapping msg chan closed";
+                        bail!(critical_error(errmsg.into()));
                     }
                 }
-            }
-            _ = buf_tick_rx.recv() => {
-                should_flush = true;
             }
         };
 
@@ -286,7 +348,13 @@ pub async fn db_write_handler(
             let db_hash_mappings =
                 std::mem::replace(&mut hash_mappings, Vec::with_capacity(batch_size));
 
-            db_batch_write(&pool, db_raws, db_timings, db_metas, db_hash_mappings).await?;
+            if let Err(e) =
+                db_batch_write(&pool, db_raws, db_timings, db_metas, db_hash_mappings).await
+            {
+                error!(error = ?e, "Internal: db_batch_write");
+                cancel_token.cancel();
+                bail!(e)
+            }
         }
     }
 }
@@ -301,12 +369,17 @@ pub async fn db_batch_write(
     // UNNEST is the recommended way to do batch insertions with query!:
     // https://github.com/launchbadge/sqlx/blob/main/FAQ.md#how-can-i-bind-an-array-to-a-values-clause-how-can-i-do-bulk-inserts
 
+    let critical_error = |e: sqlx::Error, msg: String| {
+        error!(error = ?e, message = ?msg, "Internal: db_batch_write");
+        msg + "Internal: db_batch_write"
+    };
+
     // Insert raw messages
     if !raws.is_empty() {
         let (hashes, raw_msgs): (Vec<_>, Vec<_>) =
             raws.into_iter().map(RawMessage::unroll).multiunzip();
 
-        sqlx::query!(
+        if let Err(e) = sqlx::query!(
             "INSERT INTO messages (hash, raw)
              SELECT * FROM UNNEST($1::bytea[], $2::text[])
              ON CONFLICT DO NOTHING",
@@ -314,7 +387,10 @@ pub async fn db_batch_write(
             &raw_msgs
         )
         .execute(pool)
-        .await?;
+        .await
+        {
+            bail!(critical_error(e, "insert raw messages error".into()));
+        }
     }
 
     // Insert the outer->inner hash mappings
@@ -324,7 +400,7 @@ pub async fn db_batch_write(
             .map(MessageHashMapping::unroll)
             .multiunzip();
 
-        sqlx::query!(
+        if let Err(e) = sqlx::query!(
             "INSERT INTO message_hashes (outer_hash, inner_hash)
              SELECT * FROM UNNEST($1::bytea[], $2::bytea[])
              ON CONFLICT DO NOTHING",
@@ -332,7 +408,10 @@ pub async fn db_batch_write(
             &inner_hashes
         )
         .execute(pool)
-        .await?;
+        .await
+        {
+            bail!(critical_error(e, "insert hash mappings error".into()));
+        }
     }
 
     // Insert timings (time-series data)
@@ -360,7 +439,7 @@ pub async fn db_batch_write(
             .map(MessageNodeTimings::unroll)
             .multiunzip();
 
-        sqlx::query!(
+        if let Err(e) = sqlx::query!(
             "INSERT INTO timings (net_timestamp, hash, inner_hash, collector, peer, dir, peer_hash, orig_timestamp)
              SELECT * FROM UNNEST($1::timestamptz[], $2::bytea[], $3::bytea[], $4::text[], $5::text[], $6::smallint[], $7::bytea[], $8::timestamptz[])",
             &net_timestamps,
@@ -373,7 +452,9 @@ pub async fn db_batch_write(
             &orig_timestamps as &[Option<chrono::DateTime<chrono::Utc>>]
         )
         .execute(pool)
-        .await?;
+        .await {
+            bail!(critical_error(e, "insert timings error".into()));
+        }
     }
 
     // Insert metadata
@@ -387,7 +468,7 @@ pub async fn db_batch_write(
             Vec<_>,
         ) = metas.into_iter().map(MessageMetadata::unroll).multiunzip();
 
-        sqlx::query!(
+        if let Err(e) = sqlx::query!(
             "INSERT INTO metadata (hash, inner_hash, type, size, orig_node, scid)
              SELECT * FROM UNNEST($1::bytea[], $2::bytea[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])
              ON CONFLICT DO NOTHING",
@@ -399,7 +480,9 @@ pub async fn db_batch_write(
             &scids as &[Option<Vec<u8>>]
         )
         .execute(pool)
-        .await?;
+        .await {
+            bail!(critical_error(e, "insert metadata error".into()));
+        }
     }
 
     Ok(())
@@ -410,15 +493,18 @@ pub async fn db_batch_write(
 pub async fn msg_decoder(
     mut raw_msg_rx: UnboundedReceiver<Message>,
     msg_tx: UnboundedSender<ExportedGossip>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    let mut stats_waiter = time::interval(STATS_INTERVAL);
+    // TODO: remove explicit cancels since we have the drop guard
+    let _drop_guard = cancel_token.drop_guard_ref();
+    let critical_error = |e: anyhow::Error, msg: String| {
+        error!(error = %e, message = ?msg, "Internal: msg_decoder");
+        cancel_token.cancel();
+        e
+    };
     loop {
         let msg = tokio::select! {
             rx_msg = raw_msg_rx.recv() => rx_msg,
-            _ = stats_waiter.tick() => {
-                info!(queue_size = raw_msg_rx.len(), "NATS pull queue stats");
-                continue;
-            }
         };
 
         match msg {
@@ -426,9 +512,10 @@ pub async fn msg_decoder(
                 let inner_msgs = match str::from_utf8(&raw_msg.payload) {
                     Ok(s) => s,
                     Err(e) => {
-                        let errmsg = "Failed to decode NATS message as UTF-8";
-                        error!(error = %e, errmsg);
-                        bail!(errmsg);
+                        bail!(critical_error(
+                            e.into(),
+                            "Failed to decode NATS message as UTF-8".into()
+                        ));
                     }
                 };
 
@@ -436,13 +523,16 @@ pub async fn msg_decoder(
                     match decode_msg(raw_msg) {
                         Ok(decoded) => {
                             if let Err(e) = msg_tx.send(decoded) {
-                                error!(error = %e, "Failed to send decoded message to downstream");
-                                bail!("Downstream channel closed");
+                                bail!(critical_error(
+                                    e.into(),
+                                    "Failed to send decoded message to downstream".into()
+                                ));
                             }
                         }
                         Err(e) => {
                             let errmsg = "Failed to decode gossip message";
                             error!(error = %e, raw_msg_preview = &raw_msg[..raw_msg.len().min(100)], errmsg);
+                            cancel_token.cancel();
                             bail!(errmsg);
                         }
                     }
@@ -451,6 +541,7 @@ pub async fn msg_decoder(
             None => {
                 let errmsg = "Internal: msg_decoder: rx chan closed";
                 error!(errmsg);
+                cancel_token.cancel();
                 bail!(errmsg);
             }
         }

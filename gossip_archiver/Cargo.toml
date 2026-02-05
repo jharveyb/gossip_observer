@@ -32,3 +32,4 @@ sqlx = { version = "0.8.0", features = [
 ] }
 tokio = { version = "1.47", features = ["full", "tracing"] }
 twox-hash = { version = "2.1.2", features = ["std", "xxhash3_64"] }
+tokio-util = "0.7.18"

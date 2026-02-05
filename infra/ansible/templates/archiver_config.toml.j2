@@ -17,7 +17,7 @@ retention_secs = 120
 
 [database]
 # Maximum number of items to write to DB at once
-batch_size = {{ archiver_db_batch_size | default(10000) }}
+batch_size = {{ archiver_db_batch_size | default(2500) }}
 
 # Seconds between unconditional DB flushes
-flush_interval = {{ archiver_db_flush_interval | default(5) }}
+flush_interval = {{ archiver_db_flush_interval | default(2) }}

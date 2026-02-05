@@ -13,6 +13,7 @@ Environment="ARCHIVER_MODE=production"
 ExecStart=/usr/local/bin/gossip_archiver
 Restart=on-failure
 RestartSec=30
+RandomizedDelaySec=60
 
 [Install]
 WantedBy=multi-user.target
