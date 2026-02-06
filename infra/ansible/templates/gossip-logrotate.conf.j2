@@ -1,0 +1,51 @@
+# Logrotate config for gossip observer services
+# Compresses log files with zstd and deletes old ones
+#
+# tracing_appender creates hourly files like collector.2024-01-15-14
+# min,max age mean we only handle logfiles 1+ days old, and they are
+# removed after 1 week (rotate -1 means no limit on total rotations)
+
+/var/lib/gossip_collector/*/collector.* {
+    missingok
+    notifempty
+    nocreate
+    size 100k
+    rotate -1
+    minage 1
+    maxage 7
+    compress
+    compresscmd /usr/bin/zstd
+    compressext .zst
+    compressoptions --rm
+    uncompresscmd /usr/bin/unzstd
+}
+
+/var/lib/gossip_archiver/*/archiver.* {
+    missingok
+    notifempty
+    nocreate
+    size 100k
+    rotate -1
+    minage 1
+    maxage 7
+    compress
+    compresscmd /usr/bin/zstd
+    compressext .zst
+    compressoptions --rm
+    uncompresscmd /usr/bin/unzstd
+}
+
+/var/lib/observer_controller/*/controller.* {
+    missingok
+    notifempty
+    nocreate
+    size 100k
+    rotate -1
+    minage 1
+    maxage 7
+    compress
+    compresscmd /usr/bin/zstd
+    compressext .zst
+    compressoptions --rm
+    uncompresscmd /usr/bin/unzstd
+}

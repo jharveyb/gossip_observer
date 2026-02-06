@@ -7,3 +7,53 @@
   ansible.builtin.apt:
     name: "{{ base_pkgs }}"
     state: present
+
+- name: Deploy gossip logrotate config
+  ansible.builtin.template:
+    src: gossip-logrotate.conf.j2
+    dest: /etc/logrotate.d/gossip
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Deploy gossip logrotate systemd units
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item | replace('.j2', '') }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - gossip-logrotate.service.j2
+    - gossip-logrotate.timer.j2
+  register: logrotate_units
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: logrotate_units is changed
+
+- name: Enable gossip logrotate timer
+  ansible.builtin.systemd:
+    name: gossip-logrotate.timer
+    enabled: true
+    state: started
+
+- name: Create journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy journald config
+  ansible.builtin.template:
+    src: journald-gossip.conf.j2
+    dest: /etc/systemd/journald.conf.d/gossip.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd config
+    - Restart journald

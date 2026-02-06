@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotate gossip observer logs every 2 hours
+
+[Timer]
+OnCalendar=*:00/2
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

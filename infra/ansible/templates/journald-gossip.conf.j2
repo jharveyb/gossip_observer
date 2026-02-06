@@ -1,0 +1,12 @@
+# Limit journal storage since primary logs are in /var/lib/*/
+# This keeps journald useful for quick debugging without wasting disk
+
+[Journal]
+# Max total disk usage for journal files
+SystemMaxUse=500M
+# Max size per journal file
+SystemMaxFileSize=50M
+# Keep entries for max 3 days (primary logs have 7-day retention)
+MaxRetentionSec=3day
+# Compress journal files
+Compress=yes

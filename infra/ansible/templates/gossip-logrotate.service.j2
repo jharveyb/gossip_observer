@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate gossip observer logs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/gossip
