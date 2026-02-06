@@ -16,11 +16,11 @@ pub struct ConsoleConfig {
     pub retention_secs: u16,
 }
 
-/// Initialize structured logging with JSON file output and journald/stderr console output.
+/// Initialize structured logging with JSON file output and stderr console output.
 ///
 /// # Log Outputs
-/// - **JSON file**: `{log_dir}/{file_prefix}.YYYY-MM-DD.log` (daily rotation)
-/// - **Console**: Native journald if available, otherwise pretty stderr with colors
+/// - **JSON file**: `{log_dir}/{file_prefix}.YYYY-MM-DD-HH` (hourly rotation)
+/// - **Console**: Pretty stderr with colors
 /// - **Tokio-console**: If console_config is provided, enables tokio-console for async debugging
 ///
 /// # EnvFilter
@@ -38,8 +38,8 @@ pub fn init_logging(
     // UTC timer for consistent timestamps
     let timer = UtcTime::rfc_3339();
 
-    // Layer 1: JSON file appender with daily rotation and UTC timestamps
-    let file_appender = tracing_appender::rolling::daily(log_dir, file_prefix);
+    // Layer 1: JSON file appender with hourly rotation and UTC timestamps
+    let file_appender = tracing_appender::rolling::hourly(log_dir, file_prefix);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_layer = tracing_subscriber::fmt::layer()
@@ -52,14 +52,18 @@ pub fn init_logging(
         .with_thread_ids(true)
         .with_file(true);
 
-    // Layer 2: Try journald first, fallback to stderr
-    // Note: We need to handle these as separate initialization paths due to type differences
+    // Layer 2: stderr with pretty formatting
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_timer(timer)
+        .with_ansi(true)
+        .pretty();
 
     // Optional tokio-console layer for async debugging (unfiltered - needs TRACE events)
     let console_layer = if let Some(cfg) = console_config {
         Some(
             console_subscriber::ConsoleLayer::builder()
-                .event_buffer_capacity(1024 * 25)
+                .event_buffer_capacity(1024 * 10)
                 .retention(Duration::from_secs(cfg.retention_secs.into()))
                 .server_addr((IpAddr::from_str(&cfg.listen_addr)?, cfg.listen_port))
                 .spawn(),
@@ -73,27 +77,11 @@ pub fn init_logging(
     let make_env_filter =
         || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
-    if let Ok(journald_layer) = tracing_journald::layer() {
-        // Use journald for console output
-        tracing_subscriber::registry()
-            .with(console_layer)
-            .with(file_layer.with_filter(make_env_filter()))
-            .with(journald_layer.with_filter(make_env_filter()))
-            .init();
-    } else {
-        // Fallback to stderr with pretty formatting
-        let stderr_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_timer(timer)
-            .with_ansi(true)
-            .pretty();
-
-        tracing_subscriber::registry()
-            .with(console_layer)
-            .with(file_layer.with_filter(make_env_filter()))
-            .with(stderr_layer.with_filter(make_env_filter()))
-            .init();
-    }
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer.with_filter(make_env_filter()))
+        .with(stderr_layer.with_filter(make_env_filter()))
+        .init();
 
     Ok(guard)
 }
