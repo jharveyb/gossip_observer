@@ -215,6 +215,68 @@ let node_list = read_to_string("./nodes.txt")
 
 Use `let _ =` to ignore `Result` for truly optional operations.
 
+### Coordinated Shutdown with CancellationToken
+
+**Use `CancellationToken` and `JoinSet` for coordinated task shutdown:**
+
+When running multiple async tasks that depend on each other, use a shared cancellation token so any task failure triggers shutdown of all tasks:
+
+```rust
+let stop_signal = CancellationToken::new();
+let mut tasks = JoinSet::new();
+
+// Each task gets a child token or clone
+tasks.spawn(task_a(stop_signal.child_token()));
+tasks.spawn(task_b(stop_signal.child_token()));
+
+// Wait for any task to exit, then shut down all
+if let Some(result) = tasks.join_next().await {
+    stop_signal.cancel();  // Signal all other tasks to stop
+
+    // Collect remaining results
+    let remaining = tasks.join_all().await;
+    // Check for errors...
+}
+```
+
+**Use `drop_guard()` or `drop_guard_ref()` to auto-cancel on task exit:**
+
+```rust
+async fn critical_task(cancel_token: CancellationToken) -> anyhow::Result<()> {
+    // If this task exits for ANY reason (success, error, panic),
+    // the token will be cancelled
+    let _drop_guard = cancel_token.clone().drop_guard();
+
+    // Or use drop_guard_ref() to avoid cloning (tokio-util 0.7.16+)
+    let _drop_guard = cancel_token.drop_guard_ref();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                info!("Received shutdown signal");
+                return Ok(());
+            }
+            // ... other branches
+        }
+    }
+}
+```
+
+**Pattern for logging before shutdown:**
+
+```rust
+let critical_error = |e: anyhow::Error, msg: &str| {
+    error!(error = %e, msg = %msg, "Critical error in task");
+    cancel_token.cancel();
+    e
+};
+
+if let Err(e) = some_operation().await {
+    bail!(critical_error(e, "operation failed"));
+}
+```
+
 ### Error Handling in Async Task Pipelines
 
 **Critical: Don't let single errors crash entire async tasks**
@@ -314,6 +376,29 @@ let nats_options = async_nats::ConnectOptions::new()
     .ping_interval(Duration::from_secs(30))  // Detect failures at 90s instead of 180s
     .retry_on_initial_connect();
 ```
+
+**NATS JetStream storage and memory limits:**
+
+JetStream streams can use Memory or File storage. Memory storage is faster but limited:
+
+```rust
+// File storage (recommended for production) - survives restarts, larger capacity
+jetstream::stream::Config {
+    storage: StorageType::File,  // or just use default
+    ..Default::default()
+}
+```
+
+Server-side memory limits in `nats-server.conf`:
+```
+jetstream {
+    store_dir: /var/lib/nats
+    max_file_store: 8589934592  # 8GB
+    # max_memory_store: 786432000  # ~750MB - comment out to use file storage
+}
+```
+
+**Warning:** When JetStream memory limits are exceeded, publishers (collectors) get disconnected with cryptic errors. If the archiver crashes and stops consuming messages, they pile up until memory limit is hit, causing cascade disconnections of all collectors.
 
 ### Message Validation and Parsing
 
