@@ -196,6 +196,79 @@ let request = tonic::Request::new(MyRequest {});
 
 When a type like `Request` is used multiple times in a file, add it to the imports rather than repeating the full path.
 
+### Type Conversions and From/TryFrom Traits
+
+**Define domain types in `observer_common::types` with `From` and `TryFrom` implementations:**
+
+Instead of scattering conversion logic in gRPC client/server code, centralize it in type definitions:
+
+```rust
+// ✅ Good - define a domain type with conversions in observer_common/src/types.rs
+#[derive(Debug, Clone)]
+pub struct OpenChannelCommand {
+    pub peer: PeerConnectionInfo,
+    pub capacity_sats: u64,
+    pub push_amount_msat: Option<u64>,
+}
+
+impl From<OpenChannelCommand> for common::OpenChannelRequest {
+    fn from(cmd: OpenChannelCommand) -> Self {
+        common::OpenChannelRequest {
+            peer: Some(cmd.peer.into()),
+            capacity: cmd.capacity_sats,
+            push_amount_msat: cmd.push_amount_msat,
+        }
+    }
+}
+
+impl TryFrom<common::OpenChannelRequest> for OpenChannelCommand {
+    type Error = anyhow::Error;
+    fn try_from(req: common::OpenChannelRequest) -> Result<Self, Self::Error> {
+        Ok(OpenChannelCommand {
+            peer: util::convert_required_field(req.peer, "peer")?,
+            capacity_sats: req.capacity,
+            push_amount_msat: req.push_amount_msat,
+        })
+    }
+}
+
+// Then use it cleanly in client code
+pub async fn open_channel(&mut self, cmd: OpenChannelCommand) -> anyhow::Result<Vec<u8>> {
+    let req = Request::new(cmd.into());  // Clean conversion
+    let resp = self.client.open_channel(req).await?;
+    Ok(resp.into_inner().local_channel_id)
+}
+
+// And in server code
+let cmd: OpenChannelCommand = inner_req
+    .try_into()
+    .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
+```
+
+```rust
+// ❌ Avoid - inline conversion logic in gRPC handlers
+pub async fn open_channel(
+    &mut self,
+    peer: &PeerConnectionInfo,
+    capacity_sats: u64,
+    push_amount_msat: Option<u64>,
+) -> anyhow::Result<Vec<u8>> {
+    let peer_info = common::PeerConnectionInfo::from(peer.clone());
+    let req = Request::new(common::OpenChannelRequest {
+        peer: Some(peer_info),
+        capacity: capacity_sats,
+        push_amount_msat,
+    });
+    // ...
+}
+```
+
+**Benefits:**
+- Type conversions are defined once in `observer_common::types`
+- gRPC client/server code stays clean and focused on communication
+- Easy to test conversions in isolation
+- Changes to proto structure only require updating the trait implementations
+
 ### Optional File Loading
 
 **Make .env and config files optional for production:**
