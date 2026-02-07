@@ -78,8 +78,9 @@ pub async fn connected_peer_count(node_copy: Arc<ldk_node::Node>) -> usize {
         .fold(0, |acc, i| if i.is_connected { acc + 1 } else { acc })
 }
 
+// TODO: cache unused addresses
 pub fn next_address(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Address> {
-    let addr = node_copy.onchain_payment().new_address()?;
+    let addr = node_copy.onchain_payment().next_address()?;
     Ok(addr)
 }
 
