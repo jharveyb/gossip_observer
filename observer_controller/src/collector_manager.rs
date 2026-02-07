@@ -50,6 +50,7 @@ pub enum CollectorManagerMsg {
     GetRegisteredCollectors(oneshot::Sender<Vec<CollectorHeartbeat>>),
     GetExpectedCollectors(oneshot::Sender<HashSet<String>>),
     GetCollectorAssignment((String, oneshot::Sender<Option<u32>>)),
+    GetCollectorByUuid((String, oneshot::Sender<Option<CollectorHeartbeat>>)),
     GetCommunityStats((u32, oneshot::Sender<Option<CommunityStats>>)),
     GetAllCommunityStats(oneshot::Sender<Vec<CommunityStats>>),
     GetCommunityMembers((u32, oneshot::Sender<Option<Vec<NodeAnnotatedRecord>>>)),
@@ -136,6 +137,13 @@ impl CollectorManager {
                     .cloned();
                 let _ = resp.send(assignment);
             }
+            CollectorManagerMsg::GetCollectorByUuid((uuid, resp)) => {
+                let collector = self
+                    .registered_collectors
+                    .get(&uuid)
+                    .and_then(|heartbeats| heartbeats.last().cloned());
+                let _ = resp.send(collector);
+            }
             CollectorManagerMsg::GetCommunityStats((community_id, resp)) => {
                 let stats = self
                     .collection_cfg
@@ -212,6 +220,16 @@ impl CollectorManagerHandle {
     ) -> anyhow::Result<Option<u32>> {
         let (tx, rx) = oneshot::channel();
         let msg = CollectorManagerMsg::GetCollectorAssignment((collector_id.to_string(), tx));
+        self.mailbox.send(msg).unwrap();
+        rx.await.map_err(anyhow::Error::from)
+    }
+
+    pub async fn get_collector_by_uuid(
+        &self,
+        uuid: &str,
+    ) -> anyhow::Result<Option<CollectorHeartbeat>> {
+        let (tx, rx) = oneshot::channel();
+        let msg = CollectorManagerMsg::GetCollectorByUuid((uuid.to_string(), tx));
         self.mailbox.send(msg).unwrap();
         rx.await.map_err(anyhow::Error::from)
     }

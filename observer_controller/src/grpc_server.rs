@@ -7,7 +7,8 @@ use tonic::{Request, Response, Status};
 
 use observer_common::common::{CollectorInfo, ShutdownRequest, ShutdownResponse};
 use observer_common::controllerrpc::{
-    CollectorStatusResponse, RegisterCollectorResponse, StatusRequest, StatusResponse,
+    CollectorStatusResponse, OpenCollectorChannelRequest, OpenCollectorChannelResponse,
+    RegisterCollectorResponse, StatusRequest, StatusResponse,
 };
 use observer_common::{controllerrpc, util};
 use tracing::info;
@@ -110,6 +111,59 @@ impl controllerrpc::controller_service_server::ControllerService for ControllerS
         info!("Controller: grpc server: sent shutdown signal");
         self.stop_token.cancel();
         Ok(Response::new(ShutdownResponse {}))
+    }
+
+    async fn open_channel(
+        &self,
+        request: Request<OpenCollectorChannelRequest>,
+    ) -> Result<Response<OpenCollectorChannelResponse>, Status> {
+        let req = request.into_inner();
+        let collector_uuid = req.uuid.clone();
+
+        // Look up collector by UUID
+        let collector = self
+            .collector_manager
+            .get_collector_by_uuid(&collector_uuid)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let collector = collector.ok_or_else(|| {
+            Status::not_found(format!("Collector {} not found or offline", collector_uuid))
+        })?;
+
+        // Connect to collector's gRPC endpoint
+        let mut client = CollectorClient::connect(&collector.info.grpc_socket)
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!(
+                    "Failed to connect to collector {}: {}",
+                    collector_uuid, e
+                ))
+            })?;
+
+        // Convert inner request to OpenChannelCommand and forward to collector
+        let inner_req = req
+            .request
+            .ok_or_else(|| Status::invalid_argument("request is required"))?;
+        let cmd = inner_req
+            .try_into()
+            .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
+
+        let channel_id = client
+            .open_channel(cmd)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to open channel: {}", e)))?;
+
+        info!(
+            collector_uuid = %collector_uuid,
+            "Controller: opened channel via collector"
+        );
+
+        Ok(Response::new(OpenCollectorChannelResponse {
+            uuid: collector_uuid,
+            response: Some(observer_common::common::OpenChannelResponse {
+                local_channel_id: channel_id,
+            }),
+        }))
     }
 }
 
