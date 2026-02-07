@@ -1,4 +1,4 @@
-use observer_common::types::{LdkNodeConfig, PeerConnectionInfo, SharedUsize};
+use observer_common::types::{Balances, LdkNodeConfig, PeerConnectionInfo, SharedUsize};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use tokio_util::sync::CancellationToken;
@@ -6,10 +6,14 @@ use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 
 use observer_common::collectorrpc;
-use observer_common::common::{ShutdownRequest, ShutdownResponse};
+use observer_common::common::{
+    BalancesRequest, BalancesResponse, OpenChannelRequest, OpenChannelResponse, ShutdownRequest,
+    ShutdownResponse,
+};
 use tracing::info;
 
-use crate::{node_manager::current_peers, peer_conn_manager::PeerConnManagerHandle};
+use crate::node_manager::{balances, current_peers, open_channel};
+use crate::peer_conn_manager::PeerConnManagerHandle;
 
 // Any state we need to implement our RPC server.
 pub struct CollectorServiceImpl {
@@ -87,6 +91,41 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
             .map_err(|e| Status::internal(e.to_string()))?;
         peers.sort_unstable_by_key(|p| p.node_id);
         Ok(Response::new(peers.into()))
+    }
+
+    async fn balances(
+        &self,
+        _req: Request<BalancesRequest>,
+    ) -> Result<Response<BalancesResponse>, Status> {
+        let node_copy = self.node.clone();
+        let balance: Balances = tokio::task::spawn_blocking(move || balances(node_copy))
+            .await
+            .map_err(|e| Status::internal(format!("Balances: {}", e)))?
+            .into();
+
+        Ok(Response::new(balance.into()))
+    }
+
+    async fn open_channel(
+        &self,
+        request: Request<OpenChannelRequest>,
+    ) -> Result<Response<OpenChannelResponse>, Status> {
+        let req = request
+            .into_inner()
+            .try_into()
+            .map_err(|e: anyhow::Error| Status::internal(e.to_string()))?;
+        let channel_id = open_channel(
+            self.node.clone(),
+            req,
+            None, // Default ChannelConfig
+        )
+        .await
+        .map_err(|e| Status::internal(format!("Failed to open channel: {}", e)))?;
+
+        // UserChannelId is u128, convert to bytes
+        Ok(Response::new(OpenChannelResponse {
+            local_channel_id: channel_id.0.to_le_bytes().to_vec(),
+        }))
     }
 
     async fn shutdown(

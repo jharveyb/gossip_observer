@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
+use observer_common::types::OpenChannelCommand;
 use observer_common::types::PeerSpecifier;
 
 pub fn split_peer_info(peer_info: &str) -> Vec<String> {
@@ -88,21 +89,25 @@ pub fn balances(node_copy: Arc<ldk_node::Node>) -> BalanceDetails {
 
 pub async fn open_channel(
     node_copy: Arc<ldk_node::Node>,
-    peer: PeerSpecifier,
-    amount_sats: u64,
-    push_amount_msat: Option<u64>,
+    mut cmd: OpenChannelCommand,
     channel_cfg: Option<ChannelConfig>,
 ) -> anyhow::Result<UserChannelId> {
-    let pubkey = peer.pubkey;
-    let addr = peer.addr.clone();
+    let pubkey = cmd.peer.pubkey;
+    let addr = cmd.peer.addrs.pop().ok_or(anyhow!("Missing peer addr"))?;
     match tokio::task::spawn_blocking(move || {
-        node_copy.open_announced_channel(pubkey, addr, amount_sats, push_amount_msat, channel_cfg)
+        node_copy.open_announced_channel(
+            pubkey,
+            addr,
+            cmd.capacity_sats,
+            cmd.push_amount_msat,
+            channel_cfg,
+        )
     })
     .await
     {
         Ok(Ok(id)) => Ok(id),
         Ok(Err(e)) => {
-            error!(error = ?e, peer = ?peer, amount = %amount_sats, "Collector: LDK: Unexpected error");
+            error!(error = ?e, peer = ?pubkey, amount = %cmd.capacity_sats, "Collector: LDK: Unexpected error");
             Err(e.into())
         }
         Err(e) => {

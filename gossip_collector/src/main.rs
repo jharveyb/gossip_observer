@@ -235,6 +235,7 @@ async fn async_main(
         alias: ldk_alias,
         listen_addrs: ldk_listen_addrs,
         onchain_addr: initial_onchain_address,
+        balances: initial_balance,
         peer_count: 0,
         target_count: target_peer_count.load(SeqCst) as u32,
         eligible_peers: 0,
@@ -326,6 +327,7 @@ pub async fn ping_controller(
         info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await;
         info.target_count = peer_target.load(SeqCst) as u32;
         info.onchain_addr = next_address(node.clone())?;
+        info.balances = balances(node.clone()).into();
 
         // If we fail to connect to the controller, retry indefinitely. The collector
         // can't do anything without its peer list.
