@@ -5,7 +5,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Address, Network};
 use chrono::{DateTime, Utc};
-use ldk_node::PeerDetails;
+use ldk_node::{BalanceDetails, PeerDetails};
 use lightning::{ln::msgs::SocketAddress, routing::gossip::NodeAlias};
 use serde_with::DisplayFromStr;
 use serde_with::serde_as;
@@ -203,9 +203,9 @@ impl From<Vec<PeerDetails>> for collectorrpc::CurrentPeersResponse {
 pub struct CollectorInfo {
     pub uuid: String,
     pub pubkey: PublicKey,
-    pub alias: Option<NodeAlias>,
     pub listen_addrs: Vec<SocketAddress>,
     pub onchain_addr: Address,
+    pub balances: Balances,
     pub peer_count: u32,
     pub target_count: u32,
     pub eligible_peers: u32,
@@ -217,13 +217,50 @@ impl From<CollectorInfo> for common::CollectorInfo {
         common::CollectorInfo {
             uuid: info.uuid,
             pubkey: Some(info.pubkey.into()),
-            alias: info.alias.map(Into::into),
             listen_addrs: util::convert_vec(info.listen_addrs),
             onchain_addr: Some(info.onchain_addr.into()),
+            balances: Some(info.balances.into()),
             peer_count: info.peer_count,
             target_count: info.target_count,
             eligible_peers: info.eligible_peers,
             grpc_socket: info.grpc_socket,
+        }
+    }
+}
+
+#[derive(PartialEq, Clone, Default, Debug)]
+pub struct Balances {
+    pub total_onchain: u64,
+    pub spendable_onchain: u64,
+    pub total_lightning_balance: u64,
+}
+
+impl From<BalanceDetails> for Balances {
+    fn from(balances: BalanceDetails) -> Self {
+        Balances {
+            total_onchain: balances.total_onchain_balance_sats,
+            spendable_onchain: balances.spendable_onchain_balance_sats,
+            total_lightning_balance: balances.total_lightning_balance_sats,
+        }
+    }
+}
+
+impl From<Balances> for common::BalancesResponse {
+    fn from(balances: Balances) -> Self {
+        common::BalancesResponse {
+            total_onchain: balances.total_onchain,
+            spendable_onchain: balances.spendable_onchain,
+            total_lightning_balance: balances.total_lightning_balance,
+        }
+    }
+}
+
+impl From<common::BalancesResponse> for Balances {
+    fn from(balances: common::BalancesResponse) -> Self {
+        Balances {
+            total_onchain: balances.total_onchain,
+            spendable_onchain: balances.spendable_onchain,
+            total_lightning_balance: balances.total_lightning_balance,
         }
     }
 }
@@ -233,14 +270,14 @@ impl TryFrom<common::CollectorInfo> for CollectorInfo {
 
     fn try_from(info: common::CollectorInfo) -> Result<Self, Self::Error> {
         let pubkey = util::convert_required_field(info.pubkey, "pubkey")?;
-        let alias = info.alias.map(TryInto::try_into).transpose()?;
         let onchain_addr = util::convert_required_field(info.onchain_addr, "onchain_addr")?;
+        let balances = util::convert_required_field(info.balances, "balances")?;
         Ok(CollectorInfo {
             uuid: info.uuid,
             pubkey,
-            alias,
             listen_addrs: util::try_convert_vec(info.listen_addrs)?,
             onchain_addr,
+            balances,
             peer_count: info.peer_count,
             target_count: info.target_count,
             eligible_peers: info.eligible_peers,
@@ -261,6 +298,35 @@ impl From<CollectorHeartbeat> for controllerrpc::CollectorHeartbeat {
             timestamp: hb.timestamp.timestamp() as u64,
             info: Some(hb.info.into()),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenChannelCommand {
+    pub peer: PeerConnectionInfo,
+    pub capacity_sats: u64,
+    pub push_amount_msat: Option<u64>,
+}
+
+impl From<OpenChannelCommand> for common::OpenChannelRequest {
+    fn from(cmd: OpenChannelCommand) -> Self {
+        common::OpenChannelRequest {
+            peer: Some(cmd.peer.into()),
+            capacity: cmd.capacity_sats,
+            push_amount_msat: cmd.push_amount_msat,
+        }
+    }
+}
+
+impl TryFrom<common::OpenChannelRequest> for OpenChannelCommand {
+    type Error = anyhow::Error;
+
+    fn try_from(req: common::OpenChannelRequest) -> Result<Self, Self::Error> {
+        Ok(OpenChannelCommand {
+            peer: util::convert_required_field(req.peer, "peer")?,
+            capacity_sats: req.capacity,
+            push_amount_msat: req.push_amount_msat,
+        })
     }
 }
 

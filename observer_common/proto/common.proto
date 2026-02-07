@@ -28,9 +28,9 @@ message PeerConnectionInfo {
 message CollectorInfo {
         string uuid = 1;
         Pubkey pubkey = 2;
-        optional NodeAlias alias = 3;
-        repeated SocketAddress listen_addrs = 4;
-        OnchainAddress onchain_addr = 5;
+        repeated SocketAddress listen_addrs = 3;
+        OnchainAddress onchain_addr = 4;
+        BalancesResponse balances = 5;
         uint32 peer_count = 6;
         uint32 target_count = 7;
         uint32 eligible_peers = 8;
@@ -43,6 +43,16 @@ message BalancesResponse{
   uint64 total_onchain = 1;
   uint64 spendable_onchain = 2;
   uint64 total_lightning_balance = 3;
+}
+
+message OpenChannelRequest {
+  PeerConnectionInfo peer = 1;
+  uint64 capacity = 2;
+  optional uint64 push_amount_msat = 3;
+}
+
+message OpenChannelResponse {
+  bytes local_channel_id = 1;
 }
 
 message ShutdownRequest {}

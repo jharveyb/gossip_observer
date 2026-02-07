@@ -8,6 +8,7 @@ service ControllerService {
         // Endpoints for collectors to call.
         rpc RegisterCollector(common.CollectorInfo) returns (RegisterCollectorResponse);
         rpc CollectorStatus(common.CollectorInfo) returns (CollectorStatusResponse);
+        rpc OpenChannel(OpenCollectorChannelRequest) returns (OpenCollectorChannelResponse);
         // Endpoints for the operator to use.
         rpc Status(StatusRequest) returns (StatusResponse);
         rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);
@@ -33,4 +34,14 @@ message StatusResponse {
         uint32 offline_collector_count = 4;
         repeated string offline_collectors = 5;
         repeated CollectorHeartbeat statuses = 6;
+}
+
+message OpenCollectorChannelRequest {
+        string uuid = 1;
+        common.OpenChannelRequest request = 2;
+}
+
+message OpenCollectorChannelResponse {
+        string uuid = 1;
+        common.OpenChannelResponse response = 2;
 }

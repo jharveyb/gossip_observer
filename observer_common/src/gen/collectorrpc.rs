@@ -42,21 +42,6 @@ pub struct TargetPeerCountRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TargetPeerCountResponse {}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OpenChannelRequest {
-    /// This should only be one socket for now
-    #[prost(message, optional, tag = "1")]
-    pub peer: ::core::option::Option<super::common::PeerConnectionInfo>,
-    #[prost(uint64, tag = "2")]
-    pub capacity: u64,
-    #[prost(uint64, optional, tag = "3")]
-    pub push_amount_msat: ::core::option::Option<u64>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct OpenChannelResponse {
-    #[prost(bytes = "vec", tag = "1")]
-    pub local_channel_id: ::prost::alloc::vec::Vec<u8>,
-}
 /// Generated client implementations.
 pub mod collector_service_client {
     #![allow(
@@ -256,8 +241,54 @@ pub mod collector_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// rpc Balances(common.BalancesRequest) returns (common.BalancesResponse);
-        /// rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
+        pub async fn balances(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::common::BalancesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::BalancesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collectorrpc.CollectorService/Balances",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("collectorrpc.CollectorService", "Balances"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn open_channel(
+            &mut self,
+            request: impl tonic::IntoRequest<super::super::common::OpenChannelRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::OpenChannelResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collectorrpc.CollectorService/OpenChannel",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("collectorrpc.CollectorService", "OpenChannel"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn shutdown(
             &mut self,
             request: impl tonic::IntoRequest<super::super::common::ShutdownRequest>,
@@ -325,8 +356,20 @@ pub mod collector_service_server {
             tonic::Response<super::CurrentPeersResponse>,
             tonic::Status,
         >;
-        /// rpc Balances(common.BalancesRequest) returns (common.BalancesResponse);
-        /// rpc OpenChannel(OpenChannelRequest) returns (OpenChannelResponse);
+        async fn balances(
+            &self,
+            request: tonic::Request<super::super::common::BalancesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::BalancesResponse>,
+            tonic::Status,
+        >;
+        async fn open_channel(
+            &self,
+            request: tonic::Request<super::super::common::OpenChannelRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::OpenChannelResponse>,
+            tonic::Status,
+        >;
         async fn shutdown(
             &self,
             request: tonic::Request<super::super::common::ShutdownRequest>,
@@ -587,6 +630,101 @@ pub mod collector_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetCurrentPeersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collectorrpc.CollectorService/Balances" => {
+                    #[allow(non_camel_case_types)]
+                    struct BalancesSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<super::super::common::BalancesRequest>
+                    for BalancesSvc<T> {
+                        type Response = super::super::common::BalancesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::super::common::BalancesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::balances(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = BalancesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collectorrpc.CollectorService/OpenChannel" => {
+                    #[allow(non_camel_case_types)]
+                    struct OpenChannelSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<
+                        super::super::common::OpenChannelRequest,
+                    > for OpenChannelSvc<T> {
+                        type Response = super::super::common::OpenChannelResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::super::common::OpenChannelRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::open_channel(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = OpenChannelSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

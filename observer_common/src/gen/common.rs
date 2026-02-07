@@ -34,12 +34,12 @@ pub struct CollectorInfo {
     pub uuid: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub pubkey: ::core::option::Option<Pubkey>,
-    #[prost(message, optional, tag = "3")]
-    pub alias: ::core::option::Option<NodeAlias>,
-    #[prost(message, repeated, tag = "4")]
+    #[prost(message, repeated, tag = "3")]
     pub listen_addrs: ::prost::alloc::vec::Vec<SocketAddress>,
-    #[prost(message, optional, tag = "5")]
+    #[prost(message, optional, tag = "4")]
     pub onchain_addr: ::core::option::Option<OnchainAddress>,
+    #[prost(message, optional, tag = "5")]
+    pub balances: ::core::option::Option<BalancesResponse>,
     #[prost(uint32, tag = "6")]
     pub peer_count: u32,
     #[prost(uint32, tag = "7")]
@@ -59,6 +59,20 @@ pub struct BalancesResponse {
     pub spendable_onchain: u64,
     #[prost(uint64, tag = "3")]
     pub total_lightning_balance: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenChannelRequest {
+    #[prost(message, optional, tag = "1")]
+    pub peer: ::core::option::Option<PeerConnectionInfo>,
+    #[prost(uint64, tag = "2")]
+    pub capacity: u64,
+    #[prost(uint64, optional, tag = "3")]
+    pub push_amount_msat: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenChannelResponse {
+    #[prost(bytes = "vec", tag = "1")]
+    pub local_channel_id: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShutdownRequest {}

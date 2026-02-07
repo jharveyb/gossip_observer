@@ -80,4 +80,19 @@ impl CollectorClient {
         self.client.shutdown(req).await?;
         Ok(())
     }
+
+    pub async fn get_balances(&mut self) -> anyhow::Result<observer_types::Balances> {
+        let req = Request::new(common::BalancesRequest {});
+        let resp = self.client.balances(req).await?;
+        Ok(resp.into_inner().into())
+    }
+
+    pub async fn open_channel(
+        &mut self,
+        cmd: observer_types::OpenChannelCommand,
+    ) -> anyhow::Result<Vec<u8>> {
+        let req = Request::new(cmd.into());
+        let resp = self.client.open_channel(req).await?;
+        Ok(resp.into_inner().local_channel_id)
+    }
 }
