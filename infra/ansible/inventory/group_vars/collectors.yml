@@ -178,9 +178,6 @@ gossip_collectors:
     nats_server: "{{ nats_server_addr_prod }}"
     controller_addr: "{{ controller_prod }}"
 
-# Esplora API endpoint for blockchain data
-esplora_url: "https://blockstream.info/api"
-
 # Deployment configuration
 health_check_enabled: true
 health_check_timeout: 30  # seconds

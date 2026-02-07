@@ -7,7 +7,8 @@ use std::env;
 #[derive(Debug, Deserialize)]
 pub struct Ldk {
     pub network: String,
-    pub esplora: String,
+    pub esplora: Option<String>,
+    pub electrum: Option<String>,
     pub storage_dir: String,
     pub log_level: String,
     pub listen_addr: String,

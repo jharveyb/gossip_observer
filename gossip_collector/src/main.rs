@@ -4,9 +4,9 @@ use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering::SeqCst};
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use bitcoin::Network;
-use ldk_node::config::{BackgroundSyncConfig, EsploraSyncConfig};
+use ldk_node::config::{BackgroundSyncConfig, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
 use tokio::task::JoinSet;
@@ -28,7 +28,7 @@ mod peer_conn_manager;
 use crate::config::CollectorConfig;
 use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
-use crate::node_manager::{connected_peer_count, next_address};
+use crate::node_manager::{balances, connected_peer_count, next_address};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
 fn main() -> anyhow::Result<()> {
@@ -89,13 +89,26 @@ async fn async_main(
         fee_rate_cache_update_interval_secs: 60 * 10,
     };
 
+    match (cfg.ldk.esplora, cfg.ldk.electrum) {
+        (None, None) | (Some(_), Some(_)) => {
+            bail!("Exactly one chain source must be specified")
+        }
+        (None, Some(server_url)) => {
+            let cfg = ElectrumSyncConfig {
+                background_sync_config: Some(sync_cfg),
+            };
+            // builder.set_chain_source_electrum(server_url, Some(cfg));
+            builder.set_chain_source_electrum(server_url, None);
+        }
+        (Some(server_url), None) => {
+            let cfg = EsploraSyncConfig {
+                background_sync_config: Some(sync_cfg),
+            };
+            builder.set_chain_source_esplora(server_url, Some(cfg));
+        }
+    }
+
     builder.set_network(Network::from_core_arg(&cfg.ldk.network)?);
-    builder.set_chain_source_esplora(
-        cfg.ldk.esplora.clone(),
-        Some(EsploraSyncConfig {
-            background_sync_config: Some(sync_cfg),
-        }),
-    );
     if cfg.ldk.enable_tor {
         builder.set_tor_proxy_address(
             (
@@ -227,12 +240,11 @@ async fn async_main(
     });
 
     // Start task to send register and send heartbeat messages to the controller.
-    let ldk_alias = node.node_alias();
     let initial_onchain_address = next_address(node.clone())?;
+    let initial_balance = balances(node.clone()).into();
     let info_template = observer_common::types::CollectorInfo {
         uuid: cfg.uuid.clone(),
         pubkey: node.node_id(),
-        alias: ldk_alias,
         listen_addrs: ldk_listen_addrs,
         onchain_addr: initial_onchain_address,
         balances: initial_balance,

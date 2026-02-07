@@ -3,7 +3,7 @@ controller_addr = "{{ item.controller_addr }}"
 ldk_runtime_worker_threads = {{ item.ldk_runtime_worker_threads | default(2) }}
 
 [ldk]
-esplora = "{{ esplora_url }}"
+electrum = "{{ electrum_url }}"
 storage_dir = "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
 listen_addr = "0.0.0.0"
 listen_port = {{ item.ldk_port | default(9735) }}
