@@ -56,3 +56,8 @@
     daemon_reload: true
   loop: "{{ host_controllers }}"
   when: host_controllers is defined and host_controllers | length > 0
+
+- name: Restart journald
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted

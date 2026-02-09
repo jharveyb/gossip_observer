@@ -3,6 +3,10 @@
   vars:
     ansible_user: root
 
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+
   tasks:
     - name: Setup user with vault credentials
       tags: [user]
