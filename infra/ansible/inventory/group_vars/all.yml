@@ -15,6 +15,11 @@ base_pkgs:
   - mosh
   - tor
   - rsync
+  - zstd
+  - btop
+  - iotop
+  - iftop
+  - lnav
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
