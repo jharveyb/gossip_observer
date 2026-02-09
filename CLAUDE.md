@@ -264,6 +264,7 @@ pub async fn open_channel(
 ```
 
 **Benefits:**
+
 - Type conversions are defined once in `observer_common::types`
 - gRPC client/server code stays clean and focused on communication
 - Easy to test conversions in isolation
@@ -336,6 +337,29 @@ async fn critical_task(cancel_token: CancellationToken) -> anyhow::Result<()> {
 }
 ```
 
+**`drop_guard` on cloned tokens vs child tokens:**
+
+A `drop_guard` cancels whichever token it references. If the task holds a **clone** of the parent token, the drop guard cancels the parent — meaning any task panic or early exit kills the entire system. Use child tokens when you want the `JoinSet` shutdown logic (in main) to make the decision:
+
+```rust
+// ❌ Dangerous - task panic cancels the ENTIRE system's stop_signal
+let task_signal = stop_signal.clone();
+tasks.spawn(async move {
+    let _guard = task_signal.drop_guard_ref();
+    // if this panics, stop_signal is cancelled immediately
+});
+
+// ✅ Safer - task panic only cancels the child token
+// Main's join_next() still gets the panic result and decides what to do
+let task_signal = stop_signal.child_token();
+tasks.spawn(async move {
+    let _guard = task_signal.drop_guard_ref();
+    // if this panics, only task_signal is cancelled; stop_signal is unaffected
+});
+```
+
+The failure cascade: task panics → drop guard fires → parent token cancelled → all other tasks see cancellation and shut down → systemd restarts → same panic → boot loop.
+
 **Pattern for logging before shutdown:**
 
 ```rust
@@ -349,6 +373,51 @@ if let Err(e) = some_operation().await {
     bail!(critical_error(e, "operation failed"));
 }
 ```
+
+### Startup Synchronization with Barrier
+
+**Use a `Barrier` when tasks are spawned before their initialization data is available:**
+
+A common pattern: tasks are spawned into a `JoinSet` early (to set up channels, etc.), but they need configuration that only becomes available later (e.g., a node ID from a library that must be constructed first). Don't use global `OnceLock` — it creates an implicit ordering dependency that panics if violated. Instead, use a `tokio::sync::Barrier` to explicitly synchronize:
+
+```rust
+let barrier = Arc::new(Barrier::new(3)); // main + 2 tasks
+let (metadata_tx, _) = watch::channel(None);
+
+// Spawn tasks early — they block on the barrier
+tasks.spawn(worker_a(barrier.clone(), metadata_tx.subscribe()));
+tasks.spawn(worker_b(barrier.clone(), metadata_tx.subscribe()));
+
+// ... later, once initialization data is available ...
+let node = builder.build()?;
+metadata_tx.send_replace(Some(Metadata { id: node.id() }));
+
+// Release all tasks — they read metadata after the barrier
+barrier.wait().await;
+node.start()?;
+```
+
+Inside each task:
+
+```rust
+async fn worker_a(barrier: Arc<Barrier>, rx: watch::Receiver<Option<Metadata>>) {
+    // Block until main has set the metadata
+    tokio::select! {
+        _ = barrier.wait() => {}
+        _ = stop_signal.cancelled() => { return Ok(()); }
+    }
+    let metadata = rx.borrow().as_ref().expect("set before barrier").clone();
+
+    // Now safe to process messages that arrived during startup
+    loop { /* ... */ }
+}
+```
+
+Key points:
+
+- Any messages produced during initialization queue in unbounded channels and are processed after the barrier releases
+- The `stop_signal.cancelled()` branch in the select prevents deadlock if a task dies before reaching the barrier
+- Prefer `watch` channels over `OnceLock` statics for passing initialization data — they're instance-scoped, testable, and don't panic on read-before-write
 
 ### Error Handling in Async Task Pipelines
 
@@ -463,7 +532,8 @@ jetstream::stream::Config {
 ```
 
 Server-side memory limits in `nats-server.conf`:
-```
+
+```bash
 jetstream {
     store_dir: /var/lib/nats
     max_file_store: 8589934592  # 8GB
@@ -513,6 +583,11 @@ Err(e) => {
 3. **Stale un-ACKed messages**: Service crashes before ACKing messages
    - Symptom: Same messages redelivered repeatedly
    - Check: `nats consumer info` shows high `Outstanding Acks` and `Redelivered Messages`
+
+4. **Library side effects during initialization**: Libraries (e.g., LDK) can produce callbacks/logs/messages during `build()` or `start()`, before they report "ready". If downstream consumers of those messages depend on state that's initialized *after* the library starts, you get a race condition (e.g., `OnceLock::get().unwrap()` panics because the value isn't set yet).
+   - Symptom: Boot loop with tasks shutting down within milliseconds of startup; no explicit error logged (panics in spawned tasks are swallowed by tokio)
+   - Solution: Use a Barrier to block consumer tasks until initialization is complete, or set initialization data before calling `start()`
+   - Debug tip: If a task exits immediately but only logs "shutting down" (the cancellation branch), check whether the cancellation token was already cancelled by a *prior* task's `drop_guard`
 
 **Diagnostic logging checklist:**
 
