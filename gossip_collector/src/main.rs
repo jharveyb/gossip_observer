@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::str::FromStr;
@@ -26,7 +27,6 @@ mod logger;
 mod node_manager;
 mod peer_conn_manager;
 use crate::config::CollectorConfig;
-use crate::exporter::Exporter;
 use crate::exporter::NATSExporter;
 use crate::node_manager::{balances, connected_peer_count, next_address};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
@@ -94,7 +94,7 @@ async fn async_main(
             bail!("Exactly one chain source must be specified")
         }
         (None, Some(server_url)) => {
-            let cfg = ElectrumSyncConfig {
+            let _cfg = ElectrumSyncConfig {
                 background_sync_config: Some(sync_cfg),
             };
             // builder.set_chain_source_electrum(server_url, Some(cfg));
@@ -154,7 +154,17 @@ async fn async_main(
         "gossip" => LogLevel::Gossip,
         _ => LogLevel::Error,
     };
-    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level)
+    let mut log_filters = HashSet::new();
+    // A warning from a new P2P connection peer that there is no UTXO matching a channel.
+    let rust_lightning_chan_announcement_warning = "lightning::ln::peer_handler:2434";
+    // A non-fatal error that a received node_announcement has no matching channels that we know of.
+    let rust_lightning_node_announcement_no_channels = "lightning::ln::peer_handler:2015";
+    // Logging that we're replying to a peer's query_channel_range request.
+    let rust_lightning_query_channel_range = "lightning::routing::gossip:635";
+    log_filters.insert(rust_lightning_chan_announcement_warning.to_owned());
+    log_filters.insert(rust_lightning_node_announcement_no_channels.to_owned());
+    log_filters.insert(rust_lightning_query_channel_range.to_owned());
+    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level, log_filters)
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
     // Create our peer connection manager. This tracks which peers we've connected

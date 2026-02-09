@@ -4,6 +4,7 @@ use chrono::Utc;
 use log::Level as LogFacadeLevel;
 use log::Record as LogFacadeRecord;
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::Path;
@@ -17,6 +18,7 @@ pub(crate) enum Writer {
     FileWriter {
         file: Arc<Mutex<File>>,
         max_log_level: LogLevel,
+        log_source_filter: HashSet<String>,
     },
     /// Forwards logs to the `log` facade.
     LogFacadeWriter,
@@ -30,8 +32,15 @@ impl LogWriter for Writer {
             Writer::FileWriter {
                 file,
                 max_log_level,
+                log_source_filter,
             } => {
                 if record.level < *max_log_level {
+                    return;
+                }
+
+                // Filter by module_path + line level, so we can omit frequent
+                // but uninteresting logs without changing the overall log level.
+                if log_source_filter.contains(&format!("{}:{}", record.module_path, record.line)) {
                     return;
                 }
 
@@ -77,7 +86,11 @@ impl LogWriter for Writer {
 impl Writer {
     /// Creates a new logger with a filesystem writer. The parameters to this function
     /// are the path to the log file, and the log level.
-    pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Writer, ()> {
+    pub fn new_fs_writer(
+        file_path: String,
+        max_log_level: LogLevel,
+        log_source_filter: HashSet<String>,
+    ) -> Result<Writer, ()> {
         if let Some(parent_dir) = Path::new(&file_path).parent() {
             create_dir_all(parent_dir).map_err(|e| {
                 // Use eprintln! here since tracing may not be initialized yet
@@ -97,6 +110,7 @@ impl Writer {
         Ok(Writer::FileWriter {
             file: Arc::new(Mutex::new(file)),
             max_log_level,
+            log_source_filter,
         })
     }
 }
