@@ -108,8 +108,8 @@ pub async fn nats_reader(
             }
             _ = stats_waiter.tick() => {
                 info!(
-                    msg_per_min = msg_count,
-                    "NATS reader stats"
+                    msgs_per_interval = msg_count,
+                    "NATS reader stats per {:?}", STATS_INTERVAL
                 );
                 msg_count = 0;
             }

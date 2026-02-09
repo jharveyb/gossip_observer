@@ -17,7 +17,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::{self};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 static STATS_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -254,6 +254,7 @@ pub async fn db_write_ticker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn db_write_handler(
     pool: PgPool,
     mut buf_raw_rx: UnboundedReceiver<RawMessage>,
