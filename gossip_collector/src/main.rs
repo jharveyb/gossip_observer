@@ -192,15 +192,29 @@ async fn async_main(
     builder.set_custom_logger(Arc::new(writer_exporter));
 
     let node = Arc::new(builder.build()?);
-    node.start()?;
 
-    // TODO: replace with loop over node.status().is_running
-    info!("Waiting for node startup");
-    sleep(Duration::from_secs(5)).await;
-
+    // Set export metadata before starting the node. Both exporter tasks
+    // wait on synchronization barrier until this is called, so any gossip messages
+    // emitted by LDK during startup queue safely in the unbounded channel.
+    // We can read the node pubkey once the constructor is called, before the
+    // node actually starts.
     nats_exporter
         .set_export_metadata(node.node_id().to_string())
-        .map_err(anyhow::Error::msg)?;
+        .await?;
+    node.start()?;
+
+    // A node with channels will start slower than a node without. Having a slow
+    // chain source will also slow down startup. If we pass a node handle along
+    // to one of our tasks, and they try to call a function before the node is
+    // started, that will err, causing the task to shut down the whole collector.
+    info!("Waiting for node startup");
+    let mut ldk_started = false;
+    while !ldk_started {
+        sleep(Duration::from_secs(2)).await;
+        info!("Checking on LDK node");
+        ldk_started = node.status().is_running;
+    }
+    info!("LDK node started");
 
     // The peer connection monitor will use the eligible peer list to maintain
     // our connection count above a target value.

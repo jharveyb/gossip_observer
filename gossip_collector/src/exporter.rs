@@ -2,16 +2,13 @@ use crate::config::Nats;
 use crate::logger::Writer;
 use crate::peer_conn_manager::PeerConnManagerHandle;
 use anyhow::bail;
-use async_nats::ConnectOptions;
 use async_nats::jetstream;
-use async_nats::jetstream::ContextBuilder;
 use ldk_node::logger::{LogRecord, LogWriter};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinHandle;
+use tokio::sync::{Barrier, watch};
 use tokio::task::JoinSet;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -22,9 +19,6 @@ use tracing::info;
 static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
 pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(600);
-static NATS_SUBJECT: OnceLock<String> = OnceLock::new();
-static NODEKEY: OnceLock<String> = OnceLock::new();
-static MSG_SUFFIX: OnceLock<String> = OnceLock::new();
 
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
@@ -34,9 +28,6 @@ pub trait Exporter: Send + Sync {
     // TODO: this should probably return a Result, though we should handle
     // errors here not in ldk-node
     fn export(&self, msg: String);
-
-    // Provide extra data to be included alongside each exported message.
-    fn set_export_metadata(&self, meta: String) -> Result<(), String>;
 }
 
 pub struct StdoutExporter {}
@@ -46,38 +37,33 @@ impl Exporter for StdoutExporter {
         let now = chrono::Utc::now().timestamp_micros();
         debug!(timestamp = now, "Exported message");
     }
+}
 
-    fn set_export_metadata(&self, _meta: String) -> Result<(), String> {
-        Ok(())
-    }
+#[derive(Clone)]
+struct ExportMetadata {
+    // The collector pubkey we add to our message.
+    msg_suffix: String,
+    // Needed to start our NATS exporter.
+    nats_subject: String,
 }
 
 pub struct NATSExporter {
     cfg: Nats,
-    // TODO: How do we join on this later?
     conn_manager: PeerConnManagerHandle,
     export_tx: UnboundedSender<String>,
     export_rx: Option<UnboundedReceiver<String>>,
     stop_signal: CancellationToken,
+    metadata_tx: watch::Sender<Option<ExportMetadata>>,
+    startup_barrier: Arc<Barrier>,
 }
 
 impl Exporter for NATSExporter {
     fn export(&self, msg: String) {
         // Non-blocking send, so we don't hang the node.
-        // TODO: handle a closed channel (who would close it?)
         if let Err(e) = self.export_tx.send(msg) {
-            // TODO: crash?
             error!(error = %e, "Internal exporter error in export()");
             self.stop_signal.cancel();
         }
-    }
-
-    fn set_export_metadata(&self, meta: String) -> Result<(), String> {
-        let stream_name = format!("{}.{}", self.cfg.stream, meta);
-        NATS_SUBJECT.get_or_init(|| stream_name);
-        NODEKEY.get_or_init(|| meta.clone());
-        MSG_SUFFIX.get_or_init(|| format!("{}{}", INTRA_MSG_DELIM, meta));
-        Ok(())
     }
 }
 
@@ -89,6 +75,10 @@ impl NATSExporter {
     ) -> Self {
         // Bridge sync -> async, since a sync send won't block for an unbounded channel.
         let (export_tx, export_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (metadata_tx, _) = watch::channel(None);
+        // 3 tasks: main thread that calls set_export_metadata(),
+        // queue_exported_msg, and publish_msgs
+        let startup_barrier = Arc::new(Barrier::new(3));
 
         Self {
             cfg,
@@ -96,7 +86,26 @@ impl NATSExporter {
             export_tx,
             export_rx: Some(export_rx),
             stop_signal,
+            metadata_tx,
+            startup_barrier,
         }
+    }
+
+    /// Set the NATS subject and message suffix derived from our node ID,
+    /// then wait for both exporter tasks to acknowledge via the barrier.
+    pub async fn set_export_metadata(&self, node_id: String) -> anyhow::Result<()> {
+        let metadata = ExportMetadata {
+            nats_subject: format!("{}.{}", self.cfg.stream, node_id),
+            msg_suffix: format!("{}{}", INTRA_MSG_DELIM, node_id),
+        };
+        self.metadata_tx.send_replace(Some(metadata));
+        tokio::select! {
+            _ = self.startup_barrier.wait() => {}
+            _ = self.stop_signal.cancelled() => {
+                bail!("Exporter task failed during startup");
+            }
+        }
+        Ok(())
     }
 
     // Build connections + spawn any long-running tasks we need for export.
@@ -129,21 +138,29 @@ impl NATSExporter {
         {
             let conn_manager = self.conn_manager.clone();
             let queue_stop_signal = self.stop_signal.clone();
+            let barrier = self.startup_barrier.clone();
+            let metadata_rx = self.metadata_tx.subscribe();
             task_pool.spawn(Self::queue_exported_msg(
                 export_rx,
                 nats_tx,
                 conn_manager,
                 queue_stop_signal,
+                barrier,
+                metadata_rx,
             ));
         }
         {
             let export_stop_signal = self.stop_signal.clone();
             let batch_size = self.cfg.batch_size as usize;
+            let barrier = self.startup_barrier.clone();
+            let metadata_rx = self.metadata_tx.subscribe();
             task_pool.spawn(Self::publish_msgs(
                 stream_ctx,
                 batch_size,
                 nats_rx,
                 export_stop_signal,
+                barrier,
+                metadata_rx,
             ));
         }
 
@@ -158,12 +175,31 @@ impl NATSExporter {
         tx: Sender<String>,
         mut conn_manager: PeerConnManagerHandle,
         stop_signal: CancellationToken,
+        barrier: Arc<Barrier>,
+        metadata_rx: watch::Receiver<Option<ExportMetadata>>,
     ) -> anyhow::Result<()> {
+        // Wait for export metadata to be set before processing messages.
+        // Any gossip messages emitted by LDK during startup will queue in the
+        // unbounded channel and be processed after the barrier releases.
+        tokio::select! {
+            _ = barrier.wait() => {}
+            _ = stop_signal.cancelled() => {
+                return Ok(());
+            }
+        }
+
+        let _drop_guard = stop_signal.drop_guard_ref();
+        let msg_suffix = metadata_rx
+            .borrow()
+            .as_ref()
+            .expect("metadata must be set before barrier releases")
+            .msg_suffix
+            .clone();
+
         // Local version of the peer filter set; mark the initial value as
         // changed before we start.
         let mut msg_filter_rules = HashSet::new();
         msg_filter_rules.clone_from(&conn_manager.pending_notifier.borrow_and_update());
-        let _drop_guard = stop_signal.drop_guard_ref();
         loop {
             let msg = match tokio::select! {
                 // Prioritize receiving config updates over other events.
@@ -193,7 +229,7 @@ impl NATSExporter {
             } {
                 Some(mut rx_msg) => {
                     // Add our node ID to the message.
-                    rx_msg.push_str(MSG_SUFFIX.get().unwrap());
+                    rx_msg.push_str(&msg_suffix);
                     rx_msg
                 }
                 None => {
@@ -244,14 +280,31 @@ impl NATSExporter {
         batch_size: usize,
         mut rx: Receiver<String>,
         stop_signal: CancellationToken,
+        barrier: Arc<Barrier>,
+        metadata_rx: watch::Receiver<Option<ExportMetadata>>,
     ) -> anyhow::Result<()> {
+        // Wait for export metadata to be set before processing messages.
+        tokio::select! {
+            _ = barrier.wait() => {}
+            _ = stop_signal.cancelled() => {
+                return Ok(());
+            }
+        }
+
+        let _drop_guard = stop_signal.drop_guard_ref();
+        let nats_subject = metadata_rx
+            .borrow()
+            .as_ref()
+            .expect("metadata must be set before barrier releases")
+            .nats_subject
+            .clone();
+
         let mut total_upload_time = 0;
         let mut msg_send_time;
         let mut msg_submit_interval;
         let mut upload_count = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
         let mut msg_batch = Vec::with_capacity(batch_size);
-        let _drop_guard = stop_signal.drop_guard_ref();
 
         loop {
             tokio::select! {
@@ -287,7 +340,7 @@ impl NATSExporter {
                     itertools::Itertools::join(&mut msg_batch.drain(..), INTER_MSG_DELIM);
                 msg_send_time = std::time::Instant::now();
                 let ack = ctx
-                    .publish(NATS_SUBJECT.get().unwrap().as_str(), batch_output.into())
+                    .publish(nats_subject.clone(), batch_output.into())
                     .await
                     .unwrap();
                 // Wait for explicit ACK from collector.
@@ -295,6 +348,7 @@ impl NATSExporter {
                     // TODO: propagate errors here, add timeout, etc.
                     // The timeout (or something else) is important to be able
                     // to handle a collector restart.
+                    // Update: maybe not
                     ack_res = ack => {
                         ack_res.unwrap()
                     }
