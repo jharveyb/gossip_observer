@@ -7,6 +7,9 @@ gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector
 # Each collector instance has a unique UUID and specifies which host to deploy to
 # For multiple collectors per machine, use unique gRPC port and LDK P2P port
 
+# Add this to your Ansible vault
+# electrum_url: $YOUR_PRIVATE_ENDPOINT
+
 # TODO: autogenerate this from our collector mapping somehow
 gossip_collectors:
   # Solo collector for the largest community

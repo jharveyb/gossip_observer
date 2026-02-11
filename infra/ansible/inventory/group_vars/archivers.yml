@@ -18,8 +18,8 @@ gossip_archivers:
 
 # Database configuration (shared by all archivers)
 # Lower than we used in dev due to high traffic and slow inserts into timings
-archiver_db_batch_size: 2500
-archiver_db_flush_interval: 2
+archiver_db_batch_size: 1500
+archiver_db_flush_interval: 1
 
 # Deployment configuration
 health_check_enabled: true
