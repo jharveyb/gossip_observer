@@ -1,0 +1,9 @@
+# Ensure PostgreSQL starts after Tailscale is ready
+# This prevents bind failures when PostgreSQL tries to listen on the Tailscale IP
+
+[Unit]
+After=tailscaled.service
+
+[Service]
+# Wait 10 seconds after Tailscale starts to ensure interface is fully initialized
+ExecStartPre=/bin/sleep 10
