@@ -1,0 +1,84 @@
+# Deploy collector dependencies: configs, binary, systemd template
+# Registers results for change detection - does NOT restart services
+#
+# Requires: host_collectors, tailscale_ip (set_fact)
+#
+# Sets fact: collectors_needing_restart (list of collector dicts that changed)
+
+- name: Deploy collector config files
+  ansible.builtin.template:
+    src: collector_config.toml.j2
+    dest: "/etc/gossip_collector/{{ item.uuid }}/config.toml"
+    owner: goss
+    group: goss
+    mode: '0644'
+  loop: "{{ host_collectors }}"
+  register: config_deploy_results
+  loop_control:
+    label: "{{ item.uuid }}"
+
+- name: Deploy gossip collector binary
+  ansible.builtin.copy:
+    src: "{{ gossip_collector_binary_path }}"
+    dest: /usr/local/bin/gossip_collector
+    owner: root
+    group: root
+    mode: '0755'
+  register: binary_deploy_result
+
+- name: Install gossip collector systemd template
+  ansible.builtin.template:
+    src: gossip-collector@.service.j2
+    dest: /etc/systemd/system/gossip-collector@.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: systemd_template_result
+
+- name: Reload systemd if template changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: systemd_template_result is changed
+
+# --- Report what changed ---
+
+- name: Report binary status
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'CHANGED: Binary was updated (checksum differs from server)'
+         if binary_deploy_result is changed
+         else 'OK: Binary unchanged' }}
+
+- name: Report systemd template status
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'CHANGED: Systemd template was updated'
+         if systemd_template_result is changed
+         else 'OK: Systemd template unchanged' }}
+
+- name: Report config changes per collector
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.uuid }}: {{ 'CHANGED' if item is changed else 'unchanged' }}
+  loop: "{{ config_deploy_results.results }}"
+  loop_control:
+    label: "{{ item.item.uuid }}"
+
+# --- Build list of collectors that need a restart ---
+
+# If binary or systemd template changed, ALL collectors need restart.
+# Otherwise, only collectors whose config changed need restart.
+- name: Identify collectors needing restart
+  ansible.builtin.set_fact:
+    collectors_needing_restart: >-
+      {{ host_collectors
+         if (binary_deploy_result is changed or systemd_template_result is changed)
+         else (config_deploy_results.results | selectattr('changed') | map(attribute='item') | list) }}
+
+- name: Report restart summary
+  ansible.builtin.debug:
+    msg: >-
+      {{ collectors_needing_restart | length }} collector(s) need restart
+      {{ '(reason: binary/systemd changed - all collectors affected)'
+         if (binary_deploy_result is changed or systemd_template_result is changed)
+         else ('(reason: config changed)' if collectors_needing_restart | length > 0 else '(no changes detected)') }}

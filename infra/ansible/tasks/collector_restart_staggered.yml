@@ -1,0 +1,12 @@
+# Staggered restart of collectors with health checks
+# Pauses 150 seconds (2.5 minutes) between each restart
+#
+# Requires: collectors_to_restart (list of collector dicts)
+
+- name: Restart collectors with staggered timing
+  ansible.builtin.include_tasks: collector_restart_single.yml
+  loop: "{{ collectors_to_restart }}"
+  loop_control:
+    loop_var: collector
+    label: "{{ collector.uuid }}"
+    pause: 60

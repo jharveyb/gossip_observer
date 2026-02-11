@@ -1,0 +1,88 @@
+# Collector initial setup: directories and mnemonics
+# Uses stat checks to skip already-provisioned instances
+#
+# Requires: host_collectors (set_fact), vault loaded (for mnemonics)
+
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+# Check deepest path - if it exists, all parent dirs exist too
+- name: Check existing LDK storage directories
+  ansible.builtin.stat:
+    path: "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
+  loop: "{{ host_collectors }}"
+  register: ldk_dir_stat
+  loop_control:
+    label: "{{ item.uuid }}"
+
+- name: Identify collectors needing directory setup
+  ansible.builtin.set_fact:
+    collectors_needing_setup: >-
+      {{ ldk_dir_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+
+- name: Report setup status
+  ansible.builtin.debug:
+    msg: "{{ collectors_needing_setup | length }} of {{ host_collectors | length }} collectors need directory setup"
+
+- name: Create base gossip collector directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop:
+    - /var/lib/gossip_collector
+    - /etc/gossip_collector
+  when: collectors_needing_setup | length > 0
+
+- name: Create instance-specific directories
+  ansible.builtin.file:
+    path: "{{ item[0] }}/{{ item[1].uuid }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop: "{{ ['/var/lib/gossip_collector', '/etc/gossip_collector'] | product(collectors_needing_setup) }}"
+  loop_control:
+    label: "{{ item[1].uuid }} -> {{ item[0] }}"
+  when: collectors_needing_setup | length > 0
+
+- name: Create LDK storage directories
+  ansible.builtin.file:
+    path: "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
+    state: directory
+    owner: goss
+    group: goss
+    mode: '0755'
+  loop: "{{ collectors_needing_setup }}"
+  loop_control:
+    label: "{{ item.uuid }}"
+
+# Mnemonic files never change once deployed - skip if already present
+- name: Check existing mnemonic files
+  ansible.builtin.stat:
+    path: "/var/lib/gossip_collector/{{ item.uuid }}/ldk/mnemonic.txt"
+  loop: "{{ host_collectors }}"
+  register: mnemonic_stat
+  loop_control:
+    label: "{{ item.uuid }}"
+
+- name: Deploy mnemonic files (new collectors only)
+  ansible.builtin.copy:
+    content: "{{ gossip_collector_mnemonics[item.item.uuid] }}\n"
+    dest: "/var/lib/gossip_collector/{{ item.item.uuid }}/ldk/mnemonic.txt"
+    owner: goss
+    group: goss
+    mode: '0600'
+  loop: "{{ mnemonic_stat.results }}"
+  when: not item.stat.exists
+  no_log: true
+  loop_control:
+    label: "{{ item.item.uuid }}"

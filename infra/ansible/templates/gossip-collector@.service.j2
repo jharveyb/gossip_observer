@@ -10,7 +10,7 @@ Group=goss
 WorkingDirectory=/var/lib/gossip_collector/%i
 Environment="COLLECTOR_UUID=%i"
 Environment="COLLECTOR_MODE=production"
-ExecStartPre=/bin/sh -c 'sleep $((RANDOM % 180 + 1))'
+ExecStartPre=/bin/sh -c 'sleep $((RANDOM % 30 + 1))'
 ExecStart=/usr/local/bin/gossip_collector
 Restart=on-failure
 RestartSec=60

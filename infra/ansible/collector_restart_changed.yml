@@ -1,0 +1,53 @@
+- name: Restart changed collectors (staggered with health checks)
+  hosts: collectors
+  become: true
+  serial: 1
+
+  pre_tasks:
+    - name: Load vault variables
+      ansible.builtin.include_vars: vault.yml
+
+  tasks:
+    - name: Filter collectors for this host
+      ansible.builtin.set_fact:
+        host_collectors: "{{ gossip_collectors | selectattr('host', 'equalto', inventory_hostname) | list }}"
+
+    - name: Skip host if no collectors assigned
+      ansible.builtin.meta: end_host
+      when: host_collectors | length == 0
+
+    - name: Check Tailscale is available
+      ansible.builtin.fail:
+        msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+      when: ansible_facts['tailscale0'] is not defined
+
+    - name: Get Tailscale IP address
+      ansible.builtin.set_fact:
+        tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+    # Deploy to detect what changed
+    - name: Deploy dependencies and detect changes
+      ansible.builtin.import_tasks: tasks/collector_deploy_deps.yml
+
+    - name: Set collectors to restart (changed only)
+      ansible.builtin.set_fact:
+        collectors_to_restart: "{{ collectors_needing_restart | default([]) }}"
+
+    - name: Report no changes
+      ansible.builtin.debug:
+        msg: "No collectors have changed dependencies on {{ inventory_hostname }} - nothing to restart"
+      when: collectors_to_restart | length == 0
+
+    - name: Skip host if nothing to restart
+      ansible.builtin.meta: end_host
+      when: collectors_to_restart | length == 0
+
+    - name: Display restart plan
+      ansible.builtin.debug:
+        msg: >-
+          Will restart {{ collectors_to_restart | length }} collector(s) with changed dependencies on {{ inventory_hostname }}:
+          {{ collectors_to_restart | map(attribute='uuid') | list | join(', ') }}.
+          Interval: 2.5 minutes between restarts.
+
+    - name: Perform staggered restarts
+      ansible.builtin.include_tasks: tasks/collector_restart_staggered.yml

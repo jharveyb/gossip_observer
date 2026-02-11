@@ -1,0 +1,28 @@
+# Restart a single collector instance and verify it started successfully
+#
+# Requires: collector (loop_var from caller - a single collector dict)
+#           service_startup_wait (from group_vars, default 10s)
+
+- name: "Restart gossip-collector@{{ collector.uuid }}"
+  ansible.builtin.systemd:
+    name: "gossip-collector@{{ collector.uuid }}"
+    state: restarted
+
+- name: "Wait for gossip-collector@{{ collector.uuid }}"
+  ansible.builtin.pause:
+    seconds: "{{ service_startup_wait | default(90) }}"
+
+- name: "Check gossip-collector@{{ collector.uuid }}"
+  ansible.builtin.systemd:
+    name: "gossip-collector@{{ collector.uuid }}"
+  register: service_status
+
+- name: "Verify running: gossip-collector@{{ collector.uuid }}"
+  ansible.builtin.assert:
+    that:
+      - service_status.status.ActiveState == "active"
+      - service_status.status.SubState == "running"
+    fail_msg: >-
+      gossip-collector@{{ collector.uuid }} failed to start:
+      {{ service_status.status.ActiveState }}/{{ service_status.status.SubState }}
+    success_msg: "gossip-collector@{{ collector.uuid }} is running"

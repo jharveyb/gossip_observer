@@ -20,8 +20,3 @@ gossip_archivers:
 # Lower than we used in dev due to high traffic and slow inserts into timings
 archiver_db_batch_size: 1500
 archiver_db_flush_interval: 1
-
-# Deployment configuration
-health_check_enabled: true
-health_check_timeout: 30  # seconds
-service_startup_wait: 10  # seconds to wait after restart

@@ -1,0 +1,27 @@
+- name: Restart all collectors (staggered with health checks)
+  hosts: collectors
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Filter collectors for this host
+      ansible.builtin.set_fact:
+        host_collectors: "{{ gossip_collectors | selectattr('host', 'equalto', inventory_hostname) | list }}"
+
+    - name: Skip host if no collectors assigned
+      ansible.builtin.meta: end_host
+      when: host_collectors | length == 0
+
+    - name: Set collectors to restart (all)
+      ansible.builtin.set_fact:
+        collectors_to_restart: "{{ host_collectors }}"
+
+    - name: Display restart plan
+      ansible.builtin.debug:
+        msg: >-
+          Will restart {{ collectors_to_restart | length }} collector(s) on {{ inventory_hostname }}:
+          {{ collectors_to_restart | map(attribute='uuid') | list | join(', ') }}.
+          Interval: 2.5 minutes between restarts.
+
+    - name: Perform staggered restarts
+      ansible.builtin.include_tasks: tasks/collector_restart_staggered.yml

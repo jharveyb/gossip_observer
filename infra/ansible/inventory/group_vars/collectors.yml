@@ -180,8 +180,3 @@ gossip_collectors:
     console_port: 6680
     nats_server: "{{ nats_server_addr_prod }}"
     controller_addr: "{{ controller_prod }}"
-
-# Deployment configuration
-health_check_enabled: true
-health_check_timeout: 30  # seconds
-service_startup_wait: 10  # seconds to wait after restart

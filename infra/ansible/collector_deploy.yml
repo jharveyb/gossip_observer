@@ -1,4 +1,4 @@
-- name: Initialize Gossip Collector servers
+- name: Deploy collector dependencies (no restart)
   hosts: collectors
   become: true
 
@@ -18,17 +18,14 @@
       ansible.builtin.meta: end_host
       when: host_collectors | length == 0
 
-    - name: Setup collector directories and secrets
-      ansible.builtin.import_tasks: tasks/collector_setup.yml
+    - name: Check Tailscale is available
+      ansible.builtin.fail:
+        msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+      when: ansible_facts['tailscale0'] is not defined
+
+    - name: Get Tailscale IP address
+      ansible.builtin.set_fact:
+        tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
     - name: Deploy collector dependencies
       ansible.builtin.import_tasks: tasks/collector_deploy_deps.yml
-
-    - name: Enable and start gossip collector instances
-      ansible.builtin.systemd:
-        name: "gossip-collector@{{ item.uuid }}"
-        enabled: true
-        state: started
-      loop: "{{ host_collectors }}"
-      loop_control:
-        label: "{{ item.uuid }}"
