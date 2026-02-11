@@ -95,4 +95,10 @@ impl CollectorClient {
         let resp = self.client.open_channel(req).await?;
         Ok(resp.into_inner().local_channel_id)
     }
+
+    pub async fn update_channel_cfgs(&mut self) -> anyhow::Result<Vec<u64>> {
+        let req = Request::new(common::UpdateChannelConfigRequest {});
+        let resp = self.client.update_channel_config(req).await?;
+        Ok(resp.into_inner().scids)
+    }
 }

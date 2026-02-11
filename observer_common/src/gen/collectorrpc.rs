@@ -53,7 +53,6 @@ pub mod collector_service_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// TODO: make some of these streaming?
     #[derive(Debug, Clone)]
     pub struct CollectorServiceClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -289,6 +288,37 @@ pub mod collector_service_client {
                 .insert(GrpcMethod::new("collectorrpc.CollectorService", "OpenChannel"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn update_channel_config(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::super::common::UpdateChannelConfigRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::UpdateChannelConfigResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/collectorrpc.CollectorService/UpdateChannelConfig",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "collectorrpc.CollectorService",
+                        "UpdateChannelConfig",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn shutdown(
             &mut self,
             request: impl tonic::IntoRequest<super::super::common::ShutdownRequest>,
@@ -370,6 +400,13 @@ pub mod collector_service_server {
             tonic::Response<super::super::common::OpenChannelResponse>,
             tonic::Status,
         >;
+        async fn update_channel_config(
+            &self,
+            request: tonic::Request<super::super::common::UpdateChannelConfigRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::super::common::UpdateChannelConfigResponse>,
+            tonic::Status,
+        >;
         async fn shutdown(
             &self,
             request: tonic::Request<super::super::common::ShutdownRequest>,
@@ -378,7 +415,6 @@ pub mod collector_service_server {
             tonic::Status,
         >;
     }
-    /// TODO: make some of these streaming?
     #[derive(Debug)]
     pub struct CollectorServiceServer<T> {
         inner: Arc<T>,
@@ -725,6 +761,58 @@ pub mod collector_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = OpenChannelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/collectorrpc.CollectorService/UpdateChannelConfig" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateChannelConfigSvc<T: CollectorService>(pub Arc<T>);
+                    impl<
+                        T: CollectorService,
+                    > tonic::server::UnaryService<
+                        super::super::common::UpdateChannelConfigRequest,
+                    > for UpdateChannelConfigSvc<T> {
+                        type Response = super::super::common::UpdateChannelConfigResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::super::common::UpdateChannelConfigRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as CollectorService>::update_channel_config(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateChannelConfigSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

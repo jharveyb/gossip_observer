@@ -9,6 +9,7 @@ service ControllerService {
         rpc RegisterCollector(common.CollectorInfo) returns (RegisterCollectorResponse);
         rpc CollectorStatus(common.CollectorInfo) returns (CollectorStatusResponse);
         rpc OpenChannel(OpenCollectorChannelRequest) returns (OpenCollectorChannelResponse);
+        rpc UpdateChannels(UpdateChannelsRequest) returns (UpdateChannelsResponse);
         // Endpoints for the operator to use.
         rpc Status(StatusRequest) returns (StatusResponse);
         rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);
@@ -44,4 +45,13 @@ message OpenCollectorChannelRequest {
 message OpenCollectorChannelResponse {
         string uuid = 1;
         common.OpenChannelResponse response = 2;
+}
+
+message UpdateChannelsRequest {
+        string uuid = 1;
+}
+
+message UpdateChannelsResponse {
+        string uuid = 1;
+        common.UpdateChannelConfigResponse response = 2;
 }

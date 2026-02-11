@@ -78,3 +78,10 @@ pub struct OpenChannelResponse {
 pub struct ShutdownRequest {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ShutdownResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateChannelConfigRequest {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateChannelConfigResponse {
+    #[prost(uint64, repeated, tag = "1")]
+    pub scids: ::prost::alloc::vec::Vec<u64>,
+}

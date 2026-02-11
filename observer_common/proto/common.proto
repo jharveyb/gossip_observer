@@ -58,3 +58,9 @@ message OpenChannelResponse {
 message ShutdownRequest {}
 
 message ShutdownResponse {}
+
+message UpdateChannelConfigRequest {}
+
+message UpdateChannelConfigResponse {
+  repeated uint64 scids = 1;
+}
