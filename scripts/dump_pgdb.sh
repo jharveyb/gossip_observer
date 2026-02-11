@@ -1,7 +1,16 @@
 #!/bin/bash
 
-pg_dump -h localhost -p 5432 -U postgres -F c -d gossip_observer -W --verbose --file db_dumps/initial_$(date +%Y%m%d).dump
+set -euo pipefail
 
-# Example restore cmd:
+HOST="$1"
+DB="$2"
+OUTFILE="$3"
 
-# pg_restore -d gossip_observer --verbose db_dumps/$FILENAME
+if [ -z "$HOST" ] || [ -z "$DB" ] || [ -z "$OUTFILE" ]; then
+        echo "Usage: $0 <host> <db> <outfile>"
+        exit 1
+fi
+
+DATESUF=$(date +%Y%m%d)
+
+pg_dump -h "$HOST" -p 5432 -U postgres -F c -d "$DB" -W --verbose --file db_dumps/"$OUTFILE""$DATESUF".dump
