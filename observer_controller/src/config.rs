@@ -26,6 +26,7 @@ pub struct Controller {
     pub total_connections: u32,
     // In seconds
     pub heartbeat_expiry: u32,
+    pub chan_update_interval: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +72,7 @@ impl ControllerConfig {
             // Works out to about ~6% of the total node count.
             .set_default("controller.total_connections", 700)?
             .set_default("controller.heartbeat_expiry", 600)?
+            .set_default("controller.chan_update_interval", 1200)?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("CONTROLLER"))
             .build()?;

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 use std::{cmp, fs};
 
+use observer_common::collector_client::CollectorClient;
 use observer_controller::collector_manager::{
     CollectionConfig, CollectorManagerHandle, heartbeat_sweeper,
 };
@@ -12,11 +13,12 @@ use observer_controller::csv_reader::{
 };
 use observer_controller::grpc_server;
 use observer_controller::{CommunityStats, ControllerConfig};
-use tokio::time::interval;
+use rand::prelude::*;
+use tokio::time::{Interval, interval, sleep};
 use tokio_util::sync::CancellationToken;
 use toml::Table;
 use tonic::transport::Server as TonicServer;
-use tracing::info;
+use tracing::{info, warn};
 
 fn main() -> anyhow::Result<()> {
     // Load .env file if present (optional for production with systemd)
@@ -140,6 +142,13 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
         chrono::TimeDelta::seconds(cfg.controller.heartbeat_expiry.into()),
     ));
 
+    let chan_update_interval = Duration::from_secs(cfg.controller.chan_update_interval.into());
+    let _chan_updater = tokio::spawn(chan_update_timer(
+        collector_manager.clone(),
+        interval(chan_update_interval),
+        stop_signal.child_token(),
+    ));
+
     info!(start_time = %chrono::Utc::now().to_rfc3339(), "Controller start time");
 
     // Start gRPC server
@@ -187,4 +196,63 @@ pub fn load_collector_assignments(mapping: &str) -> anyhow::Result<HashMap<Strin
         mappings.insert(uuid, community_id.try_into()?);
     }
     Ok(mappings)
+}
+
+// For all collectors with confirmed channels, ask them to send a channel_update
+// message.
+pub async fn chan_update_timer(
+    handle: CollectorManagerHandle,
+    mut waiter: Interval,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    // Wait until we collect heartbeats from any running collectors.
+    sleep(Duration::from_secs(600)).await;
+    loop {
+        tokio::select! {
+                _ = waiter.tick() => {
+                    info!("Channel update timer: ticker: sending channel updates");
+                }
+                _ = cancel.cancelled() => {
+                    info!("Channel update timer: shutting down");
+                    break;
+                }
+        }
+
+        let collectors = handle.get_registered_collectors().await?;
+        let collectors_with_chans = collectors
+            .into_iter()
+            .filter(|hb| hb.info.balances.total_lightning_balance != 0)
+            .collect::<Vec<_>>();
+        info!(
+            "Channel update timer: {} collectors with channels",
+            collectors_with_chans.len()
+        );
+        let mut rng = StdRng::from_os_rng();
+        for collector in collectors_with_chans {
+            let delay = rng.random_range(1..60);
+            sleep(Duration::from_secs(delay)).await;
+            match CollectorClient::connect(&collector.info.grpc_socket).await {
+                Ok(mut client) => match client.update_channel_cfgs().await {
+                    Ok(scids) => info!(
+                        uuid = %collector.info.uuid,
+                        scids = ?scids,
+                        "Channel update timer: sent channel updates"
+                    ),
+                    Err(e) => warn!(
+                        uuid = %collector.info.uuid,
+                        "Channel update timer: failed to send update_channel_cfgs {}",e
+                    ),
+                },
+                Err(e) => {
+                    warn!(
+                        uuid = %collector.info.uuid,
+                        "Channel update timer: Failed to connect to collector: {}",
+                        e
+                    )
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

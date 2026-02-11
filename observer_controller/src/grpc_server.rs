@@ -8,7 +8,8 @@ use tonic::{Request, Response, Status};
 use observer_common::common::{CollectorInfo, ShutdownRequest, ShutdownResponse};
 use observer_common::controllerrpc::{
     CollectorStatusResponse, OpenCollectorChannelRequest, OpenCollectorChannelResponse,
-    RegisterCollectorResponse, StatusRequest, StatusResponse,
+    RegisterCollectorResponse, StatusRequest, StatusResponse, UpdateChannelsRequest,
+    UpdateChannelsResponse,
 };
 use observer_common::{controllerrpc, util};
 use tracing::info;
@@ -28,6 +29,33 @@ impl ControllerServiceImpl {
             collector_manager,
             stop_token,
         }
+    }
+
+    pub async fn build_collector_client(
+        &self,
+        collector_uuid: &str,
+    ) -> Result<CollectorClient, Status> {
+        // Look up collector by UUID
+        let collector = self
+            .collector_manager
+            .get_collector_by_uuid(collector_uuid)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let collector = collector.ok_or_else(|| {
+            Status::not_found(format!("Collector {} not found or offline", collector_uuid))
+        })?;
+
+        // Connect to collector's gRPC endpoint
+        let client = CollectorClient::connect(&collector.info.grpc_socket)
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!(
+                    "Failed to connect to collector {}: {}",
+                    collector_uuid, e
+                ))
+            })?;
+
+        Ok(client)
     }
 }
 
@@ -163,6 +191,30 @@ impl controllerrpc::controller_service_server::ControllerService for ControllerS
             response: Some(observer_common::common::OpenChannelResponse {
                 local_channel_id: channel_id,
             }),
+        }))
+    }
+
+    async fn update_channels(
+        &self,
+        request: Request<UpdateChannelsRequest>,
+    ) -> Result<Response<UpdateChannelsResponse>, Status> {
+        let req = request.into_inner();
+        let collector_uuid = req.uuid.clone();
+
+        let mut client = self.build_collector_client(&collector_uuid).await?;
+        let scids = client
+            .update_channel_cfgs()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to update channels: {}", e)))?;
+        info!(
+            collector_uuid = %collector_uuid,
+            scids = ?scids,
+            "Controller: updated channels for collector"
+        );
+
+        Ok(Response::new(UpdateChannelsResponse {
+            uuid: collector_uuid,
+            response: Some(observer_common::common::UpdateChannelConfigResponse { scids }),
         }))
     }
 }
