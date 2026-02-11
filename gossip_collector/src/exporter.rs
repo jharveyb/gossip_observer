@@ -30,6 +30,7 @@ pub trait Exporter: Send + Sync {
     fn export(&self, msg: String);
 }
 
+#[allow(dead_code)]
 pub struct StdoutExporter {}
 
 impl Exporter for StdoutExporter {

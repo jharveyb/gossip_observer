@@ -8,11 +8,11 @@ use tonic::{Request, Response, Status};
 use observer_common::collectorrpc;
 use observer_common::common::{
     BalancesRequest, BalancesResponse, OpenChannelRequest, OpenChannelResponse, ShutdownRequest,
-    ShutdownResponse,
+    ShutdownResponse, UpdateChannelConfigRequest, UpdateChannelConfigResponse,
 };
 use tracing::info;
 
-use crate::node_manager::{balances, current_peers, open_channel};
+use crate::node_manager::{balances, current_peers, open_channel, random_channel_cfg};
 use crate::peer_conn_manager::PeerConnManagerHandle;
 
 // Any state we need to implement our RPC server.
@@ -125,6 +125,37 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
         // UserChannelId is u128, convert to bytes
         Ok(Response::new(OpenChannelResponse {
             local_channel_id: channel_id.0.to_le_bytes().to_vec(),
+        }))
+    }
+
+    async fn update_channel_config(
+        &self,
+        _req: Request<UpdateChannelConfigRequest>,
+    ) -> Result<Response<UpdateChannelConfigResponse>, Status> {
+        let current_channels = self.node.list_channels();
+        if current_channels.is_empty() {
+            info!("No channels to update");
+        }
+        let mut updated_scids = Vec::new();
+        for chan in current_channels {
+            if let Some(scid) = chan.short_channel_id
+                && chan.is_usable
+            {
+                let new_cfg = random_channel_cfg();
+                self.node
+                    .update_channel_config(
+                        &chan.user_channel_id,
+                        chan.counterparty_node_id,
+                        new_cfg,
+                    )
+                    .map_err(|e| {
+                        Status::internal(format!("Failed to update channel config: {}", e))
+                    })?;
+                updated_scids.push(scid);
+            }
+        }
+        Ok(Response::new(UpdateChannelConfigResponse {
+            scids: updated_scids,
         }))
     }
 

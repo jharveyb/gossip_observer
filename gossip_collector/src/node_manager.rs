@@ -1,36 +1,14 @@
 use anyhow::anyhow;
 use bitcoin::Address;
-use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::ChannelConfig;
-use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{BalanceDetails, NodeError, PeerDetails, UserChannelId};
-use std::str::FromStr;
+use rand::prelude::*;
 use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
 use observer_common::types::OpenChannelCommand;
 use observer_common::types::PeerSpecifier;
-
-pub fn split_peer_info(peer_info: &str) -> Vec<String> {
-    let mut info_parts = peer_info.split(';');
-    let pubkey = info_parts.next().unwrap();
-    let mut peer_specs = Vec::new();
-    for spec in info_parts {
-        peer_specs.push(format!("{}@{}", pubkey, spec));
-    }
-    peer_specs
-}
-
-pub fn parse_peer_specifier(peer_specifier: &str) -> anyhow::Result<(PublicKey, SocketAddress)> {
-    let (pubkey_str, address) = peer_specifier
-        .split_once('@')
-        .ok_or_else(|| anyhow!("Invalid peer specifier: missing @ symbol"))?;
-    let addr =
-        SocketAddress::from_str(address).map_err(|e| anyhow!("Invalid address format: {e}"))?;
-    let pubkey = PublicKey::from_str(pubkey_str)?;
-    Ok((pubkey, addr))
-}
 
 pub async fn node_peer_connect(
     node_copy: Arc<ldk_node::Node>,
@@ -78,7 +56,6 @@ pub async fn connected_peer_count(node_copy: Arc<ldk_node::Node>) -> usize {
         .fold(0, |acc, i| if i.is_connected { acc + 1 } else { acc })
 }
 
-// TODO: cache unused addresses
 pub fn next_address(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Address> {
     let addr = node_copy.onchain_payment().next_address()?;
     Ok(addr)
@@ -116,4 +93,15 @@ pub async fn open_channel(
             Err(e.into())
         }
     }
+}
+
+pub fn random_channel_cfg() -> ChannelConfig {
+    let mut cfg = ChannelConfig::default();
+    let mut rng = StdRng::from_os_rng();
+    let max_ppm = 500;
+    let max_base_fee = 3000;
+    cfg.forwarding_fee_proportional_millionths = rng.random_range(0..max_ppm);
+    cfg.forwarding_fee_base_msat = rng.random_range(0..max_base_fee);
+    cfg.cltv_expiry_delta = rng.random_range(72..144);
+    cfg
 }

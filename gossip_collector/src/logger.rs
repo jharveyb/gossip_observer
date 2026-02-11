@@ -21,8 +21,10 @@ pub(crate) enum Writer {
         log_source_filter: HashSet<String>,
     },
     /// Forwards logs to the `log` facade.
+    #[allow(dead_code)]
     LogFacadeWriter,
     /// Forwards logs to a custom writer.
+    #[allow(dead_code)]
     CustomWriter(Arc<dyn LogWriter>),
 }
 
