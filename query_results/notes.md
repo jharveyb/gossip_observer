@@ -40,6 +40,8 @@ and more complex techniques (statistical block modelling / SBM). Further reading
 SBM can also be run with additional vertex and edge properties, like edge weights
 for example.
 
+## Results
+
 ### SBM, no edge weights
 
 Detected 15 hierarchical levels.
@@ -112,6 +114,8 @@ Community 10772: Size: 18
 Community 10395: Size: 1
 Community 4231: Size: 70
 
+### Manual Community Analysis
+
 Working backwards from node aliases and other information:
 
 We found an entity by poking around mempool.space, before ever running any
@@ -167,3 +171,28 @@ Level 1 community 7:
 9854, 73 -> Dark Grey -> "Team Corn", looks like this South Korean wallet: <https://team.oksu.su/>
 495, 24 -> Dark Blue -> zaphq, River, Bitnob
 4231, 70 -> Light Teal -> Binance
+
+## Opening Channels
+
+Aim to cover different second-level communities. Chronological order of opening:
+
+03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371
+Community 8165 with lightning.emzy.de - 1028429300572553216
+
+03c926a800929fcc99826c23dd1a39a4e1253c96f6249595bab7620c3d810f3662
+Community 4200 with SchroedingersCat -1028571137643905025
+
+02be86fcfd15193884d72332ba5a7112c2b929dd388c87e2f6bb36b3e0fc1af7c8
+Community 10023 with Star Service - 1028571137643839489
+
+029ab8668a756d0bcfa11e76c8f2e5e4de27121acf417bedaa3e38044361b51ecd
+Community 9696 with Amboss.Space - 1028579933714841601
+
+026396c83abf5eedd7d7b3d4047790ab46b875e9918501810fc031d1f374e914ae
+Community 11489 with Megalithic [small channels] - 1028578834279497729
+
+022398a4472f19fb55e5cbfca722579b69b65c323f508abd9030afef4056d3107f
+Community 9203 with satsquares - 1028964762817527809
+
+02590d4fac69d138a88a2e3684f196236e8664e40b941acf80bfaf1c57f2c2472a
+Community 6636 with CoinGate - 1028964762816937984
