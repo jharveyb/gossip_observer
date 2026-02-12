@@ -10,6 +10,7 @@ service ControllerService {
         rpc CollectorStatus(common.CollectorInfo) returns (CollectorStatusResponse);
         rpc OpenChannel(OpenCollectorChannelRequest) returns (OpenCollectorChannelResponse);
         rpc UpdateChannels(UpdateChannelsRequest) returns (UpdateChannelsResponse);
+        rpc PostGossipGraphChunk(common.GossipGraphChunk) returns (common.GossipGraphChunkResponse);
         // Endpoints for the operator to use.
         rpc Status(StatusRequest) returns (StatusResponse);
         rpc Shutdown(common.ShutdownRequest) returns (common.ShutdownResponse);

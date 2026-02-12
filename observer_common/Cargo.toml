@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = [
         "time",
         "local-time",
 ] }
+itertools = "0.14.0"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

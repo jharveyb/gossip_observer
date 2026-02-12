@@ -107,7 +107,7 @@ struct ChanInfo {
     pub node_two: NodeId,
     // Require this, but our node will only fetch it if we're using a Core RPC
     // chain source
-    pub capacity: u64,
+    pub capacity: Option<u64>,
     pub one_to_two: Option<ChanDirectionFees>,
     pub two_to_one: Option<ChanDirectionFees>,
     // Can pull from the original message, or the caller
@@ -121,7 +121,7 @@ impl From<ChannelInfo> for ChanInfo {
             node_one: info.node_one,
             node_two: info.node_two,
             // try from? will we ever be missing these (yes)
-            capacity: info.capacity_sats.unwrap(),
+            capacity: info.capacity_sats,
             one_to_two: info.one_to_two.map(ChanDirectionFees::from),
             two_to_one: info.two_to_one.map(ChanDirectionFees::from),
             // Caller must set this

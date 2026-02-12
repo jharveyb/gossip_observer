@@ -26,8 +26,6 @@ pub struct PeerConnectionInfo {
     #[prost(message, repeated, tag = "2")]
     pub socket_addrs: ::prost::alloc::vec::Vec<SocketAddress>,
 }
-/// channel info? can be separate message
-/// balances? could also be separate
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CollectorInfo {
     #[prost(string, tag = "1")]
@@ -85,3 +83,82 @@ pub struct UpdateChannelConfigResponse {
     #[prost(uint64, repeated, tag = "1")]
     pub scids: ::prost::alloc::vec::Vec<u64>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GossipNodeInfo {
+    #[prost(message, optional, tag = "1")]
+    pub pubkey: ::core::option::Option<Pubkey>,
+    #[prost(message, optional, tag = "2")]
+    pub info: ::core::option::Option<NodeAnnouncementInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NodeAnnouncementInfo {
+    #[prost(uint32, tag = "1")]
+    pub last_update: u32,
+    #[prost(string, tag = "2")]
+    pub alias: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub addresses: ::prost::alloc::vec::Vec<SocketAddress>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GossipChannelDirectionInfo {
+    #[prost(uint64, tag = "1")]
+    pub htlc_min_msat: u64,
+    #[prost(uint64, tag = "2")]
+    pub htlc_max_msat: u64,
+    #[prost(uint32, tag = "3")]
+    pub fees_base_msat: u32,
+    #[prost(uint32, tag = "4")]
+    pub fees_proportional_millionths: u32,
+    #[prost(uint32, tag = "5")]
+    pub cltv_expiry_delta: u32,
+    #[prost(uint32, tag = "6")]
+    pub last_update: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GossipChannelInfo {
+    #[prost(uint64, tag = "1")]
+    pub scid: u64,
+    #[prost(message, optional, tag = "2")]
+    pub node_one: ::core::option::Option<Pubkey>,
+    #[prost(message, optional, tag = "3")]
+    pub node_two: ::core::option::Option<Pubkey>,
+    #[prost(uint32, optional, tag = "4")]
+    pub last_update: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "5")]
+    pub capacity_sats: ::core::option::Option<u64>,
+    #[prost(message, optional, tag = "6")]
+    pub one_to_two: ::core::option::Option<GossipChannelDirectionInfo>,
+    #[prost(message, optional, tag = "7")]
+    pub two_to_one: ::core::option::Option<GossipChannelDirectionInfo>,
+}
+/// We need these intermediate types to be able to use these arrays inside
+/// a oneof.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GossipNodeInfoBatch {
+    #[prost(message, repeated, tag = "1")]
+    pub nodes: ::prost::alloc::vec::Vec<GossipNodeInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GossipChannelInfoBatch {
+    #[prost(message, repeated, tag = "1")]
+    pub channels: ::prost::alloc::vec::Vec<GossipChannelInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GossipGraphChunk {
+    #[prost(string, tag = "1")]
+    pub collector_uuid: ::prost::alloc::string::String,
+    #[prost(oneof = "gossip_graph_chunk::Data", tags = "2, 3")]
+    pub data: ::core::option::Option<gossip_graph_chunk::Data>,
+}
+/// Nested message and enum types in `GossipGraphChunk`.
+pub mod gossip_graph_chunk {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Data {
+        #[prost(message, tag = "2")]
+        Nodes(super::GossipNodeInfoBatch),
+        #[prost(message, tag = "3")]
+        Channels(super::GossipChannelInfoBatch),
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GossipGraphChunkResponse {}

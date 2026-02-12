@@ -23,8 +23,6 @@ message PeerConnectionInfo {
   repeated SocketAddress socket_addrs = 2;
 }
 
-// channel info? can be separate message
-// balances? could also be separate
 message CollectorInfo {
         string uuid = 1;
         Pubkey pubkey = 2;
@@ -64,3 +62,53 @@ message UpdateChannelConfigRequest {}
 message UpdateChannelConfigResponse {
   repeated uint64 scids = 1;
 }
+
+message GossipNodeInfo {
+  Pubkey pubkey = 1;
+  optional NodeAnnouncementInfo info = 2;
+}
+
+message NodeAnnouncementInfo {
+  uint32 last_update = 1;
+  string alias = 2;
+  repeated SocketAddress addresses = 3;
+}
+
+message GossipChannelDirectionInfo {
+  uint64 htlc_min_msat = 1;
+  uint64 htlc_max_msat = 2;
+  uint32 fees_base_msat = 3;
+  uint32 fees_proportional_millionths = 4;
+  uint32 cltv_expiry_delta = 5;
+  uint32 last_update = 6;
+}
+
+message GossipChannelInfo {
+  uint64 scid = 1;
+  Pubkey node_one = 2;
+  Pubkey node_two = 3;
+  optional uint32 last_update = 4;
+  optional uint64 capacity_sats = 5;
+  optional GossipChannelDirectionInfo one_to_two = 6;
+  optional GossipChannelDirectionInfo two_to_one = 7;
+}
+
+// We need these intermediate types to be able to use these arrays inside
+// a oneof.
+message GossipNodeInfoBatch {
+  repeated GossipNodeInfo nodes = 1;
+}
+
+message GossipChannelInfoBatch {
+  repeated GossipChannelInfo channels = 1;
+}
+
+message GossipGraphChunk {
+  string collector_uuid = 1;
+  oneof data {
+    GossipNodeInfoBatch nodes = 2;
+    GossipChannelInfoBatch channels = 3;
+  }
+}
+
+message GossipGraphChunkResponse {}
