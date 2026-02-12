@@ -1,5 +1,5 @@
 # Staggered restart of collectors with health checks
-# Pauses 150 seconds (2.5 minutes) between each restart
+# Any delay between restarts is due to delays in the single-restart tasks
 #
 # Requires: collectors_to_restart (list of collector dicts)
 
@@ -9,4 +9,3 @@
   loop_control:
     loop_var: collector
     label: "{{ collector.uuid }}"
-    pause: 60

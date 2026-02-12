@@ -21,7 +21,6 @@
         msg: >-
           Will restart {{ collectors_to_restart | length }} collector(s) on {{ inventory_hostname }}:
           {{ collectors_to_restart | map(attribute='uuid') | list | join(', ') }}.
-          Interval: 2.5 minutes between restarts.
 
     - name: Perform staggered restarts
       ansible.builtin.include_tasks: tasks/collector_restart_staggered.yml

@@ -10,7 +10,7 @@
 
 - name: "Wait for gossip-collector@{{ collector.uuid }}"
   ansible.builtin.pause:
-    seconds: "{{ service_startup_wait | default(90) }}"
+    seconds: "{{ service_startup_wait | default(60) }}"
 
 - name: "Check gossip-collector@{{ collector.uuid }}"
   ansible.builtin.systemd:

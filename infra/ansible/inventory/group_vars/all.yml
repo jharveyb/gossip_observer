@@ -59,3 +59,4 @@ timescaledb_staging_database_name: "gossip_observer_staging"
 
 # Binary staging directory for deployments
 binary_staging_dir: "{{ playbook_dir }}/binaries"
+service_startup_wait: 60
