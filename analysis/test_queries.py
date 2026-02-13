@@ -1,16 +1,28 @@
 """
 Usage:
-    cd analysis && uv run python test_queries.py
+    cd analysis && uv run python test_queries.py [sections...]
+
+Sections:
+    outer        Propagation delay box plot (outer hash + collector-originated)
+    comparison   Collector comparison (all collectors)
+    stats        Message rate, peer count, top nodes, top SCIDs
+
+With no arguments, all sections are run.
 """
 
+import argparse
 import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import altair as alt
 import polars as pl
 import psycopg2
 from dotenv import load_dotenv
+
+load_dotenv()
+alt.data_transformers.enable("vegafusion")
 
 pl.Config.set_fmt_str_lengths(66)
 
@@ -25,6 +37,17 @@ SCID_LE_TO_BIGINT = """(
     | (get_byte(scid,6)::bigint << 48)
     | (get_byte(scid,7)::bigint << 56)
 ) AS scid"""
+
+HIST_THRESHOLDS = [
+    (1, 10, "1-10"),
+    (11, 50, "11-50"),
+    (51, 100, "51-100"),
+    (101, 144, "101-144"),
+    (145, 200, "145-200"),
+    (201, 500, "201-500"),
+    (501, 1000, "501-1000"),
+    (1001, None, "1001+"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +69,150 @@ def run_query(conn, sql, params=None):
     if not rows:
         return pl.DataFrame({c: [] for c in cols})
     return pl.DataFrame(rows, schema=cols, orient="row")
+
+
+def write_csv(df: pl.DataFrame, name: str, output_dir: str = "data") -> None:
+    """Write a DataFrame to CSV in the output directory."""
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{name}.csv")
+    df.write_csv(path)
+    print(f"  wrote {path} ({len(df)} rows)")
+
+
+def save_bar_chart(
+    df: pl.DataFrame,
+    value_cols: list[str],
+    title: str,
+    x_title: str = "Value",
+    y_title: str = "Metric",
+    group_col: str | None = None,
+    filename: str = "bar_chart",
+    output_dir: str = "data",
+) -> None:
+    """Save a horizontal bar chart (optionally grouped) as PNG."""
+    index = [group_col] if group_col else []
+    long = df.unpivot(
+        index=index, on=value_cols, variable_name="metric", value_name="value"
+    )
+    chart = (
+        alt.Chart(long.to_pandas())
+        .mark_bar(opacity=0.7)
+        .encode(
+            alt.X("value:Q", title=x_title),
+            alt.Y("metric:N", sort=value_cols, title=y_title),
+        )
+    )
+    if group_col:
+        chart = chart.encode(
+            alt.Color(f"{group_col}:N", title=group_col),
+            alt.YOffset(f"{group_col}:N"),
+        )
+    chart = chart.properties(
+        title=title, width=600, height=max(200, len(value_cols) * 50)
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{filename}.png")
+    chart.save(path, ppi=150)
+    print(f"  saved {path}")
+
+
+def save_time_series(
+    df: pl.DataFrame,
+    x_col: str,
+    y_col: str,
+    color_col: str | None = None,
+    title: str = "",
+    x_title: str = "Time",
+    y_title: str = "Value",
+    color_title: str | None = None,
+    shorten_labels: int | None = None,
+    filename: str = "time_series",
+    output_dir: str = "data",
+) -> None:
+    """Save a time-series line chart as PNG."""
+    plot_df = df
+    encode_color = color_col
+    if color_col and shorten_labels:
+        short_col = f"{color_col}_short"
+        plot_df = df.with_columns(
+            pl.col(color_col).str.slice(0, shorten_labels).alias(short_col)
+        )
+        encode_color = short_col
+    chart = (
+        alt.Chart(plot_df.to_pandas())
+        .mark_line(point=True)
+        .encode(
+            alt.X(f"{x_col}:T", title=x_title),
+            alt.Y(f"{y_col}:Q", title=y_title),
+        )
+    )
+    if encode_color:
+        chart = chart.encode(
+            alt.Color(f"{encode_color}:N", title=color_title or encode_color)
+        )
+    chart = chart.properties(title=title, width=700, height=350)
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{filename}.png")
+    chart.save(path, ppi=150)
+    print(f"  saved {path}")
+
+
+def save_histogram(
+    bucketed: pl.DataFrame,
+    y_col: str,
+    title: str,
+    y_title: str,
+    x_title: str = "Message Count",
+    label_col: str | None = None,
+    label_fmt: str = "d",
+    filename: str = "histogram",
+    output_dir: str = "data",
+) -> None:
+    """Save a histogram bar chart as PNG."""
+    bucket_order = [label for _, _, label in HIST_THRESHOLDS]
+    bars = (
+        alt.Chart(bucketed.to_pandas())
+        .mark_bar(color="#f4a582")
+        .encode(
+            alt.X("bucket:N", sort=bucket_order, title=x_title, axis=alt.Axis(labelAngle=0)),
+            alt.Y(f"{y_col}:Q", title=y_title),
+        )
+    )
+    if label_col:
+        text_enc = alt.Text(f"{label_col}:N")
+    else:
+        text_enc = alt.Text(f"{y_col}:Q", format=label_fmt)
+    labels = bars.mark_text(dy=-10, fontSize=11).encode(text=text_enc)
+    chart = (bars + labels).properties(title=title, width=600, height=400)
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{filename}.png")
+    chart.save(path, ppi=150)
+    print(f"  saved {path}")
+
+
+def bucket_counts(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
+    """Bucket entity counts into histogram ranges and compute message percentages."""
+    rows = []
+    for lo, hi, label in HIST_THRESHOLDS:
+        if hi is not None:
+            subset = df.filter((pl.col(count_col) >= lo) & (pl.col(count_col) <= hi))
+        else:
+            subset = df.filter(pl.col(count_col) >= lo)
+        msg_sum = int(subset[count_col].sum()) if len(subset) > 0 else 0
+        rows.append({
+            "bucket": label,
+            "entity_count": len(subset),
+            "message_sum": msg_sum,
+        })
+    result = pl.DataFrame(rows)
+    total_msgs = result["message_sum"].sum()
+    if total_msgs > 0:
+        result = result.with_columns(
+            (pl.col("message_sum") / total_msgs * 100).round(1).alias("message_pct")
+        )
+    else:
+        result = result.with_columns(pl.lit(0.0).alias("message_pct"))
+    return result
 
 
 def summarize_delay(df):
@@ -80,6 +247,145 @@ def summarize_collector_relative_delay(df):
         ]
         + [pl.col(c).median().round(4).alias(c) for c in available]
     )
+
+
+# ---------------------------------------------------------------------------
+# Render helpers
+# ---------------------------------------------------------------------------
+
+
+def render_propagation_boxplot(
+    summaries: dict[str, pl.DataFrame | None],
+    title: str,
+    filename: str,
+    output_dir: str = "data",
+) -> None:
+    """Box plot of propagation delay percentiles, one box per label.
+
+    Args:
+        summaries: mapping of label -> single-row summarize_delay() result.
+    """
+    rows = []
+    label_order = []
+    for label, summary in summaries.items():
+        if summary is None or len(summary) == 0:
+            continue
+        row = summary.row(0, named=True)
+        rows.append(
+            {
+                "type": label,
+                "p05": row.get("p05", 0),
+                "p25": row.get("p25", 0),
+                "p50": row.get("p50", 0),
+                "p75": row.get("p75", 0),
+                "p95": row.get("p95", 0),
+            }
+        )
+        label_order.append(label)
+    if not rows:
+        return
+
+    pdf = pl.DataFrame(rows).to_pandas()
+    x_enc = alt.X("type:N", sort=label_order, title="", axis=alt.Axis(labelAngle=0))
+
+    whiskers = (
+        alt.Chart(pdf)
+        .mark_rule()
+        .encode(x=x_enc, y=alt.Y("p05:Q", title="Delay (seconds)"), y2="p95:Q")
+    )
+    box = (
+        alt.Chart(pdf)
+        .mark_bar(size=40, opacity=0.7)
+        .encode(x=x_enc, y="p25:Q", y2="p75:Q")
+    )
+    median = (
+        alt.Chart(pdf)
+        .mark_tick(color="black", size=40, thickness=2)
+        .encode(x=x_enc, y="p50:Q")
+    )
+    cap_lo = alt.Chart(pdf).mark_tick(color="black", size=20).encode(x=x_enc, y="p05:Q")
+    cap_hi = alt.Chart(pdf).mark_tick(color="black", size=20).encode(x=x_enc, y="p95:Q")
+
+    chart = (whiskers + cap_lo + cap_hi + box + median).properties(
+        title=title, width=max(200, len(rows) * 100), height=400
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{filename}.png")
+    chart.save(path, ppi=150)
+    print(f"  saved {path}")
+
+
+def render_peer_count(df: pl.DataFrame, output_dir: str = "data") -> None:
+    if len(df) == 0:
+        return
+    save_time_series(
+        df=df,
+        x_col="hour",
+        y_col="peer_count",
+        color_col="collector",
+        title="Peer Count per Collector (hourly)",
+        y_title="Peer Count",
+        color_title="Collector",
+        shorten_labels=8,
+        filename="peer_count_chart",
+        output_dir=output_dir,
+    )
+
+
+def render_message_rate(df: pl.DataFrame, output_dir: str = "data") -> None:
+    if len(df) == 0:
+        return
+    save_time_series(
+        df=df,
+        x_col="period",
+        y_col="receipts_per_hour",
+        color_col="type_name",
+        title="Message Receipt Rate by Type (hourly avg)",
+        y_title="Receipts / Hour",
+        color_title="Message Type",
+        filename="message_rate_receipts",
+        output_dir=output_dir,
+    )
+    save_time_series(
+        df=df,
+        x_col="period",
+        y_col="unique_messages",
+        color_col="type_name",
+        title="Unique Messages by Type (6h windows)",
+        y_title="Unique Messages",
+        color_title="Message Type",
+        filename="message_rate_unique",
+        output_dir=output_dir,
+    )
+
+
+def render_scid_activity(
+    df: pl.DataFrame, top_n: int = 10, output_dir: str = "data"
+) -> None:
+    if len(df) == 0:
+        return
+    for type_name in df["type_name"].unique().sort().to_list():
+        sub = df.filter(pl.col("type_name") == type_name)
+        top_scids = (
+            sub.group_by("scid")
+            .agg(pl.col("total_receipts").sum())
+            .sort("total_receipts", descending=True)
+            .head(top_n)["scid"]
+        )
+        filtered = sub.filter(pl.col("scid").is_in(top_scids)).with_columns(
+            pl.col("scid").cast(pl.String).alias("scid_str")
+        )
+        save_time_series(
+            df=filtered,
+            x_col="period",
+            y_col="total_receipts",
+            color_col="scid_str",
+            title=f"Top {top_n} SCIDs: {type_name} (12h buckets)",
+            y_title="Total Receipts",
+            color_title="SCID",
+            filename=f"scid_activity_{type_name}",
+            output_dir=output_dir,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +622,7 @@ def query_collector_comparison(
     INNER JOIN single_collector sc ON ac.hash = sc.hash
     """
     # hash_first_bucket CTE params
-    params = [range_start, range_end]
+    params: list = [range_start, range_end]
     if msg_type is not None:
         params.append(msg_type)
     # all_collectors CTE params
@@ -446,18 +752,19 @@ def query_message_rate(
 ) -> pl.DataFrame:
     sql = """
     SELECT
-        bucket,
+        time_bucket('6 hours', bucket) AS period,
         type,
         CASE type
             WHEN 1 THEN 'channel_announcement'
             WHEN 2 THEN 'node_announcement'
             WHEN 3 THEN 'channel_update'
         END AS type_name,
-        total_receipts,
-        distinct_count(unique_messages_hll)::bigint AS unique_messages
+        SUM(total_receipts) / 6 AS receipts_per_hour,
+        distinct_count(rollup(unique_messages_hll))::bigint AS unique_messages
     FROM ca_message_rate_10m
     WHERE bucket >= %s AND bucket < %s
-    ORDER BY bucket, type
+    GROUP BY period, type
+    ORDER BY period, type
     """
     return run_query(conn, sql, [range_start, range_end])
 
@@ -473,10 +780,12 @@ def query_peer_count(
     range_end: datetime,
 ) -> pl.DataFrame:
     sql = """
-    SELECT bucket, collector, peer_count
+    SELECT date_trunc('hour', bucket) AS hour, collector,
+           MAX(peer_count) AS peer_count
     FROM ca_peer_count_10m
     WHERE bucket >= %s AND bucket < %s
-    ORDER BY bucket, collector
+    GROUP BY 1, collector
+    ORDER BY 1, collector
     """
     return run_query(conn, sql, [range_start, range_end])
 
@@ -490,13 +799,8 @@ def query_top_nodes(
     conn,
     range_start: datetime,
     range_end: datetime,
-    top_n: int = 25,
-    order_by: str = "total_receipts",
 ) -> pl.DataFrame:
-    allowed = {"total_receipts", "unique_messages_outer", "unique_messages_inner"}
-    if order_by not in allowed:
-        raise ValueError(f"order_by must be one of {allowed}")
-    sql = f"""
+    sql = """
     SELECT
         orig_node,
         SUM(total_receipts) AS total_receipts,
@@ -505,10 +809,56 @@ def query_top_nodes(
     FROM ca_orig_node_activity_1h
     WHERE bucket >= %s AND bucket < %s
     GROUP BY orig_node
-    ORDER BY {order_by} DESC
-    LIMIT %s
+    ORDER BY total_receipts DESC
     """
-    return run_query(conn, sql, [range_start, range_end, top_n])
+    return run_query(conn, sql, [range_start, range_end])
+
+
+# ---------------------------------------------------------------------------
+# 9b. Node announcement distribution  (ca_orig_node_activity_1h)
+# ---------------------------------------------------------------------------
+
+
+def query_node_announcement_distribution(
+    conn,
+    range_start: datetime,
+    range_end: datetime,
+) -> pl.DataFrame:
+    """Daily unique node_announcement inner messages per originating node."""
+    sql = """
+    SELECT
+        date_trunc('day', bucket) AS day,
+        orig_node,
+        distinct_count(rollup(unique_messages_inner_hll))::bigint AS msg_count
+    FROM ca_orig_node_activity_1h
+    WHERE bucket >= %s AND bucket < %s
+    GROUP BY day, orig_node
+    """
+    return run_query(conn, sql, [range_start, range_end])
+
+
+# ---------------------------------------------------------------------------
+# 9c. Channel update distribution  (ca_scid_activity_1h)
+# ---------------------------------------------------------------------------
+
+
+def query_channel_update_distribution(
+    conn,
+    range_start: datetime,
+    range_end: datetime,
+) -> pl.DataFrame:
+    """Daily unique channel_update inner messages per SCID."""
+    sql = f"""
+    SELECT
+        date_trunc('day', bucket) AS day,
+        {SCID_LE_TO_BIGINT},
+        distinct_count(rollup(unique_messages_inner_hll))::bigint AS msg_count
+    FROM ca_scid_activity_1h
+    WHERE bucket >= %s AND bucket < %s
+      AND type = 3
+    GROUP BY day, scid
+    """
+    return run_query(conn, sql, [range_start, range_end])
 
 
 # ---------------------------------------------------------------------------
@@ -520,30 +870,64 @@ def query_top_scids(
     conn,
     range_start: datetime,
     range_end: datetime,
-    top_n: int = 25,
-    order_by: str = "total_receipts",
 ) -> pl.DataFrame:
-    allowed = {"total_receipts", "unique_messages_outer", "unique_messages_inner"}
-    if order_by not in allowed:
-        raise ValueError(f"order_by must be one of {allowed}")
     sql = f"""
     SELECT
+        time_bucket('12 hours', bucket) AS period,
+        type,
+        CASE type
+            WHEN 1 THEN 'channel_announcement'
+            WHEN 3 THEN 'channel_update'
+        END AS type_name,
         {SCID_LE_TO_BIGINT},
         SUM(total_receipts) AS total_receipts,
         distinct_count(rollup(unique_messages_outer_hll))::bigint AS unique_messages_outer,
         distinct_count(rollup(unique_messages_inner_hll))::bigint AS unique_messages_inner
     FROM ca_scid_activity_1h
     WHERE bucket >= %s AND bucket < %s
-    GROUP BY scid
-    ORDER BY {order_by} DESC
-    LIMIT %s
+      AND type IN (1, 3)
+    GROUP BY period, scid, type
+    ORDER BY period, scid, type
     """
-    return run_query(conn, sql, [range_start, range_end, top_n])
+    return run_query(conn, sql, [range_start, range_end])
 
 
 # ---------------------------------------------------------------------------
 # 11. SCID comparison: announcements vs updates  (ca_scid_activity_1h)
 # ---------------------------------------------------------------------------
+
+
+def query_scid_outer_inner_ratio(
+    conn,
+    range_start: datetime,
+    range_end: datetime,
+) -> pl.DataFrame:
+    """Average daily outer/inner unique message ratio per SCID.
+
+    Computes unique_outer / unique_inner for each SCID for each day,
+    then averages those daily ratios per SCID.
+    """
+    sql = f"""
+    WITH daily AS (
+        SELECT
+            date_trunc('day', bucket) AS day,
+            scid,
+            distinct_count(rollup(unique_messages_outer_hll))::bigint AS unique_outer,
+            distinct_count(rollup(unique_messages_inner_hll))::bigint AS unique_inner
+        FROM ca_scid_activity_1h
+        WHERE bucket >= %s AND bucket < %s
+          AND type = 3
+        GROUP BY day, scid
+    )
+    SELECT
+        {SCID_LE_TO_BIGINT},
+        AVG(unique_outer::float / unique_inner) AS avg_daily_ratio,
+        COUNT(*) AS days_active
+    FROM daily
+    WHERE unique_inner > 0
+    GROUP BY scid
+    """
+    return run_query(conn, sql, [range_start, range_end])
 
 
 def query_scid_comparison(
@@ -653,8 +1037,210 @@ def print_section(title: str, df: pl.DataFrame, summary: pl.DataFrame | None = N
             print(df.head(15))
 
 
+COLLECTOR_IDS = [
+    "039646e24ed7067af3340717c8a1ae0dba8fae56cacdba2d4be4161a9a5d92308d",
+    "02be86fcfd15193884d72332ba5a7112c2b929dd388c87e2f6bb36b3e0fc1af7c8",
+    "03f217cf79e6e24ed3547a3ea32e6c149ad4849bccbd92ed759f9e680f66855954",
+    "03ddc4f6b61d1d6826acb6fbe0013d478e930b90e5cd31e0fd3a6ba80963256a06",
+    "02a7089f81bb535403031b248cad512f8d8267dbe91241cd4dbbb92afcdc2baec2",
+    "03fa502117c9dacc575ee87b770ac07f6f574ed32e831bb1a025e2a3d130b87df5",
+    "029ab8668a756d0bcfa11e76c8f2e5e4de27121acf417bedaa3e38044361b51ecd",
+    "029c0a4817877ec7b5857269ec47cbfd6221649eef2e8928129a9213b5aaec4ab7",
+    "037f0eecd594484c49dc53683602ebb1bc50af0717dec53b0022877384703623ea",
+    "026396c83abf5eedd7d7b3d4047790ab46b875e9918501810fc031d1f374e914ae",
+    "027865bd89b9ae0270cccb65060a92511b86a1f1ee29f6e611a85157ab7110e397",
+    "022398a4472f19fb55e5cbfca722579b69b65c323f508abd9030afef4056d3107f",
+    "03d42ada2b0f7930f41bafc3dd98245dd445faf14f6242618a103994920fece0df",
+    "03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371",
+    "027f0ce3198b762a0879a63e57ac8c04fac9f0de8cbae923fa2d454f7bbdc705f5",
+    "03c926a800929fcc99826c23dd1a39a4e1253c96f6249595bab7620c3d810f3662",
+    "021b4c2e6135d016e4ef27e7a187c3f71b1f6f236a4fee48773c76b25fd3ebe498",
+    "0370942652c1778a683f85be315fb167cef474d16d091ece242b9606f36303feed",
+    "03fb60edd9a56e9946cf136187e9093f44e6e131b71524c1c78b148310c9cb3797",
+    "02590d4fac69d138a88a2e3684f196236e8664e40b941acf80bfaf1c57f2c2472a",
+    "0201b7019f3b07676994d49e34dadd6954854c239d6fbd7c8c2998ea18ee606dc1",
+]
+
+ALL_SECTIONS = ["outer", "comparison", "stats"]
+
+
+def run_outer(conn, range_start, range_end, peer_cutoff):
+    """Outer hash propagation delay (box plot)."""
+    outer_summaries: dict[str, pl.DataFrame | None] = {}
+
+    df = query_outer_hash_propagation(conn, range_start, range_end, peer_cutoff)
+    summary = summarize_delay(df) if len(df) > 0 else None
+    print_section("1. Outer Hash Propagation Delay", df, summary)
+    outer_summaries["All"] = summary
+
+    for msg_type, label in [
+        (1, "ChannelAnnouncement"),
+        (2, "NodeAnnouncement"),
+        (3, "Channel Update"),
+    ]:
+        df = query_outer_hash_propagation(
+            conn, range_start, range_end, peer_cutoff, msg_type
+        )
+        summary = summarize_delay(df) if len(df) > 0 else None
+        print_section(f"1. Outer Hash Propagation Delay: ({label})", df, summary)
+        outer_summaries[label] = summary
+
+    # Include collector-originated in the same box plot
+    collector_originated_cutoff = 10
+    df = query_collector_originated_propagation(
+        conn, range_start, range_end, collector_originated_cutoff
+    )
+    summary = summarize_delay(df) if len(df) > 0 else None
+    print_section("3. Collector-Originated Propagation Delay", df, summary)
+    outer_summaries["Observer"] = summary
+
+    render_propagation_boxplot(outer_summaries, "Propagation Delay", "prop_delay_outer")
+
+
+def run_comparison(conn, range_start, range_end, peer_cutoff):
+    """Collector comparison — run for each collector."""
+    if not COLLECTOR_IDS:
+        print_section("4. Collector Comparison", pl.DataFrame())
+        return
+    for collector_id in COLLECTOR_IDS:
+        df = query_collector_comparison(
+            conn, range_start, range_end, peer_cutoff, collector_id
+        )
+        summary = summarize_collector_relative_delay(df) if len(df) > 0 else None
+        print_section(f"4. Collector Comparison ({collector_id[:20]}...)", df, summary)
+
+
+def run_stats(conn, range_start, range_end, top_n):
+    """Message rate, peer count, top nodes, top SCIDs."""
+    # --- Message rate ---
+    df = query_message_rate(conn, range_start, range_end)
+    print_section("7. Message Rate by Type (6-hour buckets)", df)
+    for type_name in df["type_name"].unique().sort().to_list():
+        sub = df.filter(pl.col("type_name") == type_name).drop("type", "type_name")
+        write_csv(sub, f"message_rate_{type_name}")
+    render_message_rate(df)
+
+    # --- Peer count ---
+    df = query_peer_count(conn, range_start, range_end)
+    print_section("8. Peer Count per Collector (hourly)", df)
+    write_csv(df, "peer_count")
+    # Add a 'total' line summing all collectors per hour
+    totals = (
+        df.group_by("hour")
+        .agg(pl.col("peer_count").sum())
+        .with_columns(pl.lit("total").alias("collector"))
+        .select(df.columns)
+    )
+    render_peer_count(pl.concat([df, totals]))
+
+    # --- Top nodes ---
+    df = query_top_nodes(conn, range_start, range_end)
+    print_section("9. Top Nodes by Activity", df)
+    write_csv(df, "top_nodes")
+
+    # --- Top SCIDs ---
+    df = query_top_scids(conn, range_start, range_end)
+    print_section("10. Top SCIDs by Activity (12-hour buckets)", df)
+    for type_name in df["type_name"].unique().sort().to_list():
+        sub = df.filter(pl.col("type_name") == type_name).drop("type", "type_name")
+        write_csv(sub, f"top_scids_{type_name}")
+    render_scid_activity(df)
+
+    # --- SCID comparison ---
+    df = query_scid_comparison(conn, range_start, range_end, top_n)
+    print_section("11. SCID Comparison (announcements vs updates)", df)
+
+    # --- Node announcement distribution (avg daily count per node) ---
+    df = query_node_announcement_distribution(conn, range_start, range_end)
+    print_section("12. Node Announcement Distribution (daily)", df)
+    avg_daily = df.group_by("orig_node").agg(
+        pl.col("msg_count").mean().round(1).alias("avg_daily")
+    )
+    bucketed = bucket_counts(avg_daily, "avg_daily")
+    with pl.Config(tbl_cols=-1, tbl_width_chars=120):
+        print(bucketed)
+    save_histogram(
+        bucketed,
+        y_col="entity_count",
+        title="node_announcement Avg Daily Messages per Node ID",
+        y_title="Number of Node IDs",
+        x_title="Avg Daily Message Count per Node ID",
+        filename="node_ann_msg_count",
+    )
+
+    # --- Channel update distribution (avg daily count per SCID) ---
+    df = query_channel_update_distribution(conn, range_start, range_end)
+    print_section("13. Channel Update Distribution (daily)", df)
+    avg_daily = df.group_by("scid").agg(
+        pl.col("msg_count").mean().round(1).alias("avg_daily")
+    )
+    bucketed = bucket_counts(avg_daily, "avg_daily")
+    bucketed = bucketed.with_columns(
+        (pl.col("message_pct").cast(pl.String) + "%").alias("pct_label")
+    )
+    with pl.Config(tbl_cols=-1, tbl_width_chars=120):
+        print(bucketed)
+    save_histogram(
+        bucketed,
+        y_col="message_pct",
+        title="channel_update Avg Daily Messages per SCID",
+        y_title="Percentage of channel_update Messages",
+        x_title="Avg Daily Message Count per SCID",
+        label_col="pct_label",
+        filename="scid_msg_count",
+    )
+
+    # --- SCID outer/inner unique message ratio (channel_update, avg daily) ---
+    df = query_scid_outer_inner_ratio(conn, range_start, range_end)
+    print_section("14. SCID Outer/Inner Unique Message Ratio (channel_update)", df)
+    if len(df) > 0:
+        import numpy as np
+
+        write_csv(df, "scid_outer_inner_ratio")
+        tail_df = df.filter(pl.col("avg_daily_ratio") >= 72)
+        print(f"  SCIDs with avg_daily_ratio >= 72: {len(tail_df)} / {len(df)}")
+        plot_df = tail_df.with_columns(
+            pl.col("avg_daily_ratio").log(base=10).alias("log10_ratio")
+        )
+        pdf = plot_df.to_pandas()
+        max_log = int(np.ceil(pdf["log10_ratio"].max()))
+        tick_vals = list(range(0, max_log + 1))
+        chart = (
+            alt.Chart(pdf)
+            .mark_bar(color="#4c78a8")
+            .encode(
+                alt.X(
+                    "log10_ratio:Q",
+                    bin=alt.Bin(maxbins=30),
+                    title="Avg Daily (unique_outer / unique_inner)",
+                    axis=alt.Axis(values=tick_vals, labelExpr="pow(10, datum.value)"),
+                ),
+                alt.Y("count()", title="Number of SCIDs"),
+            )
+            .properties(
+                title="channel_update: Avg Daily Outer/Inner Ratio per SCID",
+                width=600,
+                height=400,
+            )
+        )
+        os.makedirs("data", exist_ok=True)
+        path = "data/scid_outer_inner_ratio.png"
+        chart.save(path, ppi=150)
+        print(f"  saved {path}")
+
+
 def main():
-    load_dotenv()
+    parser = argparse.ArgumentParser(description="Run gossip analysis queries.")
+    parser.add_argument(
+        "sections",
+        nargs="*",
+        choices=ALL_SECTIONS,
+        default=ALL_SECTIONS,
+        help="Sections to run (default: all)",
+    )
+    args = parser.parse_args()
+    sections = set(args.sections)
+
     conn = connect()
 
     range_end = datetime.now(timezone.utc)
@@ -664,76 +1250,20 @@ def main():
 
     print(f"\nTime range: {range_start} -> {range_end}")
     print(f"Peer cutoff: {peer_cutoff}, Top N: {top_n}")
+    print(f"Sections: {', '.join(sorted(sections))}")
 
-    # --- 0. CA overview ---
+    # --- 0. CA overview (always) ---
     df = ca_stats(conn)
     print_section("0. Continuous Aggregate Overview", df)
 
-    # --- 1. Outer hash propagation ---
-    df = query_outer_hash_propagation(conn, range_start, range_end, peer_cutoff)
-    summary = summarize_delay(df) if len(df) > 0 else None
-    print_section("1. Outer Hash Propagation Delay", df, summary)
+    if "outer" in sections:
+        run_outer(conn, range_start, range_end, peer_cutoff)
 
-    df = query_outer_hash_propagation(conn, range_start, range_end, peer_cutoff, 1)
-    summary = summarize_delay(df) if len(df) > 0 else None
-    print_section(
-        "1. Outer Hash Propagation Delay: (Channel Announcement)", df, summary
-    )
+    if "comparison" in sections:
+        run_comparison(conn, range_start, range_end, peer_cutoff)
 
-    df = query_outer_hash_propagation(conn, range_start, range_end, peer_cutoff, 2)
-    summary = summarize_delay(df) if len(df) > 0 else None
-    print_section("1. Outer Hash Propagation Delay: (Node Announcement)", df, summary)
-
-    df = query_outer_hash_propagation(conn, range_start, range_end, peer_cutoff, 3)
-    summary = summarize_delay(df) if len(df) > 0 else None
-    print_section("1. Outer Hash Propagation Delay: (Channel Update)", df, summary)
-
-    # --- 2. Inner hash propagation ---
-    # df = query_inner_hash_propagation(conn, range_start, range_end, peer_cutoff)
-    # summary = summarize_delay(df) if len(df) > 0 else None
-    # print_section("2. Inner Hash Propagation Delay", df, summary)
-
-    # --- 3. Collector-originated propagation (uses ca_outbound_origin_1h) ---
-    collector_originated_cutoff = 10
-    df = query_collector_originated_propagation(
-        conn, range_start, range_end, collector_originated_cutoff
-    )
-    summary = summarize_delay(df) if len(df) > 0 else None
-    print_section("3. Collector-Originated Propagation Delay", df, summary)
-
-    # --- 4. Collector comparison (needs a collector UUID) ---
-    # collectors_df = run_query(
-    #     conn, "SELECT DISTINCT collector FROM timings ORDER BY collector LIMIT 1"
-    # )
-    collector_id = "03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371"
-    if len(collector_id) > 0:
-        df = query_collector_comparison(
-            conn, range_start, range_end, peer_cutoff, collector_id
-        )
-        summary = summarize_collector_relative_delay(df) if len(df) > 0 else None
-        print_section(f"4. Collector Comparison ({collector_id[:20]}...)", df, summary)
-    else:
-        print_section("4. Collector Comparison", pl.DataFrame())
-
-    # --- 7. Message rate ---
-    df = query_message_rate(conn, range_start, range_end)
-    print_section("7. Message Rate by Type (10-min buckets)", df)
-
-    # --- 8. Peer count ---
-    df = query_peer_count(conn, range_start, range_end)
-    print_section("8. Peer Count per Collector", df)
-
-    # --- 9. Top nodes ---
-    df = query_top_nodes(conn, range_start, range_end, top_n)
-    print_section("9. Top Nodes by Activity", df)
-
-    # --- 10. Top SCIDs ---
-    df = query_top_scids(conn, range_start, range_end, top_n)
-    print_section("10. Top SCIDs by Activity", df)
-
-    # --- 11. SCID comparison ---
-    df = query_scid_comparison(conn, range_start, range_end, top_n)
-    print_section("11. SCID Comparison (announcements vs updates)", df)
+    if "stats" in sections:
+        run_stats(conn, range_start, range_end, top_n)
 
     conn.close()
     print(f"\n{'=' * 70}")
