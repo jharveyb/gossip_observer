@@ -7,12 +7,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use bitcoin::Network;
+use croner::Cron;
 use ldk_node::config::{BackgroundSyncConfig, ElectrumSyncConfig, EsploraSyncConfig};
 use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
-use tokio::task::JoinSet;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use tokio::task::{self, JoinSet};
 use tonic::transport::Server as TonicServer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use tokio::time::interval;
 use tokio::time::sleep;
@@ -167,6 +170,19 @@ async fn async_main(
     let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level, log_filters)
         .map_err(|_| anyhow!("Failed to create FS wrier"))?;
 
+    // Upper bound on number of seconds after the specified hour, that the
+    // upload will start.
+    let upload_offset_secs = StdRng::from_os_rng().random_range(0..60) as u32;
+    let full_cron = format!("{} {}", upload_offset_secs, cfg.collector.graph_upload_cron);
+    let graph_upload_cron = Cron::from_str(&full_cron)?;
+
+    info!(cron = %graph_upload_cron, "Schedule for graph uploads");
+    let graph_upload_cfg = GossipUploadConfig {
+        controller_addr: cfg.collector.controller_addr.clone(),
+        uuid: cfg.uuid.clone(),
+        cron: graph_upload_cron,
+    };
+
     // Create our peer connection manager. This tracks which peers we've connected
     // to recently, and a list of eligible peers to connect to. Separate tasks
     // will attempt to connect to new peers to keep our peer count
@@ -285,6 +301,12 @@ async fn async_main(
         cfg.collector.controller_addr.clone(),
         stop_signal.child_token(),
         info_template,
+    ));
+
+    main_tasks.spawn(upload_gossip_graph(
+        node.clone(),
+        graph_upload_cfg,
+        stop_signal.child_token(),
     ));
 
     let ctrl_handler_stop_recv = stop_signal.child_token();
@@ -435,6 +457,102 @@ pub async fn ping_controller(
         }
     }
 
-    //
+    Ok(())
+}
+
+pub struct GossipUploadConfig {
+    pub controller_addr: String,
+    pub uuid: String,
+    pub cron: Cron,
+}
+
+pub fn time_until_next(cron: &Cron) -> anyhow::Result<Duration> {
+    let now = chrono::Utc::now();
+    // Inclusive is false, so our duration should always be positive.
+    let next = cron.find_next_occurrence(&now, false)?;
+    (next - now).to_std().map_err(Into::into)
+}
+
+pub async fn upload_gossip_graph(
+    node: Arc<ldk_node::Node>,
+    cfg: GossipUploadConfig,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    info!(schedule = %cfg.cron, "Collector: gossip graph uploader: starting");
+
+    loop {
+        let wait_time = time_until_next(&cfg.cron)?;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Collector: gossip graph pusher: shutting down");
+                break;
+            }
+            _ = sleep(wait_time) => {
+            }
+        }
+
+        let graph = node.network_graph();
+        let node_ids = graph.list_nodes();
+        let channel_ids = graph.list_channels();
+
+        let (nodes, channels) = task::spawn_blocking(move || {
+            let mut nodes = Vec::with_capacity(node_ids.len());
+            for node_id in node_ids {
+                let ann_info = graph.node(&node_id).and_then(|n| n.announcement_info);
+                // Only fallible bit here is pubkey parsing.
+                match observer_common::types::GossipNodeInfo::try_from((node_id, ann_info)) {
+                    Ok(info) => nodes.push(info),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to convert node, skipping");
+                    }
+                }
+            }
+
+            let mut channels = Vec::with_capacity(channel_ids.len());
+            for scid in channel_ids {
+                let channel = match graph.channel(scid) {
+                    Some(c) => c,
+                    None => {
+                        // Shouldn't happen.
+                        warn!(scid, "Channel missing from graph, skipping");
+                        continue;
+                    }
+                };
+                match observer_common::types::GossipChannelInfo::try_from((scid, channel)) {
+                    Ok(info) => channels.push(info),
+                    Err(e) => {
+                        warn!(error = %e, scid, "Failed to convert channel, skipping");
+                    }
+                }
+            }
+
+            (nodes, channels)
+        })
+        .await?;
+
+        info!(
+            node_count = nodes.len(),
+            channel_count = channels.len(),
+            "Collector: gossip graph pusher: collected graph data"
+        );
+
+        let mut client = match ControllerClient::connect(&cfg.controller_addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = ?e, "Collector: gossip graph pusher: failed to connect to controller");
+                continue;
+            }
+        };
+
+        match client.send_gossip_graph(&cfg.uuid, nodes, channels).await {
+            Ok(_) => {
+                info!("Collector: gossip graph push task: successfully sent graph");
+            }
+            Err(e) => {
+                error!(error = ?e, "Collector: gossip graph push task: failed to send graph");
+            }
+        }
+    }
+
     Ok(())
 }

@@ -63,6 +63,8 @@ pub struct Collector {
     pub log_level: String,
 
     pub controller_addr: String,
+
+    pub graph_upload_cron: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +129,8 @@ impl CollectorConfig {
             .set_default("collector.ldk_runtime_worker_threads", 2)?
             .set_default("collector.storage_dir", storage_dir)?
             .set_default("collector.log_level", "info")?
+            // Every 2 hours to start. The seconds are picked randomly at startup.
+            .set_default("collector.graph_upload_cron", "0 */2 * * *")?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("COLLECTOR"))
             .build()?;
