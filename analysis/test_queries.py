@@ -1005,11 +1005,14 @@ def query_messages(
     interval: str,
     scid: int | None = None,
     node: str | None = None,
+    newest: bool = False,
 ) -> pl.DataFrame:
     """Look up raw message receipts by SCID or node pubkey.
 
     Returns one row per inbound receipt: collector, timestamp, sending_peer,
-    scid, orig_timestamp, size.
+    scid, orig_timestamp, size, raw.
+
+    If newest=True, returns only the most recent receipt per collector.
     """
     if scid is not None:
         filter_clause = "AND m.scid = %s"
@@ -1018,24 +1021,44 @@ def query_messages(
         filter_clause = "AND m.orig_node = %s"
         filter_param = node
 
-    sql = f"""
-    SELECT
-        t.collector,
-        t.net_timestamp AT TIME ZONE 'UTC' AS timestamp,
-        t.peer AS sending_peer,
-        {SCID_LE_TO_BIGINT_QUALIFIED},
-        t.orig_timestamp AT TIME ZONE 'UTC' AS orig_timestamp,
-        m.size,
-        msg.raw
-    FROM timings t
-    JOIN metadata m ON t.hash = m.hash
-    JOIN messages msg ON t.hash = msg.hash
-    WHERE m.type = %s
-      AND t.dir = 1
-      AND t.net_timestamp >= NOW() - %s::interval
-      {filter_clause}
-    ORDER BY t.net_timestamp DESC, t.collector
-    """
+    if newest:
+        sql = f"""
+        SELECT DISTINCT ON (t.collector)
+            t.collector,
+            t.net_timestamp AT TIME ZONE 'UTC' AS timestamp,
+            t.peer AS sending_peer,
+            {SCID_LE_TO_BIGINT_QUALIFIED},
+            t.orig_timestamp AT TIME ZONE 'UTC' AS orig_timestamp,
+            m.size,
+            msg.raw
+        FROM timings t
+        JOIN metadata m ON t.hash = m.hash
+        JOIN messages msg ON t.hash = msg.hash
+        WHERE m.type = %s
+          AND t.dir = 1
+          AND t.net_timestamp >= NOW() - %s::interval
+          {filter_clause}
+        ORDER BY t.collector, t.net_timestamp DESC
+        """
+    else:
+        sql = f"""
+        SELECT
+            t.collector,
+            t.net_timestamp AT TIME ZONE 'UTC' AS timestamp,
+            t.peer AS sending_peer,
+            {SCID_LE_TO_BIGINT_QUALIFIED},
+            t.orig_timestamp AT TIME ZONE 'UTC' AS orig_timestamp,
+            m.size,
+            msg.raw
+        FROM timings t
+        JOIN metadata m ON t.hash = m.hash
+        JOIN messages msg ON t.hash = msg.hash
+        WHERE m.type = %s
+          AND t.dir = 1
+          AND t.net_timestamp >= NOW() - %s::interval
+          {filter_clause}
+        ORDER BY t.net_timestamp DESC, t.collector
+        """
     return run_query(conn, sql, [msg_type, interval, filter_param])
 
 
@@ -1371,6 +1394,11 @@ def main_query():
         action="store_true",
         help="Write full results (all rows) to CSV in data/",
     )
+    parser.add_argument(
+        "--newest",
+        action="store_true",
+        help="Show only the most recent receipt per collector",
+    )
     args = parser.parse_args(sys.argv[2:])
 
     # Default message type based on identifier
@@ -1398,7 +1426,10 @@ def main_query():
         interval=args.time,
         scid=args.scid,
         node=args.node,
+        newest=args.newest,
     )
+    if args.newest:
+        df = df.sort("timestamp", descending=True)
     total = len(df)
     if args.save:
         identifier = str(args.scid) if args.scid is not None else args.node[:16]
