@@ -1,0 +1,53 @@
+@startuml seq_gossip_publish_archive
+skinparam defaultFontSize 11
+skinparam shadowing false
+
+title Gossip Publish & Archival
+
+participant "publish_msgs\ntask" as pub
+participant "NATS\nJetStream" as nats
+participant "nats_reader\ntask" as reader
+participant "msg_decoder\ntask" as decode
+participant "db_write_handler\ntask" as dbw
+database "TimescaleDB" as db
+
+note over pub : gossip_collector process
+note over reader, dbw : gossip_archiver process
+
+== Publish to NATS ==
+
+activate pub
+pub -> pub : batch_and_hash
+pub -> nats : publish
+activate nats
+nats --> pub : ACK
+deactivate pub
+
+== Archiver Consumes ==
+
+nats -> reader : pull
+deactivate nats
+activate reader
+
+reader -> reader : split_batch
+reader -> decode : send
+activate decode
+reader -> nats : ack
+deactivate reader
+
+== Decode & Write ==
+
+decode -> decode : parse
+decode -> dbw : send
+deactivate decode
+
+activate dbw
+dbw -> dbw : buffer_batch
+
+dbw -> db : COPY
+activate db
+db --> dbw : OK
+deactivate db
+deactivate dbw
+
+@enduml

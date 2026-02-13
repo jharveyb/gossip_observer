@@ -1,0 +1,101 @@
+@startuml system_component
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam componentStyle rectangle
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam nodesep 40
+skinparam ranksep 50
+
+title Gossip Observer -- System Architecture
+
+' --- External networks ---
+
+cloud "Lightning Network" {
+    [P2P Peers] as peers
+}
+
+cloud "Bitcoin Network" {
+    [Electrum / Esplora\nServer] as electrum
+}
+
+node "Tor Network\n(optional)" as tor
+
+' --- Gossip Collector (1..N instances) ---
+
+package "gossip_collector  xN" {
+    [LDK Node] as ldk
+    [PeerConnManager\n(actor)] as pcm
+    [NATS Batched Exporter] as exporter
+    [gRPC Server\n(CollectorService)] as col_grpc
+    [Heartbeat +\nGraph Upload] as col_hb
+}
+
+' --- Observer Controller (1 instance) ---
+
+package "observer_controller" {
+    [gRPC Server\n(ControllerService)] as ctrl_grpc
+    [CollectorManager\n(actor)] as cm
+    [Heartbeat Sweeper\n(periodic)] as sweeper
+    [Channel Updater\n(periodic)] as chan_upd
+    [Graph Differ\n(cron)] as differ
+    [JSON Writer\n(zstd compressed)] as jw
+    database "Detected Communities" as csvs
+}
+
+' --- Gossip Archiver (1 instance) ---
+
+package "gossip_archiver" {
+    [NATS Reader] as nats_reader
+    [DB Writer] as db_writer
+}
+
+' --- Infrastructure services ---
+
+node "NATS JetStream" as nats
+
+database "TimescaleDB" as tsdb {
+    [messages] as t_msgs
+    [timings (hypertable)] as t_timings
+    [metadata] as t_meta
+    [message_hashes] as t_hashes
+    [Continuous Aggregates] as t_ca
+}
+
+node "Compressed JSON\nDiff Files" as json_files
+
+' --- Connections ---
+
+' External -> Collector
+peers -down-> ldk : "LN P2P gossip"
+electrum --> ldk : "chain sync"
+tor ..> ldk : "SOCKS5 (optional)"
+
+' Intra-Collector
+ldk --> exporter : "LogWriter callback"
+exporter --> nats : "publish batched"
+pcm <..> exporter : "eligible peers filter"
+col_grpc --> pcm : "PostEligiblePeers\nPostTargetCount"
+col_hb ..> ctrl_grpc : "RegisterCollector\nCollectorStatus\nPostGossipGraph"
+
+' Controller <-> Collector gRPC callbacks
+ctrl_grpc ..> col_grpc
+
+' Intra-Controller
+ctrl_grpc --> cm
+sweeper --> cm : "prune collectors"
+chan_upd ..> col_grpc : "UpdateChannelConfig"
+differ --> cm : "read gossip graphs"
+differ --> jw 
+jw --> json_files
+csvs --> cm : "load at startup"
+
+' NATS -> Archiver
+nats --> nats_reader : "JetStream pull"
+nats_reader --> db_writer: "ExportedGossip"
+db_writer --> tsdb : "batched inserts"
+
+' Continuous aggregates
+t_timings ..> t_ca : "materialized refresh"
+
+@enduml

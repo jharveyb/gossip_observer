@@ -1,0 +1,47 @@
+@startuml seq_gossip_collect
+skinparam defaultFontSize 11
+skinparam shadowing false
+
+title Gossip Collection & Batching
+
+participant "LN Peer" as peer
+participant "LDK Node" as ldk
+participant "NATSExporter\n(LogWriter)" as exporter
+participant "queue_exported_msg\ntask" as queue
+participant "publish_msgs\ntask" as pub
+
+note over peer, ldk : Lightning P2P protocol
+note over ldk, pub : gossip_collector process
+
+== Gossip Arrives ==
+
+peer -> ldk : gossip_message
+activate ldk
+
+ldk -> ldk : validate
+ldk -> exporter : export
+activate exporter
+
+exporter -> exporter : format_csv
+exporter -> queue : send
+deactivate exporter
+deactivate ldk
+
+== Batching & Filtering ==
+
+activate queue
+queue -> queue : check_eligible_peer
+
+alt peer is eligible
+    queue -> queue : accumulate
+
+    alt batch full (N=1024) OR timeout
+        queue -> pub : send_batch
+        activate pub
+    end
+else peer not eligible
+    queue -> queue : drop
+end
+deactivate queue
+
+@enduml

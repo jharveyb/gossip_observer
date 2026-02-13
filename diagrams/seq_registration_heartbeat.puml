@@ -1,0 +1,92 @@
+@startuml seq_registration_heartbeat
+skinparam defaultFontSize 11
+skinparam shadowing false
+
+title Collector Registration, Heartbeat & Peer Assignment
+
+participant "gossip_collector\n(gRPC Client)" as col
+participant "CollectorService\n(collector gRPC Server)" as col_srv
+participant "ControllerService\n(controller gRPC Server)" as ctrl_srv
+participant "CollectorManager\n(actor)" as cm
+participant "Heartbeat Sweeper\n(periodic)" as sweeper
+participant "Channel Updater\n(periodic)" as chan_upd
+
+note over col, col_srv : gossip_collector process
+note over ctrl_srv, chan_upd : observer_controller process
+
+== Startup: Registration ==
+
+col -> ctrl_srv : **RegisterCollector**(CollectorInfo)\nuuid, pubkey, grpc_addr,\npeer_count, balances
+activate ctrl_srv
+
+ctrl_srv -> cm : handle_collector_info(info)
+activate cm
+cm -> cm : Store heartbeat timestamp\nAdd to known collectors\nAssign community targets
+cm --> ctrl_srv : CollectorStatusResponse {\n  eligible_peers: [...],\n  target_peer_count: N\n}
+deactivate cm
+
+ctrl_srv --> col : CollectorStatusResponse
+deactivate ctrl_srv
+
+col -> col_srv : apply eligible_peers &\ntarget_peer_count locally
+activate col_srv
+col_srv -> col_srv : PeerConnManager.set_eligible(peers)\nPeerConnManager.set_target(N)
+deactivate col_srv
+
+== Periodic: Heartbeat (every 30s) ==
+
+loop every ~30 seconds
+    col -> ctrl_srv : **CollectorStatus**(CollectorInfo)\nupdated peer_count, balances,\nconnected_peers list
+    activate ctrl_srv
+
+    ctrl_srv -> cm : handle_collector_info(info)
+    activate cm
+    cm -> cm : Update heartbeat timestamp\nRecalculate community needs
+    cm --> ctrl_srv : CollectorStatusResponse {\n  eligible_peers: [updated],\n  target_peer_count: N'\n}
+    deactivate cm
+
+    ctrl_srv --> col : CollectorStatusResponse
+    deactivate ctrl_srv
+
+    col -> col_srv : update eligible peers\n& target count
+end
+
+== Periodic: Heartbeat Sweeper (every 60s) ==
+
+loop every ~60 seconds
+    activate sweeper
+    sweeper -> cm : check_stale_collectors()
+    activate cm
+
+    cm -> cm : For each collector:\n  if last_heartbeat > 600s ago →\n    remove from active set
+
+    alt stale collector found
+        cm -> cm : Remove collector\nRedistribute its\ncommunity targets
+        note right of cm : Remaining collectors\nget reassigned peers\non next heartbeat
+    end
+
+    deactivate cm
+    deactivate sweeper
+end
+
+== Periodic: Channel Config Update (cron) ==
+
+loop cron-scheduled interval
+    activate chan_upd
+    chan_upd -> cm : get_collectors_with_channels()
+    activate cm
+    cm --> chan_upd : [collector_a, collector_b, ...]
+    deactivate cm
+
+    loop for each collector with channels
+        chan_upd -> col_srv : **UpdateChannelConfig**()\n(via gRPC callback)
+        activate col_srv
+        col_srv -> col_srv : Randomize fee rate,\nbase fee, CLTV delta\nfor each channel
+        col_srv --> chan_upd : updated SCID list
+        deactivate col_srv
+    end
+
+    deactivate chan_upd
+end
+
+@enduml

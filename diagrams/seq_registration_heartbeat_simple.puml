@@ -1,0 +1,73 @@
+@startuml seq_registration_heartbeat_simple
+skinparam defaultFontSize 11
+skinparam shadowing false
+
+title Collector Registration & Heartbeat
+
+participant "gossip_collector" as col
+participant "CollectorService\n(gRPC Server)" as col_srv
+participant "ControllerService\n(gRPC Server)" as ctrl_srv
+participant "CollectorManager\n(actor)" as cm
+participant "Channel Updater\n(periodic)" as chan_upd
+
+note over col, col_srv : gossip_collector process
+note over ctrl_srv, chan_upd : observer_controller process
+
+== Startup: Registration ==
+
+col -> ctrl_srv : RegisterCollector
+activate ctrl_srv
+
+ctrl_srv -> cm : handle_collector_info
+activate cm
+cm -> cm : assign_communities
+cm --> ctrl_srv : CollectorStatusResponse
+deactivate cm
+
+ctrl_srv --> col : CollectorStatusResponse
+deactivate ctrl_srv
+
+col -> col_srv : set_eligible_peers
+activate col_srv
+col_srv -> col_srv : set_target_count
+deactivate col_srv
+
+== Periodic: Heartbeat (every 30s) ==
+
+loop every ~30 seconds
+    col -> ctrl_srv : CollectorStatus
+    activate ctrl_srv
+
+    ctrl_srv -> cm : handle_collector_info
+    activate cm
+    cm -> cm : recalculate_communities
+    cm --> ctrl_srv : CollectorStatusResponse
+    deactivate cm
+
+    ctrl_srv --> col : CollectorStatusResponse
+    deactivate ctrl_srv
+
+    col -> col_srv : update_peers
+end
+
+== Periodic: Channel Config Update (cron) ==
+
+loop cron-scheduled interval
+    activate chan_upd
+    chan_upd -> cm : get_collectors
+    activate cm
+    cm --> chan_upd : Vec<CollectorInfo>
+    deactivate cm
+
+    loop for each collector with channels
+        chan_upd -> col_srv : UpdateChannelConfig
+        activate col_srv
+        col_srv -> col_srv : randomize_fees
+        col_srv --> chan_upd : Vec<SCID>
+        deactivate col_srv
+    end
+
+    deactivate chan_upd
+end
+
+@enduml

@@ -1,0 +1,88 @@
+@startuml seq_graph_upload_comparison
+skinparam defaultFontSize 11
+skinparam shadowing false
+
+title Gossip Graph Upload & Comparison
+
+participant "LDK Node" as ldk
+participant "Graph Upload\nTask (cron)" as upload
+participant "ControllerClient\n(gRPC)" as col_client
+participant "ControllerService\n(gRPC Server)" as ctrl_srv
+participant "CollectorManager\n(actor)" as cm
+participant "Graph Differ\nTask (cron)" as differ
+participant "JSON Writer\nTask" as jw
+entity "Compressed\nJSON Files" as files
+
+note over ldk, col_client : gossip_collector process
+note over ctrl_srv, jw : observer_controller process
+
+== Graph Upload (cron-scheduled, every ~2 hours) ==
+
+activate upload
+upload -> ldk : get_network_graph()
+activate ldk
+ldk --> upload : NetworkGraph {\n  nodes: [...],\n  channels: [...]\n}
+deactivate ldk
+
+upload -> upload : Convert to:\n  Vec<GossipNodeInfo>\n  Vec<GossipChannelInfo>
+
+loop chunk nodes (1024 per message)
+    upload -> col_client : post_gossip_graph_chunk(\n  GossipGraphChunk::Nodes([...]))
+    activate col_client
+    col_client -> ctrl_srv : **PostGossipGraphChunk**
+    activate ctrl_srv
+    ctrl_srv -> cm : store_graph_chunk(\n  collector_uuid, nodes)
+    activate cm
+    cm -> cm : Append nodes to\ncollector's graph buffer
+    cm --> ctrl_srv : OK
+    deactivate cm
+    ctrl_srv --> col_client : OK
+    deactivate ctrl_srv
+    col_client --> upload : OK
+    deactivate col_client
+end
+
+loop chunk channels (1024 per message)
+    upload -> col_client : post_gossip_graph_chunk(\n  GossipGraphChunk::Channels([...]))
+    activate col_client
+    col_client -> ctrl_srv : **PostGossipGraphChunk**
+    activate ctrl_srv
+    ctrl_srv -> cm : store_graph_chunk(\n  collector_uuid, channels)
+    activate cm
+    cm -> cm : Append channels to\ncollector's graph buffer
+    cm --> ctrl_srv : OK
+    deactivate cm
+    ctrl_srv --> col_client : OK
+    deactivate ctrl_srv
+    col_client --> upload : OK
+    deactivate col_client
+end
+
+deactivate upload
+
+== Graph Comparison (cron-scheduled, every ~2 hours) ==
+
+activate differ
+differ -> cm : get_all_gossip_graphs()
+activate cm
+cm --> differ : HashMap<collector_uuid,\n  (nodes, channels)>
+deactivate cm
+
+differ -> differ : For each pair of collectors:\n  Compare node sets\n  Compare channel sets\n  Detect:\n    - Nodes seen by A but not B\n    - Channels seen by A but not B\n    - Stale announcements\n    - Capacity differences
+
+differ -> differ : Build diff report:\n  missing_nodes: [...]\n  missing_channels: [...]\n  stale_entries: [...]
+
+differ -> jw : write_json(diff_report)
+activate jw
+
+jw -> jw : Serialize to JSON\nCompress with zstd
+jw -> files : {storage_dir}/\n{timestamp}_diffs.json.zst
+deactivate jw
+
+differ -> cm : clear_gossip_graphs()
+activate cm
+cm -> cm : Reset graph buffers\nfor next cycle
+deactivate cm
+deactivate differ
+
+@enduml
