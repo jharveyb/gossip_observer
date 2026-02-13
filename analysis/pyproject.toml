@@ -1,0 +1,19 @@
+[project]
+name = "gossip-analysis"
+version = "0.1.0"
+description = "Lightning Network gossip data analysis notebook"
+requires-python = ">=3.11"
+dependencies = [
+    "marimo>=0.19.0",
+    "psycopg2-binary",
+    "python-dotenv",
+    "polars[pandas,pyarrow]>=1.0",
+    "altair>=5",
+    "pyzmq>=27.1.0",
+    "vegafusion>=2.0.3",
+    "vl-convert-python>=1.9.0.post1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
