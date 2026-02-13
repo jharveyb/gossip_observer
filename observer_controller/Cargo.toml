@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1.0"
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 bitcoin = "0.32.4"
 chrono = { version = "0.4", default-features = false, features = [
         "clock",
@@ -12,6 +13,7 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 config = { version = "0.15.19", features = ["toml"] }
 console-subscriber = "0.5.0"
+croner = "3.0.1"
 csv = "1.3"
 dotenvy = "0.15.7"
 observer_common = { path = "../observer_common" }

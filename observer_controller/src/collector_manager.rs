@@ -1,25 +1,62 @@
+use croner::Cron;
 use rand::prelude::*;
 use std::{
     boxed::Box,
     collections::{HashMap, HashSet, hash_map::Entry},
+    mem,
 };
 
 use chrono::{TimeDelta, Utc};
-use observer_common::types::{CollectorHeartbeat, CollectorInfo, ManagerStatus};
+use observer_common::types::{
+    CollectorHeartbeat, CollectorInfo, GossipChannelInfo, GossipNodeInfo, ManagerStatus,
+};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::Interval,
+    task,
+    time::{Interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::{CommunityStats, csv_reader::NodeAnnotatedRecord};
+use crate::{CommunityStats, csv_reader::NodeAnnotatedRecord, json_writer};
 
 type CommunityMembers = HashMap<u32, Vec<NodeAnnotatedRecord>>;
 type CollectorCommunityMapping = HashMap<String, u32>;
 type CommunityStatistics = HashMap<u32, CommunityStats>;
 type RegisteredCollectors = HashMap<String, Vec<CollectorHeartbeat>>;
 type ExpectedCollectors = HashSet<String>;
+type CollectorGossipGraphs = HashMap<String, CollectorGossipGraph>;
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CollectorGossipGraph {
+    pub nodes: Vec<GossipNodeInfo>,
+    pub channels: Vec<GossipChannelInfo>,
+}
+
+// A piece of information can be known, missing, matching or stale. For nodes,
+// this applies to the node pubkey, and also info from the node_announcement.
+// For channels, this applies to the channel overall,and fee information for
+// each direction of the channel.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GraphDiff {
+    pub known_nodes: u32,
+    pub missing_nodes: u32,
+    pub matching_node_info: u32,
+    pub missing_node_info: u32,
+    pub stale_node_info: u32,
+    pub known_channels: u32,
+    pub missing_channels: u32,
+    pub matching_channel_direction: u32,
+    pub missing_channel_direction: u32,
+    pub stale_channel_direction: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FullGraphDiff {
+    pub diffs: HashMap<String, GraphDiff>,
+    pub graphs: HashMap<String, CollectorGossipGraph>,
+    pub controller_graph: CollectorGossipGraph,
+}
 
 // The three collections (ha) we need to define how we will try to collect data
 // from Lightning Network peeers.
@@ -28,7 +65,6 @@ type ExpectedCollectors = HashSet<String>;
 // Finally, we assign collectors (LN nodes) to communities. We map exactly 1 collector
 // to 1 community, so that we don't affect existing community structure too much, by
 // passing gossip messages between communities.
-// TODO: reject inbound P2P connections from nodes not on a collector's assigned peer list?
 pub struct CollectionConfig {
     pub collector_mapping: CollectorCommunityMapping,
     pub community_members: CommunityMembers,
@@ -54,16 +90,20 @@ pub enum CollectorManagerMsg {
     GetCommunityStats((u32, oneshot::Sender<Option<CommunityStats>>)),
     GetAllCommunityStats(oneshot::Sender<Vec<CommunityStats>>),
     GetCommunityMembers((u32, oneshot::Sender<Option<Vec<NodeAnnotatedRecord>>>)),
+    PushGossipNodes((String, Vec<GossipNodeInfo>)),
+    PushGossipChannels((String, Vec<GossipChannelInfo>)),
+    DumpCollectorGraphs(oneshot::Sender<CollectorGossipGraphs>),
 }
 
 // The state for our actor. Some of this is populated at controller startup, and
 // our registered/expired mapping will update as hearbeats are received.
-// TODO: update cfg.mapping at runtime?
+// TODO: update cfg mapping at runtime?
 struct CollectorManager {
     mailbox: mpsc::UnboundedReceiver<CollectorManagerMsg>,
     registered_collectors: RegisteredCollectors,
     expected_collectors: ExpectedCollectors,
     collection_cfg: CollectionConfig,
+    gossip_graphs: CollectorGossipGraphs,
 }
 
 // one task to add collectors (from a gRPC message), and send the initial peer list
@@ -77,6 +117,7 @@ impl CollectorManager {
             registered_collectors: HashMap::new(),
             expected_collectors: cfg.collector_mapping.keys().cloned().collect(),
             collection_cfg: cfg,
+            gossip_graphs: HashMap::new(),
         }
     }
 
@@ -169,6 +210,17 @@ impl CollectorManager {
                     .cloned();
                 let _ = resp.send(members);
             }
+            CollectorManagerMsg::PushGossipNodes((uuid, nodes)) => {
+                let graph = self.gossip_graphs.entry(uuid.clone()).or_default();
+                graph.nodes.extend(nodes);
+            }
+            CollectorManagerMsg::PushGossipChannels((uuid, channels)) => {
+                let graph = self.gossip_graphs.entry(uuid.clone()).or_default();
+                graph.channels.extend(channels);
+            }
+            CollectorManagerMsg::DumpCollectorGraphs(resp) => {
+                let _ = resp.send(mem::take(&mut self.gossip_graphs));
+            }
         }
     }
 }
@@ -257,6 +309,23 @@ impl CollectorManagerHandle {
     ) -> anyhow::Result<Option<Vec<NodeAnnotatedRecord>>> {
         let (tx, rx) = oneshot::channel();
         let msg = CollectorManagerMsg::GetCommunityMembers((community_id, tx));
+        self.mailbox.send(msg).unwrap();
+        rx.await.map_err(anyhow::Error::from)
+    }
+
+    pub fn push_gossip_nodes(&self, uuid: String, nodes: Vec<GossipNodeInfo>) {
+        let msg = CollectorManagerMsg::PushGossipNodes((uuid, nodes));
+        self.mailbox.send(msg).unwrap();
+    }
+
+    pub fn push_gossip_channels(&self, uuid: String, channels: Vec<GossipChannelInfo>) {
+        let msg = CollectorManagerMsg::PushGossipChannels((uuid, channels));
+        self.mailbox.send(msg).unwrap();
+    }
+
+    pub async fn get_gossip_graphs(&self) -> anyhow::Result<CollectorGossipGraphs> {
+        let (tx, rx) = oneshot::channel();
+        let msg = CollectorManagerMsg::DumpCollectorGraphs(tx);
         self.mailbox.send(msg).unwrap();
         rx.await.map_err(anyhow::Error::from)
     }
@@ -378,6 +447,250 @@ pub async fn compute_status(handle: &CollectorManagerHandle) -> anyhow::Result<M
         statuses: latest_collectors,
     };
     Ok(status)
+}
+
+pub async fn compute_graph_differences(
+    handle: &CollectorManagerHandle,
+) -> anyhow::Result<FullGraphDiff> {
+    // TODO: diff against previous combined graph
+    let collector_graphs = handle.get_gossip_graphs().await?;
+    info!(
+        collector_count = collector_graphs.len(),
+        "Combining collector graph views"
+    );
+    if collector_graphs.is_empty() {
+        info!("Received no collector graphs");
+        return Ok(FullGraphDiff::default());
+    }
+    let mut combined_nodes: HashMap<bitcoin::secp256k1::PublicKey, GossipNodeInfo> = HashMap::new();
+    let mut combined_channels: HashMap<u64, GossipChannelInfo> = HashMap::new();
+
+    // First pass: combine all collector views, considering the latest messages
+    // as most accurate.
+    for graph in collector_graphs.values() {
+        for node in &graph.nodes {
+            match combined_nodes.entry(node.pubkey) {
+                Entry::Occupied(mut current_info) => {
+                    // This also covers overwriting an entry with no info, with
+                    // a new entry with info.
+                    if node.is_newer(current_info.get()) {
+                        current_info.insert(node.clone());
+                    }
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert_entry(node.clone());
+                }
+            }
+        }
+
+        for channel in &graph.channels {
+            match combined_channels.entry(channel.scid) {
+                Entry::Occupied(mut current_info) => {
+                    // The channel info is more complicated, as one party could
+                    // have newer fee info for one direction than the other, but
+                    // a reversed comparison for the top level timestamp. So we'll
+                    // merge the info from both values to the newest info.
+                    let newest = current_info.get().merge_to_newest(channel);
+                    current_info.insert(newest);
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert_entry(*channel);
+                }
+            }
+        }
+    }
+
+    // TODO: move all this to observer_common::types or similar
+    // Second pass: compare all collector views our combined view, to compute
+    // their difference from the global latest state.
+    let mut collector_diffs = HashMap::new();
+    for (uuid, graph) in collector_graphs.iter() {
+        let mut diff = GraphDiff::default();
+        let collector_nodes: HashMap<bitcoin::secp256k1::PublicKey, _> =
+            HashMap::from_iter(graph.nodes.iter().map(|n| (n.pubkey, &n.info)));
+        // For each collector graph, check if they know about all nodes in the
+        // combined graph. If they do, check the specific info they have.
+        for (nodekey, combined_info) in combined_nodes.iter() {
+            let combined_info = &combined_info.info;
+            let collector_info = collector_nodes.get(nodekey);
+            match (combined_info, collector_info) {
+                // Collector doesn't know about the node at all.
+                (Some(_), None) | (None, None) => {
+                    diff.missing_nodes += 1;
+                    diff.missing_node_info += 1;
+                }
+                // Collector knows about the node, but has no info.
+                (None, Some(None)) => {
+                    diff.known_nodes += 1;
+                    diff.matching_node_info += 1;
+                }
+                // Should never happen, we built the global state incorrectly.
+                (None, Some(_)) => {
+                    diff.known_nodes += 1;
+                }
+                // Collector knows about the node.
+                (Some(combined), Some(collector)) => {
+                    diff.known_nodes += 1;
+                    match collector {
+                        // Collector either has {no, stale, or matching} info.
+                        Some(collector) => {
+                            if combined.same_info(collector) {
+                                diff.matching_node_info += 1;
+                            } else {
+                                diff.stale_node_info += 1;
+                            }
+                        }
+                        None => diff.missing_node_info += 1,
+                    }
+                }
+            };
+        }
+
+        // Now compare the channel states.
+        let collector_channels: HashMap<u64, GossipChannelInfo> =
+            HashMap::from_iter(graph.channels.iter().cloned().map(|c| (c.scid, c)));
+        for (scid, combined_info) in combined_channels.iter() {
+            let collector_info = collector_channels.get(scid);
+            match collector_info {
+                // Collector knows about the channel; check what they know about
+                // fees for each direction.
+                Some(info) => {
+                    diff.known_channels += 1;
+                    match (combined_info.one_to_two, info.one_to_two) {
+                        // No one has info on this direction.
+                        (None, None) => {
+                            diff.matching_channel_direction += 1;
+                        }
+                        // Should never happen.
+                        (None, Some(_)) => {}
+                        (Some(_), None) => diff.missing_channel_direction += 1,
+                        (Some(global_one_two), Some(collector_one_two)) => {
+                            if global_one_two.same_info(&collector_one_two) {
+                                diff.matching_channel_direction += 1;
+                            } else {
+                                diff.stale_channel_direction += 1;
+                            }
+                        }
+                    }
+                    match (combined_info.two_to_one, info.two_to_one) {
+                        // No one has info on this direction.
+                        (None, None) => {
+                            diff.matching_channel_direction += 1;
+                        }
+                        // Should never happen.
+                        (None, Some(_)) => {}
+                        (Some(_), None) => diff.missing_channel_direction += 1,
+                        (Some(global_two_one), Some(collector_two_one)) => {
+                            if global_two_one.same_info(&collector_two_one) {
+                                diff.matching_channel_direction += 1;
+                            } else {
+                                diff.stale_channel_direction += 1;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    diff.missing_channels += 1;
+                }
+            }
+        }
+
+        collector_diffs.insert(uuid.clone(), diff);
+    }
+
+    let combined_graph = CollectorGossipGraph {
+        nodes: combined_nodes.into_values().collect(),
+        channels: combined_channels.into_values().collect(),
+    };
+    let full_diff = FullGraphDiff {
+        diffs: collector_diffs,
+        graphs: collector_graphs,
+        controller_graph: combined_graph,
+    };
+
+    Ok(full_diff)
+}
+
+pub struct GossipDiffConfig {
+    pub base_dir: String,
+    pub cron: Cron,
+    pub file_writer: mpsc::Sender<json_writer::WriteRequest>,
+}
+
+pub fn time_until_next(cron: &Cron) -> anyhow::Result<std::time::Duration> {
+    let now = chrono::Utc::now();
+    // Inclusive is false, so our duration should always be positive.
+    let next = cron.find_next_occurrence(&now, false)?;
+    (next - now).to_std().map_err(Into::into)
+}
+
+pub async fn collector_gossip_differ(
+    handle: CollectorManagerHandle,
+    cfg: GossipDiffConfig,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    info!(schedule = %cfg.cron, "Controller: gossip differ: starting");
+
+    loop {
+        let wait_time = time_until_next(&cfg.cron)?;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Controller: gossip differ: shutting down");
+                break;
+            }
+            _ = sleep(wait_time) => {
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let diff_results = {
+            let local_handle = handle.clone();
+            let rt = tokio::runtime::Handle::current();
+            // Only fallible part here should be loading the received graphs.
+            task::spawn_blocking(move || rt.block_on(compute_graph_differences(&local_handle)))
+                .await??
+        };
+        // log all diffs
+        let ts_suffix = now.format("%Y-%m-%d-%H-%M.zst");
+        for diff in diff_results.diffs.iter() {
+            info!(
+                uuid = %diff.0,
+                result = ?diff.1,
+            )
+        }
+
+        let (diffs, collector_graphs, controller_graph) = (
+            diff_results.diffs,
+            diff_results.graphs,
+            diff_results.controller_graph,
+        );
+        if !diffs.is_empty() {
+            let diff_path = format!("{}/{}{}", cfg.base_dir, "collector_diffs-", ts_suffix);
+            let write_diffs = json_writer::WriteRequest {
+                path: diff_path.parse()?,
+                json_bytes: json_writer::serialize_to_json(diffs).await?,
+            };
+            cfg.file_writer.send(write_diffs).await?;
+        }
+
+        let controller_path = format!("{}/{}{}", cfg.base_dir, "controller_graph-", ts_suffix);
+        let write_controller = json_writer::WriteRequest {
+            path: controller_path.parse()?,
+            json_bytes: json_writer::serialize_to_json(controller_graph).await?,
+        };
+        cfg.file_writer.send(write_controller).await?;
+
+        for (uuid, graph) in collector_graphs.into_iter() {
+            let graph_path = format!("{}/collector-{}-{}", cfg.base_dir, uuid, ts_suffix);
+            let write_graph = json_writer::WriteRequest {
+                path: graph_path.parse()?,
+                json_bytes: json_writer::serialize_to_json(graph).await?,
+            };
+            cfg.file_writer.send(write_graph).await?;
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn heartbeat_sweeper(

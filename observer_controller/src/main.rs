@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 use std::{cmp, fs};
 
+use croner::Cron;
 use observer_common::collector_client::CollectorClient;
 use observer_controller::collector_manager::{
-    CollectionConfig, CollectorManagerHandle, heartbeat_sweeper,
+    CollectionConfig, CollectorManagerHandle, GossipDiffConfig, collector_gossip_differ,
+    heartbeat_sweeper,
 };
 use observer_controller::csv_reader::{
     NodeAnnotatedRecord, NodeCommunitiesRecord, NodeInfoRecord, load_csv, write_csv,
 };
 use observer_controller::grpc_server;
+use observer_controller::json_writer;
 use observer_controller::{CommunityStats, ControllerConfig};
 use rand::prelude::*;
 use tokio::time::{Interval, interval, sleep};
@@ -146,6 +150,25 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
     let _chan_updater = tokio::spawn(chan_update_timer(
         collector_manager.clone(),
         interval(chan_update_interval),
+        stop_signal.child_token(),
+    ));
+
+    // Spawn the JSON writer task for compressed file output.
+    let (write_tx, write_rx) = tokio::sync::mpsc::channel::<json_writer::WriteRequest>(32);
+    let _json_writer = tokio::spawn(json_writer::json_writer_task(
+        write_rx,
+        22, // highest level
+        stop_signal.child_token(),
+    ));
+
+    let graph_diff_cfg = GossipDiffConfig {
+        base_dir: cfg.controller.storage_dir.clone(),
+        cron: Cron::from_str(&cfg.controller.graph_diff_cron)?,
+        file_writer: write_tx.clone(),
+    };
+    let _graph_differ = tokio::spawn(collector_gossip_differ(
+        collector_manager.clone(),
+        graph_diff_cfg,
         stop_signal.child_token(),
     ));
 

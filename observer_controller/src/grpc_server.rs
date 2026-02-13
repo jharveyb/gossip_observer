@@ -5,7 +5,10 @@ use tokio_util::sync::CancellationToken;
 use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status};
 
-use observer_common::common::{CollectorInfo, ShutdownRequest, ShutdownResponse};
+use observer_common::common::gossip_graph_chunk::Data;
+use observer_common::common::{
+    CollectorInfo, GossipGraphChunk, GossipGraphChunkResponse, ShutdownRequest, ShutdownResponse,
+};
 use observer_common::controllerrpc::{
     CollectorStatusResponse, OpenCollectorChannelRequest, OpenCollectorChannelResponse,
     RegisterCollectorResponse, StatusRequest, StatusResponse, UpdateChannelsRequest,
@@ -216,6 +219,35 @@ impl controllerrpc::controller_service_server::ControllerService for ControllerS
             uuid: collector_uuid,
             response: Some(observer_common::common::UpdateChannelConfigResponse { scids }),
         }))
+    }
+
+    async fn post_gossip_graph_chunk(
+        &self,
+        request: Request<GossipGraphChunk>,
+    ) -> Result<Response<GossipGraphChunkResponse>, Status> {
+        let chunk = request.into_inner();
+        let uuid = chunk.collector_uuid;
+        let data = chunk
+            .data
+            .ok_or_else(|| Status::invalid_argument("data is required"))?;
+
+        let msg_type = match data {
+            Data::Nodes(batch) => {
+                let nodes = util::try_convert_vec(batch.nodes)
+                    .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
+                self.collector_manager
+                    .push_gossip_nodes(uuid.clone(), nodes);
+                "nodes"
+            }
+            Data::Channels(batch) => {
+                let channels = util::try_convert_vec(batch.channels)
+                    .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
+                self.collector_manager
+                    .push_gossip_channels(uuid.clone(), channels);
+                "channels"
+            }
+        };
+        Ok(Response::new(GossipGraphChunkResponse {}))
     }
 }
 

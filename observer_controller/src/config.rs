@@ -27,6 +27,7 @@ pub struct Controller {
     // In seconds
     pub heartbeat_expiry: u32,
     pub chan_update_interval: u32,
+    pub graph_diff_cron: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +74,9 @@ impl ControllerConfig {
             .set_default("controller.total_connections", 700)?
             .set_default("controller.heartbeat_expiry", 600)?
             .set_default("controller.chan_update_interval", 1200)?
+            // This should be a few minutes after the last expected upload time.
+            // 5 minutes after every second hour should be fine.
+            .set_default("controller.graph_diff_cron", "0 5 */2 * * *")?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("CONTROLLER"))
             .build()?;
