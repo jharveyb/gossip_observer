@@ -2,6 +2,8 @@
 
 # Binary path for deployment
 observer_controller_binary_path: "{{ binary_staging_dir }}/current/observer_controller"
+# Every hour; raise this based on size
+controller_graph_cron: "0 15 * * * *"
 
 # List of controller instances
 # Each controller manages one environment (staging or production)

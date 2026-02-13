@@ -1,6 +1,7 @@
 [collector]
 controller_addr = "{{ item.controller_addr }}"
 ldk_runtime_worker_threads = {{ item.ldk_runtime_worker_threads | default(2) }}
+graph_upload_cron = "{{ collector_graph_cron }}"
 
 [ldk]
 electrum = "{{ electrum_url }}"

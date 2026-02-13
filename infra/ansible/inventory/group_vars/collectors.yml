@@ -2,6 +2,8 @@
 
 # Binary path for deployment (points to staging directory)
 gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector"
+# Every hour; raise this based on storage size
+collector_graph_cron: "0 * * * *"
 
 # Collector instances - deployed to hosts based on 'host' property
 # Each collector instance has a unique UUID and specifies which host to deploy to
