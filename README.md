@@ -132,3 +132,33 @@ Once the collector shuts down, you should be able to safely shut down the archiv
 - Sort out storage for continuous data collection.
 - Sort out scheduled jobs for running analytics.
 - How can we detect interesting patterns, without knowing what we're looking for?
+
+## Implementation Behavior
+
+### LND
+
+v0.19: Outbound 1 MB/s ratelimit. Maintain 3 'active' peers that we receive gossip messages from,
+and may query for historical / missing data. Maintain a separate 'passive' set that we reply to,
+but will not query for messages. Active peers are rotated / randomized every 20 minutes. Downrank
+or ban peers that forward duplicate, stale, premature, or invalid messages. Messages are broadcast over 90 seconds in 5 second batches. Process channel
+announcements before updates or node announcements.
+
+2022 behavior: Target 3 peers total, rotate every 20 minutes. Messages are broadcast over 90 seconds in 5 second batches.
+
+### Core Lightning
+
+v25.09: Outbound 1 MB/s ratelimit. Target value of 10 random peers. Rank peers by their message
+'quality' (staleness vs. new messsages). Re-evaluate peers every 30 minutes to rotate out
+the worst peer.
+
+2022 behavior: Target value of 5 peers. Rotate peers every hour.
+
+### Rust Lightning
+
+v0.1.5: Perform a full graph sync (via queries) with the first 5 peers we connect to. Otherwise, request the last hour of gossip from a (new) peer.
+
+### Eclair
+
+v0.13.0: Max 250 P2P connections from peers that aren't channel counterparties.
+Perform initial sync with 5 peers. For initial sync, prefer counterparties based
+on the value of the channels we have with them.
