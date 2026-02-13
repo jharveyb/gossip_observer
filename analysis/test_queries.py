@@ -1,11 +1,25 @@
 """
 Usage:
     cd analysis && uv run python test_queries.py [sections...]
+    cd analysis && uv run python test_queries.py query --scid SCID [--type TYPE] [--time TIME]
+    cd analysis && uv run python test_queries.py query --node PUBKEY [--type TYPE] [--time TIME]
 
 Sections:
     outer        Propagation delay box plot (outer hash + collector-originated)
     comparison   Collector comparison (all collectors)
     stats        Message rate, peer count, top nodes, top SCIDs
+
+Query command:
+    Look up raw message receipts by SCID or node pubkey.
+    Returns one row per collector receipt: collector, timestamp, sending_peer, scid, orig_timestamp, size.
+
+    --time format: <number><unit> where unit is m (minutes), h (hours), d (days).
+    Default: 1h, max: 3d.  --type defaults to 3 (channel_update) for --scid, 2 (node_ann) for --node.
+
+    Examples:
+        python test_queries.py query --scid 863846913327104
+        python test_queries.py query --scid 863846913327104 --type 3 --time 6h
+        python test_queries.py query --node 02abc...def --time 1d
 
 With no arguments, all sections are run.
 """
@@ -174,7 +188,12 @@ def save_histogram(
         alt.Chart(bucketed.to_pandas())
         .mark_bar(color="#f4a582")
         .encode(
-            alt.X("bucket:N", sort=bucket_order, title=x_title, axis=alt.Axis(labelAngle=0)),
+            alt.X(
+                "bucket:N",
+                sort=bucket_order,
+                title=x_title,
+                axis=alt.Axis(labelAngle=0),
+            ),
             alt.Y(f"{y_col}:Q", title=y_title),
         )
     )
@@ -199,11 +218,13 @@ def bucket_counts(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
         else:
             subset = df.filter(pl.col(count_col) >= lo)
         msg_sum = int(subset[count_col].sum()) if len(subset) > 0 else 0
-        rows.append({
-            "bucket": label,
-            "entity_count": len(subset),
-            "message_sum": msg_sum,
-        })
+        rows.append(
+            {
+                "bucket": label,
+                "entity_count": len(subset),
+                "message_sum": msg_sum,
+            }
+        )
     result = pl.DataFrame(rows)
     total_msgs = result["message_sum"].sum()
     if total_msgs > 0:
@@ -962,6 +983,63 @@ def query_scid_comparison(
 
 
 # ---------------------------------------------------------------------------
+# 12. Ad-hoc message lookup by SCID or node pubkey
+# ---------------------------------------------------------------------------
+
+
+SCID_LE_TO_BIGINT_QUALIFIED = """CASE WHEN m.scid IS NOT NULL THEN (
+    get_byte(m.scid,0)::bigint
+    | (get_byte(m.scid,1)::bigint << 8)
+    | (get_byte(m.scid,2)::bigint << 16)
+    | (get_byte(m.scid,3)::bigint << 24)
+    | (get_byte(m.scid,4)::bigint << 32)
+    | (get_byte(m.scid,5)::bigint << 40)
+    | (get_byte(m.scid,6)::bigint << 48)
+    | (get_byte(m.scid,7)::bigint << 56)
+) ELSE NULL END AS scid"""
+
+
+def query_messages(
+    conn,
+    msg_type: int,
+    interval: str,
+    scid: int | None = None,
+    node: str | None = None,
+) -> pl.DataFrame:
+    """Look up raw message receipts by SCID or node pubkey.
+
+    Returns one row per inbound receipt: collector, timestamp, sending_peer,
+    scid, orig_timestamp, size.
+    """
+    if scid is not None:
+        filter_clause = "AND m.scid = %s"
+        filter_param = psycopg2.Binary(scid.to_bytes(8, byteorder="little"))
+    else:
+        filter_clause = "AND m.orig_node = %s"
+        filter_param = node
+
+    sql = f"""
+    SELECT
+        t.collector,
+        t.net_timestamp AT TIME ZONE 'UTC' AS timestamp,
+        t.peer AS sending_peer,
+        {SCID_LE_TO_BIGINT_QUALIFIED},
+        t.orig_timestamp AT TIME ZONE 'UTC' AS orig_timestamp,
+        m.size,
+        msg.raw
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    JOIN messages msg ON t.hash = msg.hash
+    WHERE m.type = %s
+      AND t.dir = 1
+      AND t.net_timestamp >= NOW() - %s::interval
+      {filter_clause}
+    ORDER BY t.net_timestamp DESC, t.collector
+    """
+    return run_query(conn, sql, [msg_type, interval, filter_param])
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics — check CA data shape to evaluate aggregate correctness
 # ---------------------------------------------------------------------------
 
@@ -1229,7 +1307,117 @@ def run_stats(conn, range_start, range_end, top_n):
         print(f"  saved {path}")
 
 
+MAX_QUERY_HOURS = 72  # 3 days
+
+TIME_UNITS = {"m": "minutes", "h": "hours", "d": "days"}
+TIME_TO_HOURS = {"m": 1 / 60, "h": 1, "d": 24}
+
+
+def parse_time_window(value: str) -> str:
+    """Parse a shorthand time window like '1h', '30m', '3d' into a PG interval string.
+
+    Enforces a maximum of 3 days.  Returns e.g. '1 hours', '30 minutes'.
+    """
+    value = value.strip()
+    if not value or value[-1] not in TIME_UNITS:
+        raise argparse.ArgumentTypeError(
+            f"Invalid time format '{value}'. Use <number><unit> where unit is "
+            f"m (minutes), h (hours), or d (days).  Examples: 1h, 30m, 3d"
+        )
+    unit_char = value[-1]
+    try:
+        amount = int(value[:-1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid number in time '{value}'.")
+    if amount <= 0:
+        raise argparse.ArgumentTypeError("Time window must be positive.")
+    total_hours = amount * TIME_TO_HOURS[unit_char]
+    if total_hours > MAX_QUERY_HOURS:
+        raise argparse.ArgumentTypeError(
+            f"Time window {value} exceeds maximum of {MAX_QUERY_HOURS}h (3 days)."
+        )
+    return f"{amount} {TIME_UNITS[unit_char]}"
+
+
+QUERY_ROW_LIMIT = 100
+
+
+def main_query():
+    """CLI handler for the 'query' subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="test_queries.py query",
+        description="Look up raw gossip message receipts by SCID or node pubkey.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--scid", type=int, help="Short Channel ID (decimal)")
+    group.add_argument("--node", type=str, help="Node public key (hex)")
+    parser.add_argument(
+        "--type",
+        type=int,
+        choices=[1, 2, 3],
+        dest="msg_type",
+        default=None,
+        help="Message type (1=channel_ann, 2=node_ann, 3=channel_update). "
+        "Default: 3 for --scid, 2 for --node",
+    )
+    parser.add_argument(
+        "--time",
+        type=parse_time_window,
+        default="1h",
+        help="Time window: <number><unit> where unit is m/h/d (default: 1h, max: 3d)",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Write full results (all rows) to CSV in data/",
+    )
+    args = parser.parse_args(sys.argv[2:])
+
+    # Default message type based on identifier
+    if args.msg_type is None:
+        args.msg_type = 3 if args.scid is not None else 2
+
+    conn = connect()
+    type_names = {
+        1: "channel_announcement",
+        2: "node_announcement",
+        3: "channel_update",
+    }
+    print(
+        f"\nQuery: type={args.msg_type} ({type_names[args.msg_type]}), time={args.time}",
+        end="",
+    )
+    if args.scid is not None:
+        print(f", scid={args.scid}")
+    else:
+        print(f", node={args.node}")
+
+    df = query_messages(
+        conn,
+        msg_type=args.msg_type,
+        interval=args.time,
+        scid=args.scid,
+        node=args.node,
+    )
+    total = len(df)
+    if args.save:
+        identifier = str(args.scid) if args.scid is not None else args.node[:16]
+        write_csv(df, f"query_{identifier}_type{args.msg_type}")
+    display_df = df.drop("raw")
+    if total > QUERY_ROW_LIMIT:
+        print(f"  showing first {QUERY_ROW_LIMIT} of {total} rows")
+        display_df = display_df.head(QUERY_ROW_LIMIT)
+    with pl.Config(
+        tbl_cols=-1, tbl_rows=QUERY_ROW_LIMIT, tbl_width_chars=200, fmt_float="full"
+    ):
+        print(display_df)
+    conn.close()
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "query":
+        return main_query()
+
     parser = argparse.ArgumentParser(description="Run gossip analysis queries.")
     parser.add_argument(
         "sections",
