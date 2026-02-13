@@ -2,6 +2,7 @@ pub mod collector_manager;
 pub mod config;
 pub mod csv_reader;
 pub mod grpc_server;
+pub mod json_writer;
 
 // Re-export commonly used types for convenience
 pub use config::ControllerConfig;

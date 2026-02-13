@@ -52,7 +52,7 @@ impl ControllerClient {
         nodes: Vec<observer_types::GossipNodeInfo>,
         channels: Vec<observer_types::GossipChannelInfo>,
     ) -> anyhow::Result<()> {
-        let chunk_size = 2000;
+        let chunk_size = 1024;
 
         for chunk in nodes.chunks(chunk_size) {
             let req = Request::new(common::GossipGraphChunk {

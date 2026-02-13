@@ -359,7 +359,7 @@ impl From<ManagerStatus> for controllerrpc::StatusResponse {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize)]
 pub struct GossipNodeInfo {
     pub pubkey: PublicKey,
     pub info: Option<NodeAnnouncementInfo>,
@@ -376,10 +376,12 @@ impl GossipNodeInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Default)]
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Default, serde::Serialize)]
 pub struct NodeAnnouncementInfo {
     pub last_update: u32,
     pub alias: String,
+    #[serde_as(as = "Vec<DisplayFromStr>")]
     pub addresses: Vec<SocketAddress>,
 }
 
@@ -465,7 +467,7 @@ impl TryFrom<common::GossipNodeInfo> for GossipNodeInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct GossipChannelDirectionInfo {
     pub htlc_min_msat: u64,
     pub htlc_max_msat: u64,
@@ -548,7 +550,7 @@ impl From<common::GossipChannelDirectionInfo> for GossipChannelDirectionInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct GossipChannelInfo {
     pub scid: u64,
     pub node_one: PublicKey,
