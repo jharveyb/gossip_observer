@@ -15,6 +15,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinSet;
 use tokio::time::{self};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -368,54 +369,68 @@ pub async fn db_batch_write(
 ) -> anyhow::Result<()> {
     // UNNEST is the recommended way to do batch insertions with query!:
     // https://github.com/launchbadge/sqlx/blob/main/FAQ.md#how-can-i-bind-an-array-to-a-values-clause-how-can-i-do-bulk-inserts
+    //
+    // We removed the foreign key constraints between tables / referencing
+    // message hashes in the 20260207 migration, so we can perform these batch
+    // inserts in parallel.
 
-    let critical_error = |e: sqlx::Error, msg: String| {
-        error!(error = ?e, message = ?msg, "Internal: db_batch_write");
-        msg + "Internal: db_batch_write"
-    };
+    let mut db_writers: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
-    // Insert raw messages
-    if !raws.is_empty() {
+    let pool_handle = pool.clone();
+    db_writers.spawn(async move {
+        if raws.is_empty() {
+            return Ok(());
+        }
         let (hashes, raw_msgs): (Vec<_>, Vec<_>) =
             raws.into_iter().map(RawMessage::unroll).multiunzip();
 
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             "INSERT INTO messages (hash, raw)
              SELECT * FROM UNNEST($1::bytea[], $2::text[])
              ON CONFLICT DO NOTHING",
             &hashes,
             &raw_msgs
         )
-        .execute(pool)
+        .execute(&pool_handle)
         .await
-        {
-            bail!(critical_error(e, "insert raw messages error".into()));
-        }
-    }
+        .map_err(|e| {
+            error!(error = ?e, "insert raw messages error");
+            anyhow!("insert raw messages: {e}")
+        })?;
+        Ok(())
+    });
 
-    // Insert the outer->inner hash mappings
-    if !hash_mapppings.is_empty() {
+    let pool_handle = pool.clone();
+    db_writers.spawn(async move {
+        if hash_mapppings.is_empty() {
+            return Ok(());
+        }
         let (outer_hashes, inner_hashes): (Vec<_>, Vec<_>) = hash_mapppings
             .into_iter()
             .map(MessageHashMapping::unroll)
             .multiunzip();
 
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             "INSERT INTO message_hashes (outer_hash, inner_hash)
              SELECT * FROM UNNEST($1::bytea[], $2::bytea[])
              ON CONFLICT DO NOTHING",
             &outer_hashes,
             &inner_hashes
         )
-        .execute(pool)
+        .execute(&pool_handle)
         .await
-        {
-            bail!(critical_error(e, "insert hash mappings error".into()));
-        }
-    }
+        .map_err(|e| {
+            error!(error = ?e, "insert hash mappings error");
+            anyhow!("insert hash mappings: {e}")
+        })?;
+        Ok(())
+    });
 
-    // Insert timings (time-series data)
-    if !timings.is_empty() {
+    let pool_handle = pool.clone();
+    db_writers.spawn(async move {
+        if timings.is_empty() {
+            return Ok(());
+        }
         let (
             hashes,
             inner_hashes,
@@ -439,7 +454,7 @@ pub async fn db_batch_write(
             .map(MessageNodeTimings::unroll)
             .multiunzip();
 
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             "INSERT INTO timings (net_timestamp, hash, inner_hash, collector, peer, dir, peer_hash, orig_timestamp)
              SELECT * FROM UNNEST($1::timestamptz[], $2::bytea[], $3::bytea[], $4::text[], $5::text[], $6::smallint[], $7::bytea[], $8::timestamptz[])",
             &net_timestamps,
@@ -451,14 +466,20 @@ pub async fn db_batch_write(
             &peer_hashes,
             &orig_timestamps as &[Option<chrono::DateTime<chrono::Utc>>]
         )
-        .execute(pool)
-        .await {
-            bail!(critical_error(e, "insert timings error".into()));
-        }
-    }
+        .execute(&pool_handle)
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "insert timings error");
+            anyhow!("insert timings: {e}")
+        })?;
+        Ok(())
+    });
 
-    // Insert metadata
-    if !metas.is_empty() {
+    let pool_handle = pool.clone();
+    db_writers.spawn(async move {
+        if metas.is_empty() {
+            return Ok(());
+        }
         let (hashes, inner_hashes, types, sizes, orig_nodes, scids): (
             Vec<_>,
             Vec<_>,
@@ -468,7 +489,7 @@ pub async fn db_batch_write(
             Vec<_>,
         ) = metas.into_iter().map(MessageMetadata::unroll).multiunzip();
 
-        if let Err(e) = sqlx::query!(
+        sqlx::query!(
             "INSERT INTO metadata (hash, inner_hash, type, size, orig_node, scid)
              SELECT * FROM UNNEST($1::bytea[], $2::bytea[], $3::smallint[], $4::integer[], $5::text[], $6::bytea[])
              ON CONFLICT DO NOTHING",
@@ -479,10 +500,19 @@ pub async fn db_batch_write(
             &orig_nodes as &[Option<String>],
             &scids as &[Option<Vec<u8>>]
         )
-        .execute(pool)
-        .await {
-            bail!(critical_error(e, "insert metadata error".into()));
-        }
+        .execute(&pool_handle)
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "insert metadata error");
+            anyhow!("insert metadata: {e}")
+        })?;
+        Ok(())
+    });
+
+    // The JoinSet will abort any remaining tasks on Drop if we exit early due
+    // to an error.
+    while let Some(result) = db_writers.join_next().await {
+        result??;
     }
 
     Ok(())
