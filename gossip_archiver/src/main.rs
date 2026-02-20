@@ -284,7 +284,6 @@ pub async fn db_write_handler(
     loop {
         // TODO: clean up our closed chan. handling
         tokio::select! {
-            biased;
             _ = cancel_token.cancelled() => {
                 warn!("Internal: db_write_handler: cancel signal received");
                 return Ok(());
@@ -330,14 +329,14 @@ pub async fn db_write_handler(
             }
         };
 
-        // Another task will signal us to actually write to the DB.
-        if should_flush {
-            // Sometimes that signal is from a timer, and we haven't received
-            // any messages.
+        // Flush when signaled by the ticker (time-based, or message count since
+        // last flush), or when our timings buffer reaches batch_size. Checking
+        // the buffer size here instead of only in the ticker task prevents
+        // excess accumulation of messages after a slow DB write, where we may have
+        // missed a ticker signal.
+        let batch_full = timings.len() >= batch_size;
+        if should_flush || batch_full {
             should_flush = false;
-            if timings.is_empty() {
-                continue;
-            }
 
             // Sort our 'time-series' data to improve DB behavior.
             timings.sort_by_key(|x| x.net_timestamp);
