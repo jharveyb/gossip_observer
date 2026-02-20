@@ -3,7 +3,7 @@
 # Binary path for deployment (points to staging directory)
 gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector"
 # Every hour; raise this based on storage size
-collector_graph_cron: "0 * * * *"
+collector_graph_cron: "0 */4 * * *"
 
 # Collector instances - deployed to hosts based on 'host' property
 # Each collector instance has a unique UUID and specifies which host to deploy to
@@ -24,7 +24,7 @@ gossip_collectors:
     ldk_runtime_worker_threads: 4
     # Team Corn, midsize
   - uuid: "019bfdbc-10b8-794f-91cb-132c5f4cc390"
-    host: "collectors-3-big"  # Must match inventory_hostname
+    host: "collectors-3-big" # Must match inventory_hostname
     grpc_port: 50059
     ldk_port: 9743
     console_port: 6677

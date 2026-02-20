@@ -4,6 +4,7 @@ log_level = "{{ item.log_level | default('info') }}"
 total_connections = {{ item.total_connections | default(700) }}
 heartbeat_expiry = {{ item.heartbeat_expiry | default(600) }}
 graph_diff_cron = "{{ controller_graph_cron }}"
+chan_update_interval = {{ controller_chan_update_interval | default(14400) }}
 
 [grpc]
 hostname = "{{ tailscale_ip }}"

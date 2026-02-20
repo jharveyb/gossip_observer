@@ -73,7 +73,7 @@ impl ControllerConfig {
             // Works out to about ~6% of the total node count.
             .set_default("controller.total_connections", 700)?
             .set_default("controller.heartbeat_expiry", 600)?
-            .set_default("controller.chan_update_interval", 1200)?
+            .set_default("controller.chan_update_interval", 3600)?
             // This should be a few minutes after the last expected upload time.
             // 5 minutes after every second hour should be fine.
             .set_default("controller.graph_diff_cron", "0 5 */2 * * *")?
