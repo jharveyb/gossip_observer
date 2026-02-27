@@ -115,6 +115,10 @@ def load_region_info(country_file=None):
     return df
 
 
+# Source list of UN regions is here:
+# https://github.com/IndEcol/country_converter/blob/master/country_converter/country_data.tsv
+# Libraray not available natively on Debian testing, so we'll just vendor this file
+# More context: https://en.wikipedia.org/wiki/United_Nations_geoscheme#/
 def iso2_to_subregion(region_info, iso_code):
     # look up matching row, then field
     subregion = region_info[region_info["ISO2"] == iso_code]["UNregion"]
@@ -122,7 +126,15 @@ def iso2_to_subregion(region_info, iso_code):
 
 
 def subregion_to_category(unregion):
-    # map regions to something less dimensional
+
+    # Combine some UN subregions
+    # Central America + Caribbean + South America = Latin America
+    # Northern Africa + Western Africa + Middle Africa + Eastern Africa + Southern Africa = Africa
+    # Northern Europe + Western Europe + Southern Europe = NATO Europe
+    # Micronesia + Polynesia + Melanesia = Oceania
+    # Eastern Europe + Central Asia = ex Warsaw
+    # Western Asia + Southern Asia = Middle Asia
+    # Eastern Asia + Southeastern Asia = East Asia
     return
 
 
@@ -144,6 +156,7 @@ def normalize_chan_capacities(edge_features):
 
 
 # TODO: add extra features to vertices
+# TODO: pull the community IDs from the graph
 def annotate_vertices(node_features=None):
     G, node_list, node_to_idx = load_lightning_graph()
 
@@ -233,7 +246,7 @@ def plot_node_features():
     axes[3].hist(age)
     axes[3].set_title("Age")
 
-    log_std_age = log1p_normalize(age, "age")
+    log_std_age = log1p_normalize(active, "active")
 
     axes[4].hist(log_std_age)
     axes[4].set_title("Log age")
@@ -313,7 +326,7 @@ def log1p_normalize(arr, name):
 
 if __name__ == "__main__":
     plot_node_features()
-    write_initial_node_features(load_ms_info(MS_INFO_FILE))
+    # write_initial_node_features(load_ms_info(MS_INFO_FILE))
 
     """
     node_capacity_list = load_channel_list(CHANNEL_FILE)
