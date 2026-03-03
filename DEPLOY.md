@@ -14,7 +14,7 @@
 
 - BIP39 mnemonic generator, such as [hal](https://github.com/stevenroose/hal)
 - UUID generator, likely available from your distro / preferred package manager. You probably want v4 or v7 UUIDs.
-- Just taskrunner, and the sqlx CLI for running DB migrations (not done via Ansible).
+- [Just](https://just.systems) taskrunner, and the sqlx [CLI](https://github.com/launchbadge/sqlx/blob/main/sqlx-cli/README.md) for running DB migrations (not done via Ansible).
 
 ## Misc
 
@@ -29,3 +29,5 @@ must be generated manually.
 
 A deployment also need custom files to specify the archivers, collectors, and controllers.
 So most of the content in `/infra/ansible/inventory/group_vars/`.
+
+Check `infra/ansible/README.md` for more detailed notes on deploying the project infrastructure.

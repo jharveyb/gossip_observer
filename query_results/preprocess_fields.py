@@ -326,6 +326,7 @@ def log1p_normalize(arr, name):
 
 if __name__ == "__main__":
     plot_node_features()
+    # Run this to generate the input for the observer-controller
     # write_initial_node_features(load_ms_info(MS_INFO_FILE))
 
     """
