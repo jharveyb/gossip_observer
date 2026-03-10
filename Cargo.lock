@@ -1067,6 +1067,7 @@ dependencies = [
  "bitcoin",
  "clap",
  "electrum-client",
+ "hex",
  "serde_json",
 ]
 

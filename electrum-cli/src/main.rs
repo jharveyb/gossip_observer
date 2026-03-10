@@ -28,9 +28,17 @@ struct Cli {
 enum Commands {
     Ping {},
     GetFeatures {},
+    ConvertScid {
+        scid: String,
+    },
     /// Get transaction option by id
     GetTx {
         id: String,
+    },
+    /// Get merkle proof for a confirmed TX (including the TX index in the block)
+    GetMerkle {
+        id: String,
+        height: u32,
     },
     /// Get transaction ID at block height and tx index
     GetTxidFromPos {
@@ -103,6 +111,42 @@ fn main() -> anyhow::Result<()> {
         Commands::GetTx { id } => {
             let txid = id.parse()?;
             let res = client.transaction_get(&txid)?;
+            println!("{:#?}", res);
+        }
+        Commands::ConvertScid { scid } => {
+            // https://bitcoin.stackexchange.com/questions/78029/how-to-convert-channel-id-from-c-lightning-to-lnd
+            let scid = if scid.contains('x') {
+                let parts = scid.split('x').collect::<Vec<_>>();
+                let block = parts[0].parse::<u64>()?;
+                let tx_pos = parts[1].parse::<u64>()?;
+                let output_idx = parts[2].parse::<u64>()?;
+                let id_numeric = block << 40 | tx_pos << 16 | output_idx;
+                println!(
+                    "block: {}, tx_pos: {}, output_idx: {}",
+                    block, tx_pos, output_idx
+                );
+                println!("numeric scid: {}", id_numeric);
+                id_numeric
+            } else {
+                let id_numeric = scid.parse::<u64>()?;
+                let block = id_numeric >> 40;
+                let tx_pos = (id_numeric >> 16) & 0xFFFFFF;
+                let output_idx = id_numeric & 0xFFFF;
+                println!(
+                    "block: {}, tx_pos: {}, output_idx: {}",
+                    block, tx_pos, output_idx
+                );
+                println!("scid: {}x{}x{}", block, tx_pos, output_idx);
+                id_numeric
+            };
+            // We stored the SCID as little-endian bytes, so we need to print as such
+            // for DB lookup.
+            let db_scid = scid.to_le_bytes();
+            println!("Hex scid: {}", hex::encode(db_scid));
+        }
+        Commands::GetMerkle { id, height } => {
+            let txid = id.parse()?;
+            let res = client.transaction_get_merkle(&txid, *height as usize)?;
             println!("{:#?}", res);
         }
         Commands::GetTxidFromPosRaw {
