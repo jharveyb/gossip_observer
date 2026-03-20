@@ -1,0 +1,7 @@
+# Proxmox-specific DNS and network configuration for Tailscale setup.
+# Only called for hosts in the [proxmox] group
+#
+
+# set tailscale to not overwrite resolv.conf by default
+# populate / edit resolv.conf to add tailscale entries
+# or will with work OOTB with systemd-resolved?

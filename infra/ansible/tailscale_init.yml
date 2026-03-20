@@ -16,6 +16,7 @@
 
     - name: Firewall setup
       tags: [firewall]
+      when: "'digitalocean' in group_names"
       block:
         - name: Import firewall tasks
           ansible.builtin.import_tasks: tasks/firewall.yml

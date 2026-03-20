@@ -39,96 +39,13 @@
     var: tailscale_up_result.stdout_lines
   when: tailscale_status.rc != 0
 
-# This should always exist already
-- name: Create systemd-resolved config directory
-  ansible.builtin.file:
-    path: /etc/systemd/resolved.conf.d
-    state: directory
-    owner: root
-    group: root
-    mode: '0755'
+- name: DigitalOcean DNS and netplan config
+  ansible.builtin.include_tasks: tasks/tailscale_network_do.yml
+  when: "'digitalocean' in group_names"
 
-# The stub listener and LLMNR are on by default; we definitely don't need them.
-- name: Configure systemd-resolved to use Tailscale DNS
-  ansible.builtin.copy:
-    dest: /etc/systemd/resolved.conf.d/tailscale.conf
-    content: |
-      [Resolve]
-      DNSStubListener=no
-      LLMNR=no
-      DNS=100.100.100.100
-      Domains=~.
-      # Set Quad9 and Cloudflare as fallbacks if Tailscale DNS fails
-      FallbackDNS=9.9.9.9 2620:fe::fe 1.1.1.1 2606:4700:4700::1111
-    owner: root
-    group: root
-    mode: '0644'
-  notify: Restart systemd-resolved
-
-- name: Remove Digital Ocean DNS resolved configuration
-  ansible.builtin.file:
-    path: /etc/systemd/resolved.conf.d/DigitalOcean.conf
-    state: absent
-  notify: Restart systemd-resolved
-
-# Should add Tailscale DNS, but not remove the OpenDNS entries
-- name: Flush handlers to restart systemd-resolved immediately
-  ansible.builtin.meta: flush_handlers
-
-- name: Read cloud-init netplan config
-  ansible.builtin.slurp:
-    path: /etc/netplan/50-cloud-init.yaml
-  register: netplan_cloud_init
-
-# Slurp provides output as base64 (why?), so we need a decode step here
-- name: Parse netplan YAML
-  ansible.builtin.set_fact:
-    netplan_config: "{{ netplan_cloud_init.content | b64decode | from_yaml }}"
-
-# Mutate the original netplan YAML to remove the 'nameservers:' section
-# so netplan does not add anything to our DNS config, and disable DHCP DNS
-- name: Modify eth0 config - remove nameservers and add DHCP overrides
-  ansible.builtin.set_fact:
-    eth0_modified: >-
-      {{
-        (netplan_config.network.ethernets.eth0 | dict2items | rejectattr('key', 'equalto', 'nameservers') | items2dict) | combine({
-          'dhcp4-overrides': {'use-dns': false},
-          'dhcp6-overrides': {'use-dns': false}
-        })
-      }}
-
-- name: Modify eth1 config - remove nameservers and add DHCP overrides
-  ansible.builtin.set_fact:
-    eth1_modified: >-
-      {{
-        (netplan_config.network.ethernets.eth1 | dict2items | rejectattr('key', 'equalto', 'nameservers') | items2dict) | combine({
-          'dhcp4-overrides': {'use-dns': false},
-          'dhcp6-overrides': {'use-dns': false}
-        })
-      }}
-
-# Override the eth0 and eth1 sections
-- name: Rebuild netplan config with modified interfaces
-  ansible.builtin.set_fact:
-    netplan_config:
-      network:
-        version: "{{ netplan_config.network.version }}"
-        ethernets:
-          eth0: "{{ eth0_modified }}"
-          eth1: "{{ eth1_modified }}"
-
-- name: Write updated netplan config
-  ansible.builtin.copy:
-    content: "{{ netplan_config | to_nice_yaml(indent=2) }}"
-    dest: /etc/netplan/50-cloud-init.yaml
-    backup: true
-    owner: root
-    group: root
-    mode: '0600'
-  notify: Reapply netplan
-
-- name: Flush handlers to apply netplan immediately
-  ansible.builtin.meta: flush_handlers
+- name: Proxmox DNS and network config
+  ansible.builtin.include_tasks: tasks/tailscale_network_proxmox.yml
+  when: "'proxmox' in group_names"
 
 # Remove the reference to a public IP for this machine in our inventory.
 # This means that Ansible will connect to machines via Tailscale hostname,

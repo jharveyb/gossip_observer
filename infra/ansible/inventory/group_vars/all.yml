@@ -20,6 +20,9 @@ base_pkgs:
   - iotop
   - iftop
   - lnav
+  - parted
+  - rsync
+  - tmux
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
