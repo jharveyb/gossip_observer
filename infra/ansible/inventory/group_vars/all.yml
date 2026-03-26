@@ -24,6 +24,14 @@ base_pkgs:
   - rsync
   - tmux
 
+baremetal_pkgs:
+  - fwupd
+  - smartmontools
+  - lm-sensors
+  - linux-cpupower
+  - lshw
+  - screenfetch
+
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
 ansible_user: "{{ nonroot_username }}"

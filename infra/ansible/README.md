@@ -21,13 +21,34 @@ Run cmd with vault access:
 
 `ansible-playbook $PLAYBOOK --ask-vault-pass`
 
+Run on a specific host, with a specific user:
+
+`ansible-playbook $PLAYBOOK --ask-vault-pass --limit $HOSTNAME -e ansible_user=$USER`
+
 ## Initial host setup
 
-`ansible-playbook server_init.yml --ask-vault-pass`
+Use a specific user for `server_init` if root SSH access is not available.
+
+`ansible-playbook server_init.yml --ask-vault-pass --limit $HOSTNAME`
 
 `ansible-playbook tailscale_init.yml --ask-vault-pass --limit $HOSTNAME`
 
 We should be using Tailscale SSH and the 'goss' user after this point.
+
+### Baremetal setup
+
+You can install Debian stable from the netinst ISO. Using a preseed file to
+automate that is an option, but maybe not worth the effort. If you leave the root
+password blank, sudo for the initial user will be enabled, which is useful. I'd
+recommend switching from ifupdown + dhcpcd to systemd-{networkd,resolved} for
+better DNS handling, but there is no playbook here for that yet.
+
+Once the machine is running, add the host to the `baremetal` groups in hosts.ini.
+You can run the initial playbook with a specific user (that is in sudoers):
+
+`ansible-playbook server_init.yml --ask-vault-pass --limit $HOSTNAME -K -e ansible_user=$INIT_USER`
+
+`-K` allows us to provide the user password we need to use `sudo`.
 
 ## TL;DR
 

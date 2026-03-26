@@ -47,6 +47,11 @@
   ansible.builtin.include_tasks: tasks/tailscale_network_proxmox.yml
   when: "'proxmox' in group_names"
 
+# Baremetal hosts are a mix of systemd-{networkd,resolved} and
+# ifupdown + NetworkManager, so configure their DNS & firewall manually (for now).
+# Further reading on Linux DNS:
+# https://tailscale.com/blog/sisyphean-dns-client-linux
+
 # Remove the reference to a public IP for this machine in our inventory.
 # This means that Ansible will connect to machines via Tailscale hostname,
 # using Tailscale SSH. We don't need to manage any SSH keys for that.

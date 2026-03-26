@@ -17,11 +17,13 @@
           ansible.builtin.include_vars: vault.yml
         - name: Import user tasks
           ansible.builtin.import_tasks: tasks/user.yml
+          # Useful for baremetal hosts / any host where we did not SSH as root.
+          become: true
 
     - name: Import locale tasks
+      become: true
       ansible.builtin.import_tasks: tasks/locale.yml
       tags: [locale]
-      become: true
 
     - name: Import base packages tasks
       become: true
