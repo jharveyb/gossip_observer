@@ -32,3 +32,6 @@ infra/ansible/vault.yml
 .ansible
 infra/ansible/inventory/hosts.ini*
 infra/ansible/binaries/
+
+# Local planning notes
+PLAN.md
