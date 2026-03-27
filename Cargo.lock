@@ -1891,6 +1891,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "impl_fingerprint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "lightning-types",
+ "observer_common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
