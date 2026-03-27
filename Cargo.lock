@@ -1403,6 +1403,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "hex",
  "ldk-node",
  "lightning-types",
  "observer_common",

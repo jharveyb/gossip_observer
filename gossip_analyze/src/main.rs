@@ -56,6 +56,11 @@ struct NodeAnnInfo {
 
     #[serde_as(as = "Vec<DisplayFromStr>")]
     pub addresses: Vec<SocketAddress>,
+
+    /// Raw feature bits from node_announcement, hex-encoded (big-endian, as
+    /// seen on the wire). Empty string when the node has no features.
+    /// Use `lightning_types::features::NodeFeatures::from_be_bytes` to decode.
+    pub node_features: String,
 }
 
 impl From<NodeAnnouncementInfo> for NodeAnnInfo {
@@ -66,6 +71,13 @@ impl From<NodeAnnouncementInfo> for NodeAnnInfo {
             alias: info.alias().to_string(),
             // TODO: dedupe these addresses? we have duplicates sometimes for some reason
             addresses: info.addresses().to_vec(),
+            // le_flags() returns little-endian bytes; reverse to get the
+            // big-endian (wire / human-readable) hex representation.
+            node_features: {
+                let mut be_bytes = info.features().le_flags().to_vec();
+                be_bytes.reverse();
+                hex::encode(be_bytes)
+            },
         }
     }
 }
