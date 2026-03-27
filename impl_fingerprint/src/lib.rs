@@ -13,3 +13,4 @@ pub mod classifier;
 pub mod db;
 pub mod input;
 pub mod scraper;
+pub mod validate;

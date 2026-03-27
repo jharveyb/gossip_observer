@@ -1,7 +1,7 @@
 use std::fs;
 
 use clap::{Parser, Subcommand};
-use impl_fingerprint::{classifier, input, scraper};
+use impl_fingerprint::{classifier, input, scraper, validate};
 
 #[derive(Parser, Debug)]
 #[command(name = "impl_fingerprint", about = "Lightning node implementation fingerprinter")]
@@ -78,10 +78,13 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Validate { training_set, nodes, channels, db } => {
-            eprintln!(
-                "validate  training_set={training_set}  nodes={nodes}  channels={channels}  \
-                 db={db}  (not yet implemented — Phase 5)"
-            );
+            let training = validate::TrainingSet::load(&training_set)?;
+            let db_json = fs::read_to_string(&db)?;
+            let db = impl_fingerprint::db::FingerprintDb::from_json(&db_json)?;
+            let node_list = input::load_nodes(&nodes)?;
+            let channel_list = input::load_channels(&channels)?;
+            let report = validate::run_validation(&training, &node_list, &channel_list, &db);
+            eprint!("{}", report.summary());
         }
     }
 
