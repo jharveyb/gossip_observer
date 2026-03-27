@@ -1,4 +1,7 @@
+use std::fs;
+
 use clap::{Parser, Subcommand};
+use impl_fingerprint::scraper;
 
 #[derive(Parser, Debug)]
 #[command(name = "impl_fingerprint", about = "Lightning node implementation fingerprinter")]
@@ -52,7 +55,14 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Scrape { output } => {
-            eprintln!("scrape → {output}  (not yet implemented — Phase 2)");
+            let db = scraper::build_db();
+            let json = db.to_json()?;
+            fs::write(&output, &json)?;
+            eprintln!(
+                "scrape → {output}  ({} records across {} implementations)",
+                db.len(),
+                db.entries.len(),
+            );
         }
         Commands::Classify { nodes, channels, db, output } => {
             eprintln!(
