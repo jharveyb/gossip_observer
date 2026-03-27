@@ -56,11 +56,12 @@ gossip_dump_dir  := "./gossip_dump"
 fingerprint_db   := "fingerprint_db.json"
 classifications  := "classifications.json"
 
-# Mainnet bitcoind RPC — matches ~/.bitcoin/bitcoin.conf
-mainnet_rpc := "bitcoinrpc:aB93eXwogdfBTtCpBPY5eCWY3QnWI0Rd@192.168.0.189:8332"
-
-# Signet bitcoind RPC — matches ~/.bitcoin/bitcoin-signet.conf
-signet_rpc  := "signetrpc:br4Jd33TVTeIU2pyasqMXF6txnedr5p4@192.168.0.189:38332"
+# Bitcoind RPC connection strings for gossip_analyze dump.
+# Format: user:password@host:port
+# Set via environment variable or override on the command line:
+#   BITCOIND_RPC_MAINNET=user:pass@host:8332 just fingerprint-dump
+mainnet_rpc := env_var_or_default("BITCOIND_RPC_MAINNET", "user:password@127.0.0.1:8332")
+signet_rpc  := env_var_or_default("BITCOIND_RPC_SIGNET",  "user:password@127.0.0.1:38332")
 
 # Build the fingerprint database from hardcoded scraper records.
 fingerprint-scrape: build
