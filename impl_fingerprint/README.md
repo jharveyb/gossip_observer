@@ -133,30 +133,34 @@ Confusion matrix (predicted → actual):
 | Target | Description |
 |--------|-------------|
 | `just fingerprint-scrape` | Build `fingerprint_db.json` |
-| `just fingerprint-dump` | Mainnet gossip dump via `192.168.0.189:8332` |
-| `just fingerprint-dump-signet` | Signet gossip dump via `192.168.0.189:38332` |
+| `just fingerprint-dump` | Mainnet Lightning gossip dump |
+| `just fingerprint-dump-signet` | Signet Lightning gossip dump |
 | `just fingerprint-classify` | Classify `gossip_dump/` against DB |
-| `just fingerprint-validate ts=path` | Validate against `path` training set |
+| `just fingerprint-validate training_set=path` | Validate against a training-set JSON |
 | `just fingerprint` | `scrape` + `classify` (dump assumed done) |
 
 ---
 
 ## Collecting gossip data
 
-`gossip_analyze dump` connects to the Lightning P2P network, syncs the gossip
-graph, and writes two files to `./gossip_dump/`:
+`gossip_analyze dump` connects to the Lightning P2P network via LDK, syncs the
+gossip graph, and writes two files to `./gossip_dump/`:
 
 | File | Contents |
 |------|----------|
 | `full_node_list.txt` | JSON array of all nodes with `node_announcement` data |
 | `full_channel_list.txt` | JSON array of all channels with fee/CLTV policies |
 
-**Mainnet** (uses `btc` alias / `~/.bitcoin/bitcoin.conf`):
+It requires a local bitcoind RPC connection for UTXO lookups (channel
+capacities). Pass the RPC config in `user:password@host:port` format directly
+to `gossip_analyze dump`, or use the pre-configured justfile targets.
+
+**Mainnet:**
 ```
 just fingerprint-dump
 ```
 
-**Signet** (uses `btcs` alias / `~/.bitcoin/bitcoin-signet.conf`):
+**Signet:**
 ```
 just fingerprint-dump-signet
 ```
@@ -164,7 +168,7 @@ just fingerprint-dump-signet
 The first run takes several hours: LDK needs time to sync gossip from peers
 (convergence threshold: 11,000 nodes stable across 5 checks × 15s), then
 fetches UTXO data for channel capacities from bitcoind (~5 min additional wait).
-Subsequent runs reuse the gossip store in `./gossip_dump/`.
+Subsequent runs reuse the LDK gossip store in `./gossip_dump/`.
 
 ---
 
