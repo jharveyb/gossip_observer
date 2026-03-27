@@ -19,3 +19,4 @@ lightning-types  = "0.3.0"
 
 [dev-dependencies]
 serde_json = "1.0"
+tempfile   = "3"
