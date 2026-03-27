@@ -152,7 +152,9 @@ fn features_v015() -> Vec<FeatureEntry> {
         opt("scid-alias"),                // bit 47
         opt("zero-conf"),                 // bit 51
         opt("keysend"),                   // bit 55
-        opt("script-enforced-lease"),     // bit 2023 (not in hex)
+        // bit 2023 (script-enforced-lease) excluded from heuristic list: absent
+        // from node_feature_hex (253-byte vector) so it would always block
+        // matching when classifying from the stored hex alone.
     ]
 }
 
@@ -226,7 +228,10 @@ fn features_v018() -> Vec<FeatureEntry> {
         opt("keysend"),                   // bit 55
         opt("simple-taproot-chans"),      // bit 81 (new in v0.18)
         opt("simple-taproot-chans-x"),    // bit 181
-        opt("taproot-overlay-chans"),     // bit 2025 (new in v0.18, not in hex)
+        // bit 2025 (taproot-overlay-chans) is intentionally excluded from the
+        // heuristic list: it is absent from node_feature_hex (the vector would
+        // be 253 bytes) so requiring it here would always block matching when
+        // classifying from the stored hex alone.
     ]
 }
 

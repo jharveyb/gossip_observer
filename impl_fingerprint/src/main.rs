@@ -1,7 +1,7 @@
 use std::fs;
 
 use clap::{Parser, Subcommand};
-use impl_fingerprint::scraper;
+use impl_fingerprint::{classifier, input, scraper};
 
 #[derive(Parser, Debug)]
 #[command(name = "impl_fingerprint", about = "Lightning node implementation fingerprinter")]
@@ -65,9 +65,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Classify { nodes, channels, db, output } => {
+            let db_json = fs::read_to_string(&db)?;
+            let db = impl_fingerprint::db::FingerprintDb::from_json(&db_json)?;
+            let node_list = input::load_nodes(&nodes)?;
+            let channel_list = input::load_channels(&channels)?;
+            let results = classifier::classify_all(&node_list, &db, &channel_list);
+            let json = serde_json::to_string_pretty(&results)?;
+            fs::write(&output, &json)?;
             eprintln!(
-                "classify  nodes={nodes}  channels={channels}  db={db}  output={output}  \
-                 (not yet implemented — Phase 3/4)"
+                "classify → {output}  ({} nodes classified)",
+                results.len(),
             );
         }
         Commands::Validate { training_set, nodes, channels, db } => {

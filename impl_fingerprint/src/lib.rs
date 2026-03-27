@@ -9,6 +9,7 @@
 //! - `validate` — run classifier against a known training set, print accuracy
 //!                metrics (Phase 5)
 
+pub mod classifier;
 pub mod db;
 pub mod input;
 pub mod scraper;
