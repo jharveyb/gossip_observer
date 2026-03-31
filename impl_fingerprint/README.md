@@ -18,7 +18,7 @@ Classifies nodes in the Lightning gossip graph by their software implementation
 | **Architecture** | Clean separation: `db.rs` (schema) → `scraper/` (data) → `input.rs` (deser) → `classifier.rs` (logic) → `validate.rs` (scoring). Modular design with each concern isolated in its own module. |
 | **Data model** | `FingerprintDb` with `BTreeMap` keys gives deterministic JSON output. `VersionRecord` is designed with both exact hex and heuristic rules for flexible matching. |
 | **Classifier cascade** | The three-layer approach (exact hex → heuristic bits → policy scoring) short-circuits early for high-confidence matches and falls back gracefully. |
-| **Test coverage** | 121 tests across 6 integration test files + 28 unit tests. Round-trips, edge cases, per-layer correctness, and cross-implementation uniqueness — all covered. |
+| **Test coverage** | 197 tests across 8 integration test files + 55 unit tests. Round-trips, edge cases, per-layer correctness, and cross-implementation uniqueness — all covered. |
 | **Integration with upstream** | Phase 0 changes to `observer_common` and `gossip_analyze` are minimal and surgical: just adding the `node_features` field + plumbing it through proto/type conversions. Upstream tests still pass. |
 | **Documentation** | Module-level doc comments, this README, and inline explanations of the BOLT-9 encoding throughout the codebase. |
 
@@ -58,8 +58,8 @@ Currently covers:
 |---------------|----------|
 | LND | v0.15.5-beta, v0.16.4-beta, v0.17.5-beta, v0.18.4-beta |
 | CLN | v23.11.2, v24.02.2, v24.08.2, v24.11.1 |
-| LDK | stub |
-| Eclair | stub |
+| LDK | v0.0.118, v0.0.125, v0.1.6, v0.2.2 |
+| Eclair | v0.9.0, v0.10.0 |
 
 ---
 
@@ -197,8 +197,8 @@ impl_fingerprint/
 │   │   ├── mod.rs      — build_db() entry point
 │   │   ├── lnd.rs      — LND v0.15–v0.18 hardcoded records
 │   │   ├── cln.rs      — CLN v23.11–v24.11 hardcoded records
-│   │   ├── ldk.rs      — stub
-│   │   └── eclair.rs   — stub
+│   │   ├── ldk.rs      — LDK v0.0.118–v0.2.2 hardcoded records
+│   │   └── eclair.rs   — Eclair v0.9.0–v0.10.0 hardcoded records
 │   ├── input.rs        — InputNode / InputChannel deserialization
 │   ├── classifier.rs   — three-layer classify_node / classify_all
 │   └── validate.rs     — TrainingSet / ValidationReport / run_validation
@@ -206,6 +206,8 @@ impl_fingerprint/
     ├── db_roundtrip.rs
     ├── scraper_lnd.rs
     ├── scraper_cln.rs
+    ├── scraper_ldk.rs
+    ├── scraper_eclair.rs
     ├── input_loading.rs
     ├── classifier.rs
     └── validate.rs
