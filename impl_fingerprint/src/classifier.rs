@@ -146,27 +146,39 @@ fn feature_bits_for_requirement(
 /// (conservative: unrecognised requirements are treated as unsatisfiable).
 fn feature_name_to_bit(name: &str) -> Option<usize> {
     Some(match name {
-        // ── BOLT-9 standard features (kebab names used by the LND scraper) ──
+        // ── BOLT-9 standard features (kebab names used by scrapers) ─────────
         "data-loss-protect"         => 0,   // even=0 mandatory
-        "upfront-shutdown-script"   => 5,   // odd=5 optional
-        "gossip-queries"            => 7,   // odd=7 optional
+        "upfront-shutdown-script"   => 5,   // odd=5 optional (LND), even=4 (CLN)
+        "gossip-queries"            => 7,   // odd=7 optional (LND), even=6 (CLN)
         "tlv-onion"                 => 9,   // odd=9 or even=8 depending on version
+        "gossip-queries-ex"         => 10,  // even=10
         "static-remote-key"         => 12,  // even=12 mandatory
         "payment-addr"              => 14,  // even=14 mandatory
-        "multi-path-payments"       => 17,  // odd=17
-        "wumbo-channels"            => 19,  // odd=19
-        "anchors-zero-fee-htlc-tx"  => 23,  // odd=23
-        "route-blinding"            => 25,  // odd=25
-        "shutdown-any-segwit"       => 27,  // odd=27
-        "amp"                       => 31,  // odd=31
-        "explicit-commitment-type"  => 45,  // odd=45
-        "scid-alias"                => 47,  // odd=47
-        "zero-conf"                 => 51,  // odd=51
+        "multi-path-payments"       => 17,  // odd=17 (LND), even=16 (CLN)
+        "large-channels"            => 18,  // even=18
+        "anchor-outputs"            => 20,  // even=20 (CLN v23.11/v24.02)
+        "wumbo-channels"            => 19,  // odd=19 (LND alias for large-channels)
+        "anchors-zero-fee-htlc-tx"  => 23,  // odd=23 (LND), even=22 (CLN)
+        "route-blinding"            => 25,  // odd=25 (LND), even=24 (CLN)
+        "shutdown-any-segwit"       => 27,  // odd=27 (LND), even=26 (CLN)
+        "dual-fund"                 => 28,  // even=28 (CLN)
+        "amp"                       => 31,  // odd=31 (LND)
+        "quiesce"                   => 34,  // even=34 (CLN)
+        "onion-messages"            => 38,  // even=38 (CLN)
+        "want-peer-backup-storage"  => 40,  // even=40 (CLN)
+        "provide-peer-backup-storage" => 42, // even=42 (CLN)
+        "explicit-commitment-type"  => 45,  // odd=45 (LND alias for channel-type)
+        "channel-type"              => 44,  // even=44
+        "scid-alias"                => 47,  // odd=47 (LND), even=46 (CLN)
+        "zero-conf"                 => 51,  // odd=51 (LND), even=50 (CLN)
         "keysend"                   => 55,  // odd=55
-        "simple-taproot-chans"      => 81,  // odd=81  (final bit, v0.18+)
-        "simple-taproot-chans-x"    => 181, // odd=181 (staging bit, v0.17+)
-        "taproot-overlay-chans"     => 2025, // odd=2025 (v0.18+, not in hex)
-        "script-enforced-lease"     => 2023, // odd=2023 (v0.15–v0.17, not in hex)
+        "splice"                    => 62,  // even=62 (CLN)
+        "simple-taproot-chans"      => 81,  // odd=81  (final bit, LND v0.18+)
+        "simple-taproot-chans-x"    => 181, // odd=181 (staging bit, LND v0.17+)
+        "taproot-overlay-chans"     => 2025, // odd=2025 (LND v0.18+, not in hex)
+        "script-enforced-lease"     => 2023, // odd=2023 (LND v0.15–v0.17, not in hex)
+        "experimental-splice"       => 162, // even=162 (CLN, not in hex)
+        "shutdown-wrong-funding"    => 104, // even=104 (CLN, not in hex)
         _ => return None,
     })
 }
