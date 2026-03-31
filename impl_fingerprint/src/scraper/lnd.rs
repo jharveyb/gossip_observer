@@ -61,38 +61,8 @@ fn lnd_policy() -> PolicyDefaults {
     }
 }
 
-// ── Feature-vector hex computation ──────────────────────────────────────────
-
-/// Compute the big-endian hex encoding of a LND-style feature vector.
-///
-/// LND's `RawFeatureVector.encode` writes bytes big-endian: the byte at index
-/// `length - byteIndex - 1` holds bit `bitIndex` of feature `feature`, where
-/// `byteIndex = feature / 8` and `bitIndex = feature % 8`.
-///
-/// For feature bits up to 55 the vector fits in 7 bytes (bits 0..55 →
-/// ceil(56/8) = 7 bytes).  For bit 181 (staging taproot) the vector needs
-/// ceil(182/8) = 23 bytes.  For bit 2023 (script enforced lease) the vector
-/// needs ceil(2024/8) = 253 bytes — we skip hex for versions with that bit to
-/// avoid a 506-character string (see `node_feature_hex` docs).
-fn bits_to_hex(bits: &[u16]) -> String {
-    if bits.is_empty() {
-        return String::new();
-    }
-    let max_bit = *bits.iter().max().unwrap() as usize;
-    // Skip hex for vectors that would be unreasonably large (> 32 bytes).
-    if max_bit / 8 >= 32 {
-        return String::new();
-    }
-    let length = max_bit / 8 + 1;
-    let mut data = vec![0u8; length];
-    for &bit in bits {
-        let bit = bit as usize;
-        let byte_index = bit / 8;
-        let bit_index = bit % 8;
-        data[length - byte_index - 1] |= 1u8 << bit_index;
-    }
-    hex::encode(data)
-}
+// Re-export shared hex encoder.
+use super::bits_to_hex;
 
 // ── Feature entry helpers ────────────────────────────────────────────────────
 

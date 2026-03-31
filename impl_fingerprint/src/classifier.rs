@@ -126,7 +126,7 @@ fn feature_bits_for_requirement(
     declared_bit: usize,
 ) -> (usize, usize) {
     // mandatory (even), optional (odd)
-    if declared_bit % 2 == 0 {
+    if declared_bit.is_multiple_of(2) {
         (declared_bit, declared_bit + 1)
     } else {
         (declared_bit - 1, declared_bit)
@@ -356,56 +356,56 @@ pub fn classify_node(
     }
 
     // ── Layer 2: heuristic feature bit matching ────────────────────────────
-    if !hex.is_empty() {
-        if let Some(node_be) = hex_to_be_bytes(hex) {
-            // Collect every (impl, version) pair whose heuristic rules all pass.
-            let mut matches: BTreeMap<Implementation, Vec<&str>> = BTreeMap::new();
-            for (&impl_, versions) in &db.entries {
-                for record in versions.values() {
-                    if record.node_features.is_empty() {
-                        continue;
-                    }
-                    if record_matches_heuristic(&node_be, record) {
-                        matches.entry(impl_).or_default().push(&record.version);
-                    }
+    if !hex.is_empty()
+        && let Some(node_be) = hex_to_be_bytes(hex)
+    {
+        // Collect every (impl, version) pair whose heuristic rules all pass.
+        let mut matches: BTreeMap<Implementation, Vec<&str>> = BTreeMap::new();
+        for (&impl_, versions) in &db.entries {
+            for record in versions.values() {
+                if record.node_features.is_empty() {
+                    continue;
+                }
+                if record_matches_heuristic(&node_be, record) {
+                    matches.entry(impl_).or_default().push(&record.version);
                 }
             }
+        }
 
-            match matches.len() {
-                0 => {} // no heuristic match — fall through to layer 3
-                1 => {
-                    let (&impl_, vers) = matches.iter().next().unwrap();
-                    let mut vers = vers.clone();
-                    vers.sort_unstable();
-                    let (vmin, vmax) = version_range(&vers);
-                    return Classification {
-                        pubkey: pubkey.clone(),
-                        implementation: Some(impl_),
-                        version_min: vmin,
-                        version_max: vmax,
-                        confidence: Confidence::High,
-                        layer: 2,
-                    };
-                }
-                _ => {
-                    // Multiple implementations matched — report the best with Medium.
-                    // Prefer the one with more matching versions as a tiebreaker.
-                    let (best_impl, best_vers) = matches
-                        .iter()
-                        .max_by_key(|(_, vs)| vs.len())
-                        .unwrap();
-                    let mut vers = best_vers.clone();
-                    vers.sort_unstable();
-                    let (vmin, vmax) = version_range(&vers);
-                    return Classification {
-                        pubkey: pubkey.clone(),
-                        implementation: Some(*best_impl),
-                        version_min: vmin,
-                        version_max: vmax,
-                        confidence: Confidence::Medium,
-                        layer: 2,
-                    };
-                }
+        match matches.len() {
+            0 => {} // no heuristic match — fall through to layer 3
+            1 => {
+                let (&impl_, vers) = matches.iter().next().unwrap();
+                let mut vers = vers.clone();
+                vers.sort_unstable();
+                let (vmin, vmax) = version_range(&vers);
+                return Classification {
+                    pubkey: pubkey.clone(),
+                    implementation: Some(impl_),
+                    version_min: vmin,
+                    version_max: vmax,
+                    confidence: Confidence::High,
+                    layer: 2,
+                };
+            }
+            _ => {
+                // Multiple implementations matched — report the best with Medium.
+                // Prefer the one with more matching versions as a tiebreaker.
+                let (best_impl, best_vers) = matches
+                    .iter()
+                    .max_by_key(|(_, vs)| vs.len())
+                    .unwrap();
+                let mut vers = best_vers.clone();
+                vers.sort_unstable();
+                let (vmin, vmax) = version_range(&vers);
+                return Classification {
+                    pubkey: pubkey.clone(),
+                    implementation: Some(*best_impl),
+                    version_min: vmin,
+                    version_max: vmax,
+                    confidence: Confidence::Medium,
+                    layer: 2,
+                };
             }
         }
     }

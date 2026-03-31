@@ -47,8 +47,9 @@
 //!   - adds: provide_storage_optional (42)
 //!   - adds: quiescence_optional (35)
 //!   - adds: splicing_optional (63)
+//!
 //!   Conditional (not in default): dual_fund, simple_close,
-//!     anchor_zero_fee_commitments, htlc_hold
+//!   anchor_zero_fee_commitments, htlc_hold
 
 use crate::db::{FeatureEntry, FeatureRequirement, PolicyDefaults, VersionRecord};
 
@@ -66,28 +67,8 @@ fn ldk_policy() -> PolicyDefaults {
     }
 }
 
-// ── Feature-vector hex computation ──────────────────────────────────────────
-
-/// Compute the big-endian hex encoding of the feature vector.
-/// Same encoding as `scraper::lnd::bits_to_hex`.
-fn bits_to_hex(bits: &[u16]) -> String {
-    if bits.is_empty() {
-        return String::new();
-    }
-    let max_bit = *bits.iter().max().unwrap() as usize;
-    if max_bit / 8 >= 32 {
-        return String::new();
-    }
-    let length = max_bit / 8 + 1;
-    let mut data = vec![0u8; length];
-    for &bit in bits {
-        let bit = bit as usize;
-        let byte_index = bit / 8;
-        let bit_index = bit % 8;
-        data[length - byte_index - 1] |= 1u8 << bit_index;
-    }
-    hex::encode(data)
-}
+// Re-export shared hex encoder.
+use super::bits_to_hex;
 
 // ── Feature entry helpers ────────────────────────────────────────────────────
 
