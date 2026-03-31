@@ -194,7 +194,7 @@ impl_fingerprint/
 │   ├── main.rs         — CLI (scrape / classify / validate subcommands)
 │   ├── db.rs           — FingerprintDb schema (VersionRecord, FeatureEntry, …)
 │   ├── scraper/
-│   │   ├── mod.rs      — build_db() entry point
+│   │   ├── mod.rs      — build_db() entry point + shared bits_to_hex()
 │   │   ├── lnd.rs      — LND v0.15–v0.18 hardcoded records
 │   │   ├── cln.rs      — CLN v23.11–v24.11 hardcoded records
 │   │   ├── ldk.rs      — LDK v0.0.118–v0.2.2 hardcoded records
