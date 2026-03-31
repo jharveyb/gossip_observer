@@ -22,10 +22,34 @@
     state: directory
     owner: goss
     group: goss
-    mode: '0755'
+    mode: "0755"
   loop:
     - /var/lib/gossip_archiver
     - /etc/gossip_archiver
+
+- name: Install pipx
+  ansible.builtin.apt:
+    name: pipx
+    state: present
+
+- name: Install DuckDB CLI
+  community.general.pipx:
+    name: duckdb-cli=="{{ duckdb_version }}"
+    state: present
+
+- name: Fix duckdb permissions
+  # For some reason the pipx install of duckdb doesn't make itself executable.
+  # So we need to do it manually.
+  ansible.builtin.file:
+    path: ~/.local/share/pipx/venvs/duckdb-cli/bin/duckdb
+    mode: "0755"
+
+- name: Install DuckDB postgres extension
+  # The 'creates' guard makes this task idempotent: it only runs if no
+  # extensions have been installed yet for the goss user.
+  ansible.builtin.command:
+    cmd: duckdb -c "INSTALL postgres;"
+    creates: ~/.duckdb/extensions/v"{{ duckdb_version }}"/linux_amd64/postgres_scanner.duckdb_extension
 
 - name: Create instance-specific directories
   ansible.builtin.file:
@@ -33,7 +57,7 @@
     state: directory
     owner: goss
     group: goss
-    mode: '0755'
+    mode: "0755"
   loop: "{{ ['/var/lib/gossip_archiver', '/etc/gossip_archiver'] | product(host_archivers) }}"
 
 - name: Deploy archiver config files
@@ -42,7 +66,7 @@
     dest: "/etc/gossip_archiver/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0644"
   loop: "{{ host_archivers }}"
   notify: Restart all gossip archivers
 
@@ -52,7 +76,7 @@
     dest: /usr/local/bin/gossip_archiver
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
   notify: Restart all gossip archivers
 
 - name: Install gossip archiver systemd template
@@ -61,7 +85,7 @@
     dest: /etc/systemd/system/gossip-archiver@.service
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
   notify:
     - Reload systemd config
     - Restart all gossip archivers

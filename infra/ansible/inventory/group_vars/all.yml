@@ -23,6 +23,8 @@ base_pkgs:
   - parted
   - rsync
   - tmux
+  - pipx
+  - git
 
 baremetal_pkgs:
   - fwupd
@@ -46,6 +48,7 @@ bash_config:
   - { line: "shopt -s cmdhist" }
 
 nats_version: "2.12.2"
+duckdb_version: "1.4.4"
 
 nats_instances:
   - name: staging
