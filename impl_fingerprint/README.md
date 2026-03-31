@@ -11,6 +11,19 @@ Classifies nodes in the Lightning gossip graph by their software implementation
 
 ---
 
+## Overview
+
+| Area | Description |
+|------|-------------|
+| **Architecture** | Clean separation: `db.rs` (schema) → `scraper/` (data) → `input.rs` (deser) → `classifier.rs` (logic) → `validate.rs` (scoring). Modular design with each concern isolated in its own module. |
+| **Data model** | `FingerprintDb` with `BTreeMap` keys gives deterministic JSON output. `VersionRecord` is designed with both exact hex and heuristic rules for flexible matching. |
+| **Classifier cascade** | The three-layer approach (exact hex → heuristic bits → policy scoring) short-circuits early for high-confidence matches and falls back gracefully. |
+| **Test coverage** | 85 tests across 5 integration test files + 14 unit tests. Round-trips, edge cases, and per-layer correctness — all covered. |
+| **Integration with upstream** | Phase 0 changes to `observer_common` and `gossip_analyze` are minimal and surgical: just adding the `node_features` field + plumbing it through proto/type conversions. Upstream tests still pass. |
+| **Documentation** | Module-level doc comments, this README, and inline explanations of the BOLT-9 encoding throughout the codebase. |
+
+---
+
 ## Quick start
 
 ```
