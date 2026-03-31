@@ -13,6 +13,25 @@ pub struct Nats {
     pub subject_prefix: String,
 }
 
+// A subsystem to write older data to a long-term storage format we can share
+// with others.
+#[derive(Debug, Deserialize)]
+pub struct DataExport {
+    /// Output directory for Parquet files.
+    pub dir: String,
+    /// Archive timings chunks older than this many days.
+    pub after_days: u32,
+    /// Interval to check for data newly eligible for export.
+    pub interval_secs: u32,
+    /// Set to false to disable archival entirely.
+    pub enabled: bool,
+    /// DuckDB buffer memory limit in MB (it has other in-memory structs we can't
+    /// explicitly limit).
+    pub soft_memory_limit: u32,
+    /// DuckDB total thread count
+    pub threads: u32,
+}
+
 // Constants used to configure how we flush to the DB.
 #[derive(Debug, Deserialize)]
 pub struct Database {
@@ -31,6 +50,7 @@ pub struct Database {
 pub struct ArchiverConfig {
     pub nats: Nats,
     pub database: Database,
+    pub export: DataExport,
     pub console: ConsoleConfig,
     pub db_url: String,
     pub storage_dir: String,
@@ -59,6 +79,10 @@ impl ArchiverConfig {
             "local" => "./archiver".to_string(),
             _ => anyhow::bail!("Unknown ARCHIVER_MODE: {mode}"),
         };
+        // NOTE: this is a suffix to these defaults, not the storage_dir provided
+        // in the config file. So an export dir should be specified in the config
+        // file if not using the default storage_dir.
+        let export_dir = format!("{}/exports", storage_dir);
 
         let cfg = Config::builder()
             // All default config values
@@ -74,6 +98,12 @@ impl ArchiverConfig {
             .set_default("console.listen_addr", "127.0.0.1")?
             .set_default("console.listen_port", 6670)?
             .set_default("console.retention_secs", 120)?
+            .set_default("export.dir", export_dir)?
+            .set_default("export.after_days", 30)?
+            .set_default("export.interval_secs", 21600)?
+            .set_default("export.enabled", true)?
+            .set_default("export.soft_memory_limit", 2048)?
+            .set_default("export.threads", 3)?
             .set_default("storage_dir", storage_dir)?
             .set_default("log_level", "info")?
             .add_source(File::with_name(&cfg_path).required(false))

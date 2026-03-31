@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -6,6 +7,7 @@ use anyhow::bail;
 use async_nats::Message;
 use gossip_archiver::INTER_MSG_DELIM;
 use gossip_archiver::MessageHashMapping;
+use gossip_archiver::chunk_archiver::chunk_archiver_task;
 use gossip_archiver::config::ArchiverConfig;
 use gossip_archiver::nats::nats_reader_with_reconnect;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
@@ -66,11 +68,12 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
     ensure_database_exists(&database_url).await?;
 
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(15)
         .connect(&database_url)
         .await?;
     info!("Initialized TimescaleDB connection");
 
+    let cfg = Arc::new(cfg);
     let root_cancel_token = CancellationToken::new();
     let nats_reader_cfg = (
         cfg.nats.stream_name.clone(),
@@ -86,44 +89,63 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
     let decode_handle =
         tokio::spawn(async move { msg_decoder(raw_msg_rx, msg_tx, decode_cancel_token).await });
     let db_cancel_token = root_cancel_token.clone();
-    let db_handle = tokio::spawn(async move {
-        db_write_handler(
-            pool,
-            buf_raw_rx,
-            buf_timings_rx,
-            buf_meta_rx,
-            buf_hash_mapping_rx,
-            buf_tick_rx,
-            cfg.database.batch_size,
-            db_cancel_token,
-        )
-        .await
+    let db_handle = tokio::spawn({
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        async move {
+            db_write_handler(
+                pool,
+                buf_raw_rx,
+                buf_timings_rx,
+                buf_meta_rx,
+                buf_hash_mapping_rx,
+                buf_tick_rx,
+                cfg.database.batch_size,
+                db_cancel_token,
+            )
+            .await
+        }
     });
     let db_write_ticker_cancel_token = root_cancel_token.clone();
-    let db_write_ticker_handle = tokio::spawn(async move {
-        db_write_ticker(
-            msg_rx,
-            buf_raw_tx,
-            buf_timings_tx,
-            buf_meta_tx,
-            buf_hash_mapping_tx,
-            buf_tick_tx,
-            cfg.database.flush_interval,
-            cfg.database.batch_size,
-            db_write_ticker_cancel_token,
-        )
-        .await
+    let db_write_ticker_handle = tokio::spawn({
+        let cfg = cfg.clone();
+        async move {
+            db_write_ticker(
+                msg_rx,
+                buf_raw_tx,
+                buf_timings_tx,
+                buf_meta_tx,
+                buf_hash_mapping_tx,
+                buf_tick_tx,
+                cfg.database.flush_interval,
+                cfg.database.batch_size,
+                db_write_ticker_cancel_token,
+            )
+            .await
+        }
     });
+
+    // Use a child token for the exporter so that we don't crash the whole
+    // archiver if export fails.
+    let export_cancel_token = root_cancel_token.child_token();
+    let export_handle = tokio::spawn(chunk_archiver_task(pool, cfg, export_cancel_token));
 
     match tokio::try_join!(
         nats_handle,
         decode_handle,
         db_handle,
         db_write_ticker_handle,
+        export_handle,
     ) {
-        Ok((nats_res, decode_res, db_handle_res, db_write_res)) => {
-            info!(nats = ?nats_res, decode = ?decode_res, db_handle = ?db_handle_res, db_write = ?db_write_res, "Final task output");
-            let res = vec![nats_res, decode_res, db_handle_res, db_write_res];
+        Ok((nats_res, decode_res, db_handle_res, db_write_res, export_res)) => {
+            info!(nats = ?nats_res, decode = ?decode_res, db_handle = ?db_handle_res, db_write = ?db_write_res, export = ?export_res, "Final task output");
+            let res = vec![
+                nats_res,
+                decode_res,
+                db_handle_res,
+                db_write_res,
+                export_res,
+            ];
             let mut final_err = false;
             for r in res {
                 if let Err(e) = r {

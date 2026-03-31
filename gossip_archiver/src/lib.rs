@@ -4,6 +4,7 @@ use itertools::Itertools;
 use lightning::util::logger::ExportMessageDirection;
 use twox_hash::xxhash3_64::Hasher as XX3Hasher;
 
+pub mod chunk_archiver;
 pub mod config;
 pub mod nats;
 #[cfg(test)]
