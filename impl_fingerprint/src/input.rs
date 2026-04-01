@@ -43,6 +43,8 @@ pub struct InputNodeAnn {
     pub addresses: Vec<String>,
     /// Node feature bits in **big-endian** hex, exactly as produced by
     /// `gossip_analyze` (LE flags byte-reversed then hex-encoded).
+    /// Absent in older gossip dumps that predate the `node_features` field.
+    #[serde(default)]
     pub node_features: String,
 }
 
