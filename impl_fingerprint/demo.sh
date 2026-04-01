@@ -214,7 +214,7 @@ echo ""
 # ═════════════════════════════════════════════════════════════════════════════
 banner "PHASE 6 ── Test Suite"
 
-info "Running all 197 tests..."
+info "Running all 142 tests..."
 echo ""
 test_output=$(cd "$ROOT" && cargo test -p impl_fingerprint 2>&1)
 # Show only result lines
@@ -244,7 +244,7 @@ info "Phase 2 — Built the binary from source"
 info "Phase 3 — Scraped hardcoded data into fingerprint_db.json (14 records)"
 info "Phase 4 — Classified 18 synthetic nodes across all 3 layers"
 info "Phase 5 — Validated 100% accuracy against the synthetic training set"
-info "Phase 6 — Ran the full 197-test suite"
+info "Phase 6 — Ran the full 142-test suite"
 echo ""
 info "To run against real Lightning Network data:"
 detail "just fingerprint-dump      # takes hours, needs bitcoind"
