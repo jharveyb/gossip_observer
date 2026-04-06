@@ -13,8 +13,44 @@ use tracing::{error, info, warn};
 
 use crate::config::ArchiverConfig;
 
+/// Tables exported alongside each timings chunk. Each entry defines the SQL
+/// query (run via DuckDB's postgres scanner) and the subdirectory for output.
+/// All companion tables are filtered by `first_seen` from `message_first_seen`,
+/// using the same time range as the timings chunk.
+const COMPANION_TABLES: &[CompanionTableDef] = &[
+    CompanionTableDef {
+        table_name: "messages",
+        select_sql: "SELECT m.hash, m.raw, mfs.first_seen \
+                      FROM pg.messages m \
+                      JOIN pg.message_first_seen mfs ON m.hash = mfs.hash",
+    },
+    CompanionTableDef {
+        table_name: "metadata",
+        select_sql: "SELECT md.hash, md.inner_hash, md.type, md.size, md.orig_node, md.scid, mfs.first_seen \
+                      FROM pg.metadata md \
+                      JOIN pg.message_first_seen mfs ON md.hash = mfs.hash",
+    },
+    CompanionTableDef {
+        table_name: "message_hashes",
+        select_sql: "SELECT mh.outer_hash, mh.inner_hash, mfs.first_seen \
+                      FROM pg.message_hashes mh \
+                      JOIN pg.message_first_seen mfs ON mh.outer_hash = mfs.hash",
+    },
+];
+
+struct CompanionTableDef {
+    table_name: &'static str,
+    /// SELECT clause (without WHERE). The time-range filter is appended at
+    /// export time using the `first_seen` column from the JOIN.
+    select_sql: &'static str,
+}
+
 /// Long-running task that periodically exports old `timings` chunks to Parquet
 /// files and records completed exports in `chunk_archive_log`.
+///
+/// For each timings chunk, also exports companion tables (`messages`,
+/// `metadata`, `message_hashes`) for the same time range, using the
+/// `message_first_seen` lookup table to filter by `first_seen`.
 ///
 /// Uses a child cancellation token (not a clone of the root) so archival
 /// failures do NOT cancel NATS ingestion — data collection continues even if
@@ -73,6 +109,7 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
         FROM timescaledb_information.chunks c
         LEFT JOIN chunk_archive_log l
             ON l.range_start = c.range_start AND l.range_end = c.range_end
+               AND l.range_table = 'timings'
         WHERE c.hypertable_name = 'timings'
           AND c.range_end < NOW() - ($1::integer * INTERVAL '1 day')
           AND c.is_compressed = true
@@ -101,48 +138,98 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
         let range_end = row
             .range_end
             .ok_or(anyhow!("Timescale chunk missing range_end"))?;
-        // TODO: also export raw messages and associated non-hypertables
         let duckdb = init_temp_duckdb(cfg).await?;
         let archive_dir = PathBuf::from(&cfg.export.dir);
 
-        let table_name = "timings";
-        match archive_chunk(&duckdb, range_start, range_end, &archive_dir).await {
+        // Export timings data first, before data from any other tables
+        match archive_timings_chunk(&duckdb, range_start, range_end, &archive_dir).await {
             Ok((file_path, row_count, file_size)) => {
-                sqlx::query!(
-                    r#"
-                    INSERT INTO chunk_archive_log
-                        (range_start, range_end, range_table, row_count, file_path, file_size_bytes)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT DO NOTHING
-                    "#,
-                    &range_start,
-                    &range_end,
-                    table_name,
-                    row_count as i64,
-                    &file_path.to_string_lossy(),
-                    file_size as i64
+                record_archive(
+                    pool,
+                    range_start,
+                    range_end,
+                    "timings",
+                    row_count,
+                    &file_path,
+                    file_size,
                 )
-                .execute(pool)
-                .await
-                .context("Failed to insert chunk_archive_log entry")?;
-
+                .await?;
                 info!(
                     %range_start,
                     %range_end,
                     rows = row_count,
                     file_size_mb = file_size / (1024 * 1024),
                     path = %file_path.display(),
-                    "Archived chunk"
+                    "Archived timings chunk"
                 );
                 archived += 1;
             }
             Err(e) => {
-                error!(
-                    error = %e,
-                    %range_start,
-                    %range_end,
-                    "Failed to archive chunk, skipping"
-                );
+                error!(error = %e, %range_start, %range_end, "Failed to archive timings chunk, skipping");
+                cleanup_temp_duckdb(duckdb, cfg).await;
+                continue;
+            }
+        }
+
+        // Export companion tables (messages, metadata, message_hashes)
+        for companion in COMPANION_TABLES {
+            // Skip if already archived for this range. The 'as "exists!"' bit
+            // after the query here is a SQLx type override for the output, that's
+            // Postgres and SQLite compatible. The '!' changes our output type
+            // from Option<bool> (NULLable) to bool. More info:
+            // https://docs.rs/sqlx/latest/sqlx/macro.query.html#type-overrides-output-columns
+            let already_archived = sqlx::query_scalar!(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM chunk_archive_log
+                    WHERE range_start = $1 AND range_end = $2 AND range_table = $3
+                ) as "exists!"
+                "#,
+                &range_start,
+                &range_end,
+                companion.table_name,
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+
+            if already_archived {
+                continue;
+            }
+
+            match archive_companion_table(&duckdb, range_start, range_end, &archive_dir, companion)
+                .await
+            {
+                Ok((file_path, row_count, file_size)) => {
+                    record_archive(
+                        pool,
+                        range_start,
+                        range_end,
+                        companion.table_name,
+                        row_count,
+                        &file_path,
+                        file_size,
+                    )
+                    .await?;
+                    info!(
+                        %range_start,
+                        %range_end,
+                        table = companion.table_name,
+                        rows = row_count,
+                        file_size_mb = file_size / (1024 * 1024),
+                        path = %file_path.display(),
+                        "Archived companion table"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        %range_start,
+                        %range_end,
+                        table = companion.table_name,
+                        "Failed to archive companion table, skipping"
+                    );
+                }
             }
         }
 
@@ -152,17 +239,41 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
     Ok(archived)
 }
 
-/// Export a single 24-hour chunk to a Parquet file using the persistent DuckDB
-/// connection.
+/// Record a successful export in `chunk_archive_log`.
+async fn record_archive(
+    pool: &PgPool,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    table_name: &str,
+    row_count: u64,
+    file_path: &Path,
+    file_size: u64,
+) -> anyhow::Result<()> {
+    let file_path_str = file_path.to_string_lossy().to_string();
+    sqlx::query!(
+        r#"
+        INSERT INTO chunk_archive_log
+            (range_start, range_end, range_table, row_count, file_path, file_size_bytes)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT DO NOTHING
+        "#,
+        &range_start,
+        &range_end,
+        table_name,
+        row_count as i64,
+        &file_path_str,
+        file_size as i64
+    )
+    .execute(pool)
+    .await
+    .context("Failed to insert chunk_archive_log entry")?;
+    Ok(())
+}
+
+/// Export a single 24-hour timings chunk to a Parquet file.
 ///
 /// Returns `(file_path, row_count, file_size_bytes)` on success.
-///
-/// We deliberately omit ORDER BY in the COPY query. DuckDB's postgres scanner
-/// reads in batches (~128K rows each) and streams directly to the Parquet
-/// writer — no full materialisation. The data arrives in compressed-chunk
-/// order, which is `net_timestamp ASC` (our `compress_orderby`), so the output
-/// is naturally sorted without the memory cost of an explicit sort.
-async fn archive_chunk(
+async fn archive_timings_chunk(
     duckdb: &async_duckdb::Client,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
@@ -242,6 +353,84 @@ async fn archive_chunk(
     Ok((out_path, row_count, file_size))
 }
 
+/// Export a companion table (messages, metadata, or message_hashes) for a given
+/// time range by JOINing through `message_first_seen`.
+///
+/// Returns `(file_path, row_count, file_size_bytes)` on success.
+async fn archive_companion_table(
+    duckdb: &async_duckdb::Client,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    archive_dir: &Path,
+    companion: &CompanionTableDef,
+) -> anyhow::Result<(PathBuf, u64, u64)> {
+    let date = range_start.date_naive();
+    let out_path = archive_dir
+        .join(companion.table_name)
+        .join(date.format("%Y").to_string())
+        .join(date.format("%m").to_string())
+        .join(date.format("%d").to_string())
+        .join(format!(
+            "{}_{}.parquet",
+            companion.table_name,
+            date.format("%Y-%m-%d")
+        ));
+
+    if out_path.try_exists()? {
+        warn!(path = %out_path.display(), table = companion.table_name, "Parquet file already exists, recording in log");
+        let file_size = tokio::fs::metadata(&out_path).await?.len();
+        let row_count = count_parquet_rows(duckdb, &out_path).await?;
+        return Ok((out_path, row_count, file_size));
+    }
+
+    if let Some(parent) = out_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create archive directory: {}", parent.display()))?;
+    }
+
+    let out_path_str = out_path.to_string_lossy().into_owned();
+    let range_start_str = range_start.to_rfc3339();
+    let range_end_str = range_end.to_rfc3339();
+    let select_sql = companion.select_sql.to_string();
+
+    let row_count: u64 = duckdb
+        .conn(move |conn| {
+            // Use a ROW_GROUP_SIZE smaller than the default of 122880 here, since we want
+            // the total row count always be greater than this parameter.
+            let copy_sql = format!(
+                "COPY (
+                    {select_sql}
+                    WHERE mfs.first_seen >= '{range_start_str}'::timestamptz
+                      AND mfs.first_seen < '{range_end_str}'::timestamptz
+                ) TO '{out_path_str}'
+                (FORMAT 'parquet', COMPRESSION 'zstd', COMPRESSION_LEVEL 10, ROW_GROUP_SIZE 61440);"
+            );
+
+            if let Err(e) = conn.execute_batch(&copy_sql) {
+                let _ = std::fs::remove_file(&out_path_str);
+                error!(error = %e, "Failed to export companion Parquet file");
+                return Err(e);
+            }
+
+            let parquet_count = conn.query_row(
+                &format!("SELECT COUNT(*) FROM read_parquet('{out_path_str}')"),
+                [],
+                |row| row.get(0),
+            );
+            if parquet_count.is_err() {
+                error!(error = ?parquet_count, "Failed to count companion Parquet rows");
+            }
+
+            parquet_count
+        })
+        .await?;
+
+    let file_size = tokio::fs::metadata(&out_path).await?.len();
+
+    Ok((out_path, row_count, file_size))
+}
+
 async fn init_temp_duckdb(cfg: &ArchiverConfig) -> anyhow::Result<async_duckdb::Client> {
     let archive_dir = PathBuf::from(&cfg.export.dir);
 
@@ -258,9 +447,6 @@ async fn init_temp_duckdb(cfg: &ArchiverConfig) -> anyhow::Result<async_duckdb::
         .context("Failed to create DuckDB temp directory")?;
     let db_path = tmp_dir.join("archiver.duckdb");
 
-    // Initialize DuckDB once. The connection lives for the lifetime of this
-    // task and is reused across all chunk exports — avoiding repeated
-    // INSTALL/LOAD/ATTACH on every export.
     let duckdb = ClientBuilder::new()
         .path(db_path)
         .open()

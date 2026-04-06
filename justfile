@@ -1,3 +1,4 @@
+# By default, a workspace build won't require a connection to a DB.
 export SQLX_OFFLINE := "true"
 
 build:
@@ -14,10 +15,10 @@ clean-archiver-state:
     rm ./data/mainnet/gossip_archive.duckdb
     rm ./data/mainnet/gossip_archive.duckdb.wal
 
-gen-sql:
+gen-sql $SQLX_OFFLINE="false":
     cargo sqlx prepare --workspace
 
-check-sql:
+check-sql $SQLX_OFFLINE="false":
     cargo sqlx prepare --workspace --check
 
 tracing-collector-prod: build-prod
