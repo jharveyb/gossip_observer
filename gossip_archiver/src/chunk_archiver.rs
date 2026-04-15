@@ -36,6 +36,11 @@ const COMPANION_TABLES: &[CompanionTableDef] = &[
                       FROM pg.message_hashes mh \
                       JOIN pg.message_first_seen mfs ON mh.outer_hash = mfs.hash",
     },
+    CompanionTableDef {
+        table_name: "message_first_seen",
+        select_sql: "SELECT mfs.hash, mfs.first_seen \
+                      FROM pg.message_first_seen mfs",
+    },
 ];
 
 struct CompanionTableDef {
@@ -131,7 +136,8 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
     for row in rows {
         // Fail if our range is missing either start or end, as recording a range
         // 'wider' than the actual exported data means that we will end up with
-        // some unexported data. Restated, the
+        // some unexported data. This should never be an issue, since we're only
+        // selecting already-compressed chunks.
         let range_start = row
             .range_start
             .ok_or(anyhow!("Timescale chunk missing range_start"))?;
@@ -171,72 +177,151 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
             }
         }
 
-        // Export companion tables (messages, metadata, message_hashes)
+        // Export companion tables (messages, metadata, message_hashes, message_first_seen)
+        archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir).await?;
+
+        cleanup_temp_duckdb(duckdb, cfg).await;
+    }
+
+    // Second pass: backfill companion exports for chunks where timings was
+    // archived previously but some companion table is missing (e.g. after
+    // adding a new entry to COMPANION_TABLES).
+    let backfill_rows: Vec<UnarchivedChunkRange> = sqlx::query_as!(
+        UnarchivedChunkRange,
+        r#"
+        SELECT DISTINCT l.range_start, l.range_end
+        FROM chunk_archive_log l
+        WHERE l.range_table = 'timings'
+        ORDER BY l.range_start
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Check if any backfill work is needed before spinning up DuckDB.
+    let mut backfill_needed = false;
+    for row in &backfill_rows {
+        let (Some(rs), Some(re)) = (row.range_start, row.range_end) else {
+            continue;
+        };
         for companion in COMPANION_TABLES {
-            // Skip if already archived for this range. The 'as "exists!"' bit
-            // after the query here is a SQLx type override for the output, that's
-            // Postgres and SQLite compatible. The '!' changes our output type
-            // from Option<bool> (NULLable) to bool. More info:
-            // https://docs.rs/sqlx/latest/sqlx/macro.query.html#type-overrides-output-columns
-            let already_archived = sqlx::query_scalar!(
+            let exists = sqlx::query_scalar!(
                 r#"
                 SELECT EXISTS(
                     SELECT 1 FROM chunk_archive_log
                     WHERE range_start = $1 AND range_end = $2 AND range_table = $3
                 ) as "exists!"
                 "#,
-                &range_start,
-                &range_end,
+                &rs,
+                &re,
                 companion.table_name,
             )
             .fetch_one(pool)
             .await
             .unwrap_or(false);
-
-            if already_archived {
-                continue;
-            }
-
-            match archive_companion_table(&duckdb, range_start, range_end, &archive_dir, companion)
-                .await
-            {
-                Ok((file_path, row_count, file_size)) => {
-                    record_archive(
-                        pool,
-                        range_start,
-                        range_end,
-                        companion.table_name,
-                        row_count,
-                        &file_path,
-                        file_size,
-                    )
-                    .await?;
-                    info!(
-                        %range_start,
-                        %range_end,
-                        table = companion.table_name,
-                        rows = row_count,
-                        file_size_mb = file_size / (1024 * 1024),
-                        path = %file_path.display(),
-                        "Archived companion table"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        %range_start,
-                        %range_end,
-                        table = companion.table_name,
-                        "Failed to archive companion table, skipping"
-                    );
-                }
+            if !exists {
+                backfill_needed = true;
+                break;
             }
         }
+        if backfill_needed {
+            break;
+        }
+    }
 
+    // Note: The same temp DuckDB instance will be used for backfilling each row.
+    // So there won't be log lines about duckdb init/cleanup for each time range
+    // we're backfilling.
+    if backfill_needed {
+        info!("Backfilling missing companion exports for already-archived chunks");
+        let duckdb = init_temp_duckdb(cfg).await?;
+        let archive_dir = PathBuf::from(&cfg.export.dir);
+        for row in backfill_rows {
+            let (Some(range_start), Some(range_end)) = (row.range_start, row.range_end) else {
+                continue;
+            };
+            if let Err(e) =
+                archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir)
+                    .await
+            {
+                error!(error = %e, %range_start, %range_end, "Backfill companion export failed");
+            }
+        }
         cleanup_temp_duckdb(duckdb, cfg).await;
     }
 
     Ok(archived)
+}
+
+/// Export any companion tables that are not yet recorded in `chunk_archive_log`
+/// for the given range. Already-archived companions are skipped.
+async fn archive_missing_companions(
+    pool: &PgPool,
+    duckdb: &async_duckdb::Client,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    archive_dir: &Path,
+) -> anyhow::Result<()> {
+    for companion in COMPANION_TABLES {
+        // Skip if already archived for this range. The 'as "exists!"' bit
+        // after the query here is a SQLx type override for the output, that's
+        // Postgres and SQLite compatible. The '!' changes our output type
+        // from Option<bool> (NULLable) to bool. More info:
+        // https://docs.rs/sqlx/latest/sqlx/macro.query.html#type-overrides-output-columns
+        let already_archived = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM chunk_archive_log
+                WHERE range_start = $1 AND range_end = $2 AND range_table = $3
+            ) as "exists!"
+            "#,
+            &range_start,
+            &range_end,
+            companion.table_name,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+
+        if already_archived {
+            continue;
+        }
+
+        match archive_companion_table(duckdb, range_start, range_end, archive_dir, companion).await
+        {
+            Ok((file_path, row_count, file_size)) => {
+                record_archive(
+                    pool,
+                    range_start,
+                    range_end,
+                    companion.table_name,
+                    row_count,
+                    &file_path,
+                    file_size,
+                )
+                .await?;
+                info!(
+                    %range_start,
+                    %range_end,
+                    table = companion.table_name,
+                    rows = row_count,
+                    file_size_mb = file_size / (1024 * 1024),
+                    path = %file_path.display(),
+                    "Archived companion table"
+                );
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    %range_start,
+                    %range_end,
+                    table = companion.table_name,
+                    "Failed to archive companion table, skipping"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Record a successful export in `chunk_archive_log`.
@@ -289,12 +374,25 @@ async fn archive_timings_chunk(
         .join(format!("timings_{}.parquet", date.format("%Y-%m-%d")));
 
     // If the file already exists (e.g. a crash after export but before
-    // chunk_archive_log insert), record it without re-exporting.
+    // chunk_archive_log insert), try to record it without re-exporting.
+    // If the file is corrupt (e.g. interrupted mid-write), delete it and
+    // fall through to re-export.
     if out_path.try_exists()? {
-        warn!(path = %out_path.display(), "Parquet file already exists, recording in log");
         let file_size = tokio::fs::metadata(&out_path).await?.len();
-        let row_count = count_parquet_rows(duckdb, &out_path).await?;
-        return Ok((out_path, row_count, file_size));
+        match count_parquet_rows(duckdb, &out_path).await {
+            Ok(row_count) => {
+                warn!(path = %out_path.display(), "Parquet file already exists, recording in log");
+                return Ok((out_path, row_count, file_size));
+            }
+            Err(e) => {
+                warn!(
+                    path = %out_path.display(),
+                    error = %e,
+                    "Existing Parquet file is corrupt, deleting and re-exporting"
+                );
+                tokio::fs::remove_file(&out_path).await?;
+            }
+        }
     }
 
     if let Some(parent) = out_path.parent() {
@@ -377,10 +475,22 @@ async fn archive_companion_table(
         ));
 
     if out_path.try_exists()? {
-        warn!(path = %out_path.display(), table = companion.table_name, "Parquet file already exists, recording in log");
         let file_size = tokio::fs::metadata(&out_path).await?.len();
-        let row_count = count_parquet_rows(duckdb, &out_path).await?;
-        return Ok((out_path, row_count, file_size));
+        match count_parquet_rows(duckdb, &out_path).await {
+            Ok(row_count) => {
+                warn!(path = %out_path.display(), table = companion.table_name, "Parquet file already exists, recording in log");
+                return Ok((out_path, row_count, file_size));
+            }
+            Err(e) => {
+                warn!(
+                    path = %out_path.display(),
+                    table = companion.table_name,
+                    error = %e,
+                    "Existing Parquet file is corrupt, deleting and re-exporting"
+                );
+                tokio::fs::remove_file(&out_path).await?;
+            }
+        }
     }
 
     if let Some(parent) = out_path.parent() {

@@ -16,10 +16,16 @@ ORDER BY
         proc_name,
         hypertable_name;
 
+-- all background jobs
 SELECT
         *
 FROM
         timescaledb_information.jobs;
+
+-- job status
+SELECT job_id, proc_name, job_status, total_runs, total_successes, total_failures, last_run_status, last_run_duration
+FROM timescaledb_information.job_stats js
+JOIN timescaledb_information.jobs j USING (job_id) WHERE proc_name LIKE '%first_seen%';
 
 -- table sizes, including internal / compressed tables
 SELECT
@@ -52,7 +58,10 @@ SELECT
         (before_total::numeric / after_total ) AS comp_ratio
 FROM totals;
 
--- job status
-SELECT job_id, proc_name, job_status, total_runs, total_successes, total_failures, last_run_status, last_run_duration
-FROM timescaledb_information.job_stats js
-JOIN timescaledb_information.jobs j USING (job_id) WHERE proc_name LIKE '%first_seen%';
+-- chunk archival log
+SELECT * FROM public.chunk_archive_log
+ORDER BY range_start ASC, range_table ASC;
+
+-- existing hypertables (compressed tables)
+SELECT * FROM timescaledb_information.chunks WHERE hypertable_name LIKE 'timings' ORDER BY range_start;
+

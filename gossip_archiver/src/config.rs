@@ -99,9 +99,14 @@ impl ArchiverConfig {
             .set_default("console.listen_port", 6670)?
             .set_default("console.retention_secs", 120)?
             .set_default("export.dir", export_dir)?
-            .set_default("export.after_days", 30)?
+            // Our hypertables are compressed after 7 days, so this provides some buffer
+            // before data export.
+            .set_default("export.after_days", 14)?
             .set_default("export.interval_secs", 21600)?
             .set_default("export.enabled", true)?
+            // Our temp DuckDB will be running on the same machine as the main
+            // TimescaleDB instance, so we want a conservative value here. Spilling
+            // to disk during export is fine, it just makes export a bit slower.
             .set_default("export.soft_memory_limit", 2048)?
             .set_default("export.threads", 3)?
             .set_default("storage_dir", storage_dir)?

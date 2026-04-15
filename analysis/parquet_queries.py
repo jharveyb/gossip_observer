@@ -54,7 +54,7 @@ def parquet_path(data_dir: str, table: str, date: str) -> str:
 
 def load_day(conn: duckdb.DuckDBPyConnection, data_dir: str, date: str) -> None:
     """Register Parquet files for a single day as DuckDB views."""
-    for table in ["timings", "metadata"]:
+    for table in ["timings", "metadata", "message_first_seen"]:
         path = parquet_path(data_dir, table, date)
         if not os.path.exists(path):
             print(f"  WARNING: missing {path}")
@@ -88,38 +88,28 @@ def query_outer_hash_propagation(
 ) -> pl.DataFrame:
     """Propagation delay percentiles per message, from raw timings.
 
-    Equivalent to test_queries.query_outer_hash_propagation but computed
-    from raw data instead of ca_msg_propagation_global_1h tdigest sketches.
+    Joins `message_first_seen` for the global first_seen timestamp. This
+    avoids a self-join on timings and gives correct results across
+    multi-day queries (where MIN(net_timestamp) within the window would
+    miss messages that first appeared earlier).
     """
     type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
     sql = f"""
-    WITH per_hash AS (
-        SELECT
-            t.hash,
-            COUNT(*) AS total_peers,
-            MIN(t.net_timestamp) AS first_seen
-        FROM timings t
-        JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 1
-          AND m.type IN (1, 2, 3)
-          {type_filter}
-        GROUP BY t.hash
-        HAVING COUNT(*) >= {peer_cutoff}
-    )
     SELECT
-        ph.total_peers,
-        quantile_cont(epoch(t.net_timestamp) - epoch(ph.first_seen), 0.05) AS p05,
-        quantile_cont(epoch(t.net_timestamp) - epoch(ph.first_seen), 0.25) AS p25,
-        quantile_cont(epoch(t.net_timestamp) - epoch(ph.first_seen), 0.50) AS p50,
-        quantile_cont(epoch(t.net_timestamp) - epoch(ph.first_seen), 0.75) AS p75,
-        quantile_cont(epoch(t.net_timestamp) - epoch(ph.first_seen), 0.95) AS p95
-    FROM per_hash ph
-    JOIN timings t ON t.hash = ph.hash
+        COUNT(*) AS total_peers,
+        quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.05) AS p05,
+        quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.25) AS p25,
+        quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.50) AS p50,
+        quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.75) AS p75,
+        quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.95) AS p95
+    FROM timings t
     JOIN metadata m ON t.hash = m.hash
+    JOIN message_first_seen mfs ON t.hash = mfs.hash
     WHERE t.dir = 1
       AND m.type IN (1, 2, 3)
       {type_filter}
-    GROUP BY ph.hash, ph.total_peers
+    GROUP BY t.hash, mfs.first_seen
+    HAVING COUNT(*) >= {peer_cutoff}
     """
     return run_query(conn, sql)
 
