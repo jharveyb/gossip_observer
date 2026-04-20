@@ -180,6 +180,29 @@ Spreads startups over 0-N seconds to avoid simultaneous resource access. Use lar
 
 ## Rust Code Patterns
 
+### sqlx Query Macros vs Runtime Queries
+
+**Use `sqlx::query!` (compile-time checked) for tables defined in our migrations, and `sqlx::query` (runtime) for TimescaleDB extension views:**
+
+```rust
+// ✅ Our tables — use the macro for compile-time type checking
+sqlx::query!(
+    "INSERT INTO chunk_archive_log (range_start, range_end, row_count) VALUES ($1, $2, $3)",
+    range_start, range_end, row_count
+)
+
+// ✅ TimescaleDB extension views — use runtime query
+sqlx::query(
+    "SELECT c.range_start, c.range_end
+     FROM timescaledb_information.chunks c
+     WHERE c.hypertable_name = 'timings'"
+)
+```
+
+**Why:** `sqlx::query!` validates SQL against a real database at compile time (via `DATABASE_URL` or the `.sqlx/` offline cache). The `timescaledb_information` schema only exists when the TimescaleDB extension is installed — it's absent in plain PostgreSQL, CI containers, and fresh dev environments. Building with the macro against these views would fail `cargo sqlx prepare` and break offline builds.
+
+Tables we create in `migrations/` are fine because anyone running `cargo sqlx prepare` has already applied them.
+
 ### Import Style
 
 **Import frequently-used types directly instead of using fully-qualified paths:**
@@ -797,3 +820,167 @@ Store mnemonics and DB passwords in vault, keyed by instance UUID.
 - Controllers: No secrets needed (reads public network data, exposes internal gRPC only)
 
 If a playbook includes `vault.yml` but doesn't use any vault variables, the vault file will still be loaded (no harm, just unnecessary).
+
+## TimescaleDB Patterns
+
+### Compressed Chunk Query Performance
+
+**Align query step sizes to the hypertable chunk interval:**
+
+When iterating over a compressed hypertable in time-range steps (e.g., a backfill job), the step size must match the chunk interval. TimescaleDB compresses entire chunks, so querying a 2-hour window within a 1-day compressed chunk still decompresses the whole chunk. With 12 sub-chunk queries per day, you decompress each chunk 12 times.
+
+```sql
+-- ❌ Bad — 2-hour steps on a 1-day chunk interval, decompresses each chunk 12x
+step INTERVAL := interval '2 hours';
+
+-- ✅ Good — matches the chunk interval, each chunk decompressed once
+step INTERVAL := interval '1 day';
+```
+
+### Background Job Patterns
+
+**Use `add_job` / `delete_job` for one-shot backfill jobs:**
+
+TimescaleDB's `add_job()` runs functions as managed background jobs with automatic retry. For one-shot backfills, the job self-deletes on completion. If dependent jobs should only start after the backfill (e.g., a recurring job that assumes historical data is complete), schedule them from within the backfill function:
+
+```sql
+CREATE OR REPLACE FUNCTION backfill_example(job_id INT, config JSONB)
+RETURNS VOID AS $$
+BEGIN
+  -- ... backfill logic ...
+
+  -- Schedule the recurring job only after backfill is complete
+  PERFORM add_job('recurring_example', '1 hour');
+  PERFORM delete_job(job_id);
+END;
+$$ LANGUAGE plpgsql;
+
+-- The interval here is the retry delay if the job fails.
+-- TimescaleDB skips a scheduled run when the previous is still active,
+-- so there is no risk of parallel execution.
+SELECT add_job('backfill_example', '1 minute', initial_start => now());
+```
+
+The `(job_id INT, config JSONB)` signature is required by TimescaleDB's `add_job()` API, even if `config` is unused.
+
+### T-digest Bucket-Boundary Leakage in Continuous Aggregates
+
+When filtering pre-aggregated CA rows by `first_seen` to include/exclude whole buckets, the `ts_pct` t-digest inside an included bucket still contains timestamps for the **entire** bucket window. If the intended cutoff falls mid-bucket (e.g., `origin_time + INTERVAL '1 hour'` lands 30 minutes into a 1-hour bucket), the last 30 minutes of timestamps leak into the `rollup()` result and inflate tail percentiles (p75, p95).
+
+```sql
+-- ❌ Approximate — includes timestamps beyond origin_time + 1h from boundary buckets
+SELECT approx_percentile(0.95, rollup(ca.ts_pct)) - EXTRACT(EPOCH FROM o.origin_time)
+FROM ca_msg_propagation_per_collector_1h ca
+WHERE ca.first_seen <= o.origin_time + INTERVAL '1 hour'
+
+-- ✅ Exact — per-record filtering on raw timings
+SELECT quantile_cont(epoch(t.net_timestamp) - epoch(o.origin_time), 0.95)
+FROM timings t
+WHERE t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
+```
+
+This applies to any CA with `percentile_agg` / `rollup()`. The trade-off is precision vs speed: CA-based queries avoid scanning raw hypertable chunks but accept bucket-boundary imprecision. For propagation delay analysis, the per-record Parquet/DuckDB approach (`analysis/parquet_queries.py`) gives exact results; the TimescaleDB CA approach (`analysis/test_queries.py`) is faster but leaks at bucket edges.
+
+## Data Export and Analysis Patterns
+
+### Parquet Export with Time-Range Filtering
+
+The `message_first_seen` table maps each message hash to its earliest `net_timestamp` from the timings hypertable. This enables time-range exports of non-hypertables (messages, metadata, message_hashes) by JOINing through `message_first_seen`:
+
+```sql
+-- Export messages first seen on a given day
+SELECT m.hash, m.raw, mfs.first_seen
+FROM messages m
+JOIN message_first_seen mfs ON m.hash = mfs.hash
+WHERE mfs.first_seen >= '2026-03-01' AND mfs.first_seen < '2026-03-02'
+```
+
+### Parquet Recovery: file existence ≠ validity
+
+When a file export is interrupted mid-write (e.g. SIGINT, OOM kill), a truncated file is left on disk. If your recovery path checks only existence — `if path.exists(): skip` — it will silently treat the corrupt file as complete, and downstream readers fail with cryptic "file too small" / "invalid footer" errors.
+
+**Verify readability, not just existence.** For Parquet, run a cheap metadata read (DuckDB `SELECT COUNT(*) FROM read_parquet(...)` uses the footer, no full scan). If it fails, delete the file and re-export:
+
+```rust
+if out_path.try_exists()? {
+    match count_parquet_rows(duckdb, &out_path).await {
+        Ok(row_count) => return Ok((out_path, row_count, file_size)),  // valid, reuse
+        Err(e) => {
+            warn!(error = %e, "Existing file is corrupt, re-exporting");
+            tokio::fs::remove_file(&out_path).await?;  // fall through to re-export
+        }
+    }
+}
+```
+
+### Marimo Notebook Patterns
+
+**Cell output must be a top-level expression:**
+
+In marimo, a cell's displayed output is its last top-level expression. `if/else` blocks are statements, not expressions, so content inside them won't display. Assign to a variable and reference it as the last line:
+
+```python
+# ❌ No output — if/else is a statement
+if condition:
+    mo.md("result")
+
+# ✅ Works — variable as last expression
+if condition:
+    _output = mo.md("result")
+else:
+    _output = mo.md("no data")
+_output
+```
+
+**Vegafusion + interactive charts workaround:**
+
+`mo.ui.altair_chart()` doesn't work when vegafusion is enabled (vegafusion compiles to vega specs, but marimo selection logic needs vega-lite). Use `mo.ui.anywidget(alt.JupyterChart(...))` instead:
+
+```python
+# ❌ Broken with vegafusion
+mo.ui.altair_chart(_chart)
+
+# ✅ Works with vegafusion
+mo.ui.anywidget(alt.JupyterChart(_chart))
+```
+
+See: https://github.com/marimo-team/marimo/issues/4601
+
+## Gossip Data Semantics
+
+### `timings.dir=2` Counts ≠ Actual Peer Fanout
+
+The `LogWriterExporter` in `observer_common/src/logging.rs` only exports log lines for peers in the `pending_notifier` filter set, which is populated after `pending_connection_delay` seconds (default 10 minutes) from successful connection (`gossip_collector/src/peer_conn_manager.rs`). Each `dir=2` row represents one peer-send event (not one broadcast), so `COUNT(*) / COUNT(DISTINCT hash)` for `dir=2` per collector tells you the number of **stable** peers, not total peers.
+
+When outbound receipt counts look suspiciously low (e.g., 2 per message), the pending-peer filter is almost always why. The actual LN gossip broadcast reaches many more peers — they're just not logged.
+
+### LDK Silently Drops `channel_update`s for Unknown Channels
+
+LDK's `P2PGossipSync` only relays `channel_update` messages for channels already present in its network graph. If a collector broadcasts a `channel_update` for a channel that other collectors' peers don't know about (e.g., the collector's own private/unannounced channels, or very new channels without a preceding `channel_announcement`), those peers will silently drop it rather than relay it onward.
+
+This manifests as: "origin collector emitted `dir=2` but no other collector ever logged `dir=1` for that hash" — zero fanout in the `query_collector_fanout` debug query. It is **not** a propagation delay or filter issue; the message simply never enters the broader gossip graph.
+
+When debugging gaps in `query_collector_originated_propagation` or fanout queries, check whether the zero-fanout hashes correspond to channels unique to the origin collector.
+
+## Available MCP Tools
+
+### Bitcoin Knowledge Base (bkb)
+
+The `bkb` MCP server provides lookups for Lightning and Bitcoin protocol specifications:
+
+- `bkb_lookup_bolt` — BOLT (Lightning Network) specs
+- `bkb_lookup_bip` — Bitcoin Improvement Proposals
+- `bkb_lookup_blip` — Bitcoin Lightning Improvement Proposals
+- `bkb_lookup_lud` — LNURL specs
+- `bkb_lookup_nut` — Cashu NUT specs
+- `bkb_search` — Full-text search across all specs
+
+### Verification Commands
+
+After making Rust code changes, always run:
+
+```bash
+cargo clippy --workspace  # Lint check
+cargo test --workspace    # Run tests
+cargo sqlx prepare --workspace  # Update offline query cache if SQL changed
+```
