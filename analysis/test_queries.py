@@ -237,9 +237,21 @@ def bucket_counts(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
 
 
 def summarize_delay(df):
-    """Compute median of each delay percentile across all messages."""
+    """Summarize delay percentiles.
+
+    Handles two shapes:
+    - Per-hash rows (from query_collector_originated_propagation): takes the
+      median of each percentile column across all message hashes.
+    - Pre-aggregated single row (from query_collector_originated_propagation_aggregate):
+      passes through directly, preserving qualifying_messages, total_receipts,
+      and median_peers.
+    """
     pct_cols = ["p05", "p25", "p50", "p75", "p95"]
     available = [c for c in pct_cols if c in df.columns]
+    if "qualifying_messages" in df.columns:
+        # Already a single aggregate row — pass through with consistent column order.
+        keep = [c for c in ["qualifying_messages", "total_receipts", "median_peers"] + available if c in df.columns]
+        return df.select([pl.col(c).round(4) if c in available else pl.col(c) for c in keep])
     return df.select(
         [
             pl.len().alias("messages"),

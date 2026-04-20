@@ -130,40 +130,237 @@ def query_collector_originated_propagation(
     """
     type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
     sql = f"""
+    -- Step 1: Find the earliest time each message was sent outbound (dir=2)
+    -- by ANY of our collectors. This is the "origin time" — the moment the
+    -- message entered the gossip network from our perspective.
     WITH outbound_origins AS (
         SELECT t.hash, MIN(t.net_timestamp) AS origin_time
         FROM timings t
         JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 2
-          AND m.type IN (1, 2, 3)
+        WHERE t.dir = 2                     -- outbound = collector sent to peer
+          AND m.type IN (1, 2, 3)           -- gossip types only (not ping/pong)
           {type_filter}
-        GROUP BY t.hash
+        GROUP BY t.hash                     -- one origin_time per message
     ),
+
+    -- Step 2: For each outbound message, find all inbound receipts (dir=1)
+    -- that arrived within 1 hour of origin. The window function counts how
+    -- many inbound receipts each message got (= how many peers relayed it
+    -- back to any of our collectors).
     inbound_with_origin AS (
         SELECT
             t.hash,
             o.origin_time,
             t.net_timestamp,
+            -- Window function: count rows per hash WITHOUT collapsing them,
+            -- so we can still access individual timestamps later.
             COUNT(*) OVER (PARTITION BY t.hash) AS peer_count
         FROM timings t
         JOIN outbound_origins o ON t.hash = o.hash
         JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 1
+        WHERE t.dir = 1                     -- inbound = peer sent to collector
           AND m.type IN (1, 2, 3)
           {type_filter}
           AND t.net_timestamp >= o.origin_time
           AND t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
+    ),
+
+    -- Step 3: Deduplicate to one row per message hash (for counting messages
+    -- and computing the median peer count without receipt-count weighting).
+    per_hash AS (
+        SELECT DISTINCT i.hash, i.peer_count
+        FROM inbound_with_origin i
+        WHERE peer_count >= {peer_cutoff}   -- only well-propagated messages
+    )
+
+    -- Step 4: Compute aggregate statistics across ALL qualifying messages.
+    -- The JOIN brings back all individual receipt rows so that delay
+    -- percentiles are computed over every receipt, not just per-hash medians.
+    SELECT
+        COUNT(*)                                                            AS qualifying_messages,
+        SUM(p.peer_count)                                                  AS total_receipts,
+        quantile_cont(p.peer_count::DOUBLE, 0.50)                          AS median_peers,
+        -- Delay = seconds between origin (first outbound) and each inbound receipt
+        quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.05) AS p05,
+        quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.25) AS p25,
+        quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.50) AS p50,
+        quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.75) AS p75,
+        quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.95) AS p95
+    FROM per_hash p
+    JOIN inbound_with_origin i ON p.hash = i.hash
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 2b: Outbound message stats (debug)
+# ---------------------------------------------------------------------------
+
+
+def query_outbound_stats(conn: duckdb.DuckDBPyConnection) -> pl.DataFrame:
+    """Count outbound (dir=2) messages per day, by type and collector.
+
+    Useful for diagnosing why collector-originated propagation returns 0 rows.
+    """
+    sql = """
+    SELECT
+        date_trunc('day', t.net_timestamp) AS day,
+        m.type,
+        CASE m.type
+            WHEN 1 THEN 'channel_announcement'
+            WHEN 2 THEN 'node_announcement'
+            WHEN 3 THEN 'channel_update'
+        END AS type_name,
+        t.collector,
+
+        -- Total dir=2 rows for this (day, type, collector).
+        -- Each row = one peer-send event. If a collector sends a message to
+        -- N stable peers, that produces N rows. Low counts (e.g. 2) indicate
+        -- few peers passed the pending_connection_delay filter, NOT few peers
+        -- overall.
+        COUNT(*) AS outbound_receipts,
+
+        -- Distinct message hashes this collector sent outbound.
+        -- NOTE: the same hash can appear in MULTIPLE rows of this output
+        -- (once per collector that sent it). To get the true global distinct
+        -- count, use query 2d instead.
+        COUNT(DISTINCT t.hash) AS unique_outer,
+
+        -- Distinct inner (content) hashes — messages with different outer
+        -- hashes but identical content (re-signed by different nodes) share
+        -- the same inner_hash.
+        COUNT(DISTINCT t.inner_hash) AS unique_inner
+
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 2                     -- outbound only
+      AND m.type IN (1, 2, 3)          -- gossip types (not ping/pong)
+    GROUP BY day, m.type, t.collector   -- one row per (day, type, collector)
+    ORDER BY day, m.type, t.collector
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 2c: Collector fanout with propagation delay (debug)
+# ---------------------------------------------------------------------------
+
+
+def query_collector_fanout(
+    conn: duckdb.DuckDBPyConnection,
+    msg_type: int | None = None,
+) -> pl.DataFrame:
+    """For each collector that originates outbound messages, measure fanout:
+    how many other collectors received the message inbound, how many receipts
+    in total, and the distribution of receipt delays relative to origin_time.
+
+    origin_time is MIN(dir=2 net_timestamp) per (hash, origin_collector).
+    Delay = (inbound receipt at another collector) - origin_time, clamped to
+    the 1-hour window after origin.
+    """
+    type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
+    sql = f"""
+    WITH outbound_ranked AS (
+        SELECT
+            t.hash,
+            t.collector,
+            t.net_timestamp,
+            ROW_NUMBER() OVER (PARTITION BY t.hash ORDER BY t.net_timestamp) AS rn
+        FROM timings t
+        JOIN metadata m ON t.hash = m.hash
+        WHERE t.dir = 2
+          AND m.type IN (1, 2, 3)
+          {type_filter}
+    ),
+    outbound AS (
+        SELECT
+            hash,
+            collector AS origin_collector,
+            net_timestamp AS origin_time
+        FROM outbound_ranked
+        WHERE rn = 1
+    ),
+    inbound_at_others AS (
+        -- LEFT JOIN so origin collectors still appear even when zero fanout
+        -- is observed. Join conditions sit in ON (not WHERE) to preserve
+        -- unmatched outbound rows.
+        SELECT
+            o.origin_collector,
+            o.hash,
+            o.origin_time,
+            t.collector AS receiving_collector,
+            t.net_timestamp AS receipt_time
+        FROM outbound o
+        LEFT JOIN timings t
+            ON o.hash = t.hash
+            AND t.dir = 1
+            AND t.collector <> o.origin_collector
+            AND t.net_timestamp >= o.origin_time
+            AND t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
     )
     SELECT
-        peer_count::BIGINT AS total_peers,
-        quantile_cont(epoch(net_timestamp) - epoch(origin_time), 0.05) AS p05,
-        quantile_cont(epoch(net_timestamp) - epoch(origin_time), 0.25) AS p25,
-        quantile_cont(epoch(net_timestamp) - epoch(origin_time), 0.50) AS p50,
-        quantile_cont(epoch(net_timestamp) - epoch(origin_time), 0.75) AS p75,
-        quantile_cont(epoch(net_timestamp) - epoch(origin_time), 0.95) AS p95
-    FROM inbound_with_origin
-    WHERE peer_count >= {peer_cutoff}
-    GROUP BY hash, peer_count, origin_time
+        date_trunc('day', origin_time)                                          AS day,
+        origin_collector,
+        COUNT(DISTINCT hash)                                                    AS msgs_originated,
+        COUNT(DISTINCT receiving_collector)                                     AS distinct_recv_collectors,
+        COUNT(receipt_time)                                                     AS total_inbound_receipts,
+        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.05)           AS delay_p05,
+        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.25)           AS delay_p25,
+        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.50)           AS delay_p50,
+        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.75)           AS delay_p75,
+        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.95)           AS delay_p95
+    FROM inbound_at_others
+    GROUP BY day, origin_collector
+    ORDER BY day, origin_collector
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 2d: Distinct outbound hash count (debug)
+# ---------------------------------------------------------------------------
+
+
+def query_distinct_outbound_hashes(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Global distinct dir=2 hash count per (day, type).
+
+    Cross-check for 2b and 2c: 2b's unique_outer sum double-counts hashes
+    that multiple collectors relay, so it will be >= this number. 2c's
+    msgs_originated sum (across days) should equal this number.
+    """
+    sql = """
+    -- Cross-check query: how many truly distinct messages were sent outbound
+    -- on each day, regardless of which collector sent them?
+    --
+    -- Use this to verify query 2b and 2c:
+    --   - 2b's SUM(unique_outer) >= this number (because 2b counts per
+    --     collector, so a hash relayed by 3 collectors is counted 3 times)
+    --   - 2c's SUM(msgs_originated) should equal this number (because 2c
+    --     assigns each hash to exactly one origin collector)
+    SELECT
+        date_trunc('day', t.net_timestamp) AS day,
+        m.type,
+        CASE m.type
+            WHEN 1 THEN 'channel_announcement'
+            WHEN 2 THEN 'node_announcement'
+            WHEN 3 THEN 'channel_update'
+        END AS type_name,
+
+        -- True global distinct count (no double-counting across collectors)
+        COUNT(DISTINCT t.hash)       AS distinct_hashes,
+        COUNT(DISTINCT t.inner_hash) AS distinct_inner_hashes,
+
+        -- How many collectors emitted at least one dir=2 event on this day
+        COUNT(DISTINCT t.collector)  AS distinct_collectors
+
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 2
+      AND m.type IN (1, 2, 3)
+    GROUP BY day, m.type
+    ORDER BY day, m.type
     """
     return run_query(conn, sql)
 
@@ -285,7 +482,20 @@ def run_outer(conn: duckdb.DuckDBPyConnection, peer_cutoff: int) -> None:
         print_section(f"1. Outer Hash Propagation Delay: ({label})", df, summary)
         outer_summaries[label] = summary
 
-    collector_originated_cutoff = 10
+    # Debug: show outbound message counts before running collector-originated
+    df = query_outbound_stats(conn)
+    print_section("2b. Outbound Message Stats (dir=2)", df)
+
+    # Debug: fanout — for each origin collector, show how messages it sent
+    # are received at other collectors, with delay percentiles.
+    df = query_collector_fanout(conn)
+    print_section("2c. Collector Fanout with Propagation Delay", df)
+
+    # Debug: cross-check — globally distinct dir=2 hash count per day/type.
+    df = query_distinct_outbound_hashes(conn)
+    print_section("2d. Distinct Outbound Hashes (cross-check)", df)
+
+    collector_originated_cutoff = 5
     df = query_collector_originated_propagation(
         conn, peer_cutoff=collector_originated_cutoff
     )
