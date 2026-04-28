@@ -27,7 +27,7 @@ Run on a specific host, with a specific user:
 
 ## Initial host setup
 
-Use a specific user for `server_init` if root SSH access is not available.
+Note: Use a specific user for `server_init` if root SSH access is not available.
 
 `ansible-playbook server_init.yml --ask-vault-pass --limit $HOSTNAME`
 
@@ -91,3 +91,7 @@ ansible-playbook controller_init.yml
 # Redeploy collectors after a code or config change.
 ansible-playbook collector_deploy.yml --ask-vault-pass --limit collectors-2
 ```
+
+## Sharing collected data
+
+Check out `DATA_SHARING.md` for more info.

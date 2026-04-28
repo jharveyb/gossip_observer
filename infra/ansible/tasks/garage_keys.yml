@@ -1,0 +1,47 @@
+# Per-person read-only keys. Re-runnable: creates new keys for new names,
+# leaves existing keys alone, and does not delete keys removed from the list
+# (revocation is a conscious manual step: `sudo garage key delete reader-<name>`).
+#
+# Credentials are NOT persisted — retrieve them any time with
+# `garage key info --show-secret reader-<name>` on the Garage host, or
+# run the `show_keys` task (see tasks/show_garage_keys.yml).
+
+- name: List existing Garage keys
+  ansible.builtin.command: garage key list
+  register: garage_key_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+- name: Create missing reader keys
+  when: "('reader-' + item) not in garage_key_list.stdout"
+  ansible.builtin.command:
+    cmd: "garage key create reader-{{ item }}"
+  loop: "{{ garage_reader_keys }}"
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+# `garage bucket allow` is idempotent server-side; re-granting existing
+# read access is a no-op.
+- name: Grant read access to reader keys
+  ansible.builtin.command:
+    cmd: >-
+      garage bucket allow
+      --read
+      --key reader-{{ item }}
+      {{ garage_bucket_name }}
+  loop: "{{ garage_reader_keys }}"
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+- name: Remind how to retrieve reader credentials
+  ansible.builtin.debug:
+    msg: >-
+      Reader keys are provisioned on {{ groups['garage'][0] }}. To retrieve
+      credentials for sharing, run
+      `ansible-playbook data_sharing_init.yml --tags show_keys` — or ssh in
+      and run `sudo garage key info --show-secret reader-<name>`.
+  when: garage_reader_keys | length > 0
+  run_once: true

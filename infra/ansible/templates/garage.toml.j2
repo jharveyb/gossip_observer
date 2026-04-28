@@ -1,0 +1,45 @@
+# metadata_dir lives under StateDirectory (/var/lib/garage). data_dir is
+# configurable — point it at a separately-mounted disk by overriding
+# garage_data_dir in host_vars.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "{{ garage_data_dir }}"
+
+db_engine = "{{ garage_db_engine }}"
+metadata_fsync = {{ garage_metadata_fsync | string | lower }}
+metadata_auto_snapshot_interval = "{{ garage_metadata_snapshot_interval }}"
+
+# Replication factor must be identical on every node in the cluster. To grow
+# from 1 → 3 nodes in the future: set replication_factor = 3 in every node's
+# config, add the new nodes' bootstrap_peers entries below, then run
+# `garage layout assign` + `garage layout apply` once from any node.
+replication_factor = {{ garage_replication_factor }}
+consistency_mode = "{{ garage_consistency_mode }}"
+
+rpc_bind_addr = "{{ tailscale_ip + ':' + (garage_rpc_bind_port | string) }}"
+
+# Needed to use the garage CLI from Ansible tasks 
+rpc_public_addr = "{{ tailscale_ip + ':' + (garage_rpc_bind_port | string) }}"
+rpc_secret = "{{ garage_rpc_secret }}"
+
+{% if garage_bootstrap_peers | length > 0 %}
+bootstrap_peers = [
+{% for peer in garage_bootstrap_peers %}
+    "{{ peer }}",
+{% endfor %}
+]
+{% else %}
+bootstrap_peers = []
+{% endif %}
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "{{ garage_s3_api_bind_addr }}"
+root_domain = ".s3.garage.local"
+
+[admin]
+api_bind_addr = "{{ tailscale_ip + ':' + (garage_admin_bind_port | string) }}"
+admin_token = "{{ garage_admin_token }}"
+# Prometheus scrapes GET /metrics with `Authorization: Bearer <metrics_token>`.
+# Kept separate from admin_token so read-only scraping doesn't require handing
+# out the full admin credential.
+metrics_token = "{{ garage_metrics_token }}"

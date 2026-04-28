@@ -1,0 +1,127 @@
+# Compute whether data_dir is "external" — i.e. outside the systemd
+# StateDirectory tree. External paths need to be pre-created, pre-chowned,
+# and added to the service's ReadWritePaths (done via garage.service.j2).
+- name: Detect external Garage data_dir
+  ansible.builtin.set_fact:
+    garage_data_dir_is_external: "{{ not garage_data_dir.startswith('/var/lib/garage/') }}"
+
+- name: Get Tailscale IP address
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Create garage system group
+  ansible.builtin.group:
+    name: garage
+    system: true
+
+- name: Create garage system user
+  ansible.builtin.user:
+    name: garage
+    group: garage
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    home: /var/lib/garage
+
+- name: Create Garage config directory
+  ansible.builtin.file:
+    path: /etc/garage
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Pre-create the external data_dir with garage:garage ownership. This runs
+# only when data_dir lives outside /var/lib/garage — otherwise systemd's
+# StateDirectory=garage handles it. Intentionally does NOT create the mount
+# itself; the filesystem must already be mounted at the parent path.
+- name: Ensure external data_dir exists with garage ownership
+  ansible.builtin.file:
+    path: "{{ garage_data_dir }}"
+    state: directory
+    owner: garage
+    group: garage
+    mode: "0750"
+  when: garage_data_dir_is_external
+
+- name: Verify external data_dir parent is a mountpoint
+  ansible.builtin.command: findmnt --target "{{ garage_data_dir }}"
+  register: garage_data_dir_mount
+  changed_when: false
+  failed_when: false
+  when: garage_data_dir_is_external
+
+- name: Warn if external data_dir is not on a separate mount
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ garage_data_dir }} resolves to {{ garage_data_dir_mount.stdout_lines[1] | default('') }}
+      which appears to be on the root filesystem. If you intended to put
+      Garage data on a separate disk, mount it at or above {{ garage_data_dir }}
+      before continuing.
+  when:
+    - garage_data_dir_is_external
+    - garage_data_dir_mount.rc == 0
+    - "'/' == (garage_data_dir_mount.stdout_lines[1].split() | first | default(''))"
+
+# Pre-built musl binary from the upstream release.
+# https://garagehq.deuxfleurs.fr/download/
+- name: Download Garage binary
+  ansible.builtin.get_url:
+    url: "https://garagehq.deuxfleurs.fr/_releases/v{{ garage_version }}/x86_64-unknown-linux-musl/garage"
+    dest: "/usr/local/bin/garage"
+    owner: root
+    group: root
+    mode: "0755"
+    force: false
+
+- name: Deploy Garage configuration
+  ansible.builtin.template:
+    src: garage.toml.j2
+    dest: /etc/garage.toml
+    owner: root
+    group: garage
+    mode: "0640"
+  notify: Restart Garage
+  register: garage_config
+
+- name: Install Garage systemd service
+  ansible.builtin.template:
+    src: garage.service.j2
+    dest: /etc/systemd/system/garage.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd config
+    - Restart Garage
+
+- name: Enable and start Garage
+  ansible.builtin.systemd:
+    name: garage
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for Garage admin API to respond
+  ansible.builtin.wait_for:
+    host: "{{ tailscale_ip }}"
+    port: "{{ garage_admin_bind_port }}"
+    timeout: 30
+
+- name: Bootstrap cluster layout
+  ansible.builtin.import_tasks: garage_bootstrap.yml
+  tags:
+    - garage_bootstrap
+
+- name: Create or reconcile reader keys
+  ansible.builtin.import_tasks: garage_keys.yml
+  tags:
+    - garage_keys
+
+# Display-only helper for operators onboarding researchers. Never runs in a
+# normal playbook invocation — only when the `show_keys` tag is requested.
+- name: Show Garage key credentials (tag-gated)
+  ansible.builtin.import_tasks: show_garage_keys.yml
+  tags:
+    - never
+    - show_keys

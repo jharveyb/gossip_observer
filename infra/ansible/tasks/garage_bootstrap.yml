@@ -1,0 +1,109 @@
+# One-time cluster bootstrap. All tasks run_once on the first host in the
+# [garage] group, so repeated plays (or future multi-node expansions) don't
+# re-bootstrap.
+#
+# This task is idempotent against three failure modes:
+#   - Cluster never initialized: creates layout v1, bucket, and the
+#     archiver-sync write key.
+#   - Cluster partially initialized (layout applied but bootstrap failed
+#     later): detects existing layout/bucket/key and picks up where the
+#     previous run left off.
+#   - Cluster fully initialized: all tasks short-circuit.
+#
+# Key credentials are NOT persisted to disk — `garage key info --show-secret
+# <name>` is the source of truth, queried on demand by rclone_sync.yml and
+# the show_keys task.
+#
+# To expand from 1 → N nodes later:
+#   1. Add new host(s) to [garage] and update garage_bootstrap_peers.
+#   2. Bump garage_replication_factor to match N (must be identical on every
+#      node).
+#   3. Re-run the playbook. The layout-version detection below will see the
+#      new node missing from the current layout, assign it, and apply
+#      version <current+1>.
+
+- name: Gather local Garage node ID
+  ansible.builtin.command: garage node id -q
+  register: garage_node_id_result
+  changed_when: false
+  check_mode: false
+
+- name: Store node ID as fact
+  ansible.builtin.set_fact:
+    garage_node_id: "{{ garage_node_id_result.stdout.split('@')[0] }}"
+
+- name: Get Tailscale IP address
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
+- name: Bootstrap Garage cluster (layout + bucket + archiver-sync key)
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+  block:
+    # --- Layout ---
+    # `garage layout apply --version N` requires N == current_version + 1, so
+    # we read the current version from `layout show` rather than hardcoding 1.
+    - name: Fetch current cluster layout
+      ansible.builtin.command: garage layout show
+      register: garage_layout_show
+      changed_when: false
+
+    - name: Parse current layout version
+      ansible.builtin.set_fact:
+        garage_current_layout_version: >-
+          {{ ((garage_layout_show.stdout
+               | regex_findall('Current cluster layout version:\s*(\d+)'))
+              + ['0']) | first | int }}
+
+    - name: Assign each Garage node to the layout if missing
+      ansible.builtin.command:
+        cmd: >-
+          garage layout assign {{ hostvars[item].garage_node_id }}
+          --zone {{ garage_zone }}
+          --capacity {{ garage_node_capacity }}
+          --tag {{ item }}
+      loop: "{{ groups['garage'] }}"
+      register: garage_layout_assign
+      changed_when: true
+      # Match on the first 16 hex chars (short form used by `layout show`).
+      when: hostvars[item].garage_node_id[:16] not in garage_layout_show.stdout
+
+    - name: Apply layout if any node was newly assigned
+      ansible.builtin.command:
+        cmd: "garage layout apply --version {{ garage_current_layout_version | int + 1 }}"
+      when: garage_layout_assign.results | selectattr('changed', 'equalto', true) | list | length > 0
+      changed_when: true
+
+    # --- Bucket ---
+    - name: Check whether bucket exists
+      ansible.builtin.command: "garage bucket info {{ garage_bucket_name }}"
+      register: garage_bucket_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Create bucket
+      ansible.builtin.command: "garage bucket create {{ garage_bucket_name }}"
+      changed_when: true
+      when: garage_bucket_probe.rc != 0
+
+    # --- archiver-sync write key ---
+    - name: Check whether archiver-sync key exists
+      ansible.builtin.command: garage key info archiver-sync
+      register: garage_archiver_key_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Create archiver-sync write key
+      ansible.builtin.command: garage key create archiver-sync
+      changed_when: true
+      when: garage_archiver_key_probe.rc != 0
+
+    # Idempotent: Garage accepts re-granting existing permissions as a no-op.
+    - name: Grant archiver-sync key read+write on bucket
+      ansible.builtin.command:
+        cmd: >-
+          garage bucket allow
+          --read --write
+          --key archiver-sync
+          {{ garage_bucket_name }}
+      changed_when: true

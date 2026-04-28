@@ -1,0 +1,29 @@
+[Unit]
+Description=Garage Data Store
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment='RUST_LOG=garage=info' 'RUST_BACKTRACE=1'
+ExecStart=/usr/local/bin/garage server
+# Static user so an external data_dir on a separate disk can be pre-chowned
+# to a stable UID. (DynamicUser=true would need an ephemeral UID, which
+# would fight us on any path systemd doesn't manage via StateDirectory.)
+User=garage
+Group=garage
+StateDirectory=garage
+ProtectHome=true
+ProtectSystem=strict
+# The metadata path is inside StateDirectory; if garage_data_dir points
+# outside /var/lib/garage (e.g. a separately-mounted disk), include that
+# path here so ProtectSystem=strict doesn't make it read-only.
+ReadWritePaths=/var/lib/garage{% if garage_data_dir_is_external %} {{ garage_data_dir }}{% endif %}
+
+PrivateTmp=true
+NoNewPrivileges=true
+LimitNOFILE=42000
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

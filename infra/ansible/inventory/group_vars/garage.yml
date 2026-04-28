@@ -1,0 +1,66 @@
+# Garage (self-hosted S3) group variables.
+# See https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/
+
+garage_version: "2.3.0"
+
+# --- Storage layout ---
+# metadata_dir is fixed under /var/lib/garage/meta (the systemd unit uses
+# StateDirectory=garage). data_dir can be pointed at a separately-mounted
+# disk by overriding this variable in host_vars; e.g. a large block-storage
+# volume mounted at /mnt/garage-data. The playbook detects "external" paths
+# (anything outside /var/lib/garage/) and pre-creates them with the right
+# ownership + adds them to the service's ReadWritePaths.
+
+# Putting this in the Vault since it'd possibly sensitive
+# garage_data_dir: "/var/lib/garage/data"
+
+# --- Network ---
+# When co-located with Caddy (or rclone running on the same host), keep the S3
+# and admin listeners on loopback and let Caddy expose the public endpoint.
+# Override in host_vars if Garage must be reachable on a private network.
+garage_s3_api_bind_addr: "127.0.0.1:3900"
+
+# Specify ports here; we'll bind on our Tailscale IP in the Garage conf file.
+garage_admin_bind_port: 3903
+garage_rpc_bind_port: 3901
+
+# --- Metadata / storage engine ---
+# SQLite is slower than LMDB but portable across architectures and much less
+# prone to corruption after unclean shutdowns. At our scale (a few hundred
+# daily Parquet objects), the performance difference is irrelevant.
+garage_db_engine: "sqlite"
+# fsync metadata writes — recommended with SQLite for durability across
+# crashes. Writes become moderately slower but the tradeoff is worth it.
+garage_metadata_fsync: true
+# Auto-snapshot the metadata DB for corruption recovery. Only the two most
+# recent snapshots are retained.
+garage_metadata_snapshot_interval: "6h"
+
+# --- Cluster ---
+# Replication factor: how many copies of each object to keep across nodes.
+# 1 = no redundancy (single-node default). Set to 3 if you run 3+ nodes.
+# Must be the SAME on every node in the cluster.
+garage_replication_factor: 1
+# Read/write quorum behavior. "consistent" enforces read-after-write and is
+# the safe default. See the reference for degraded/dangerous modes.
+garage_consistency_mode: "consistent"
+# Bootstrap peers for multi-node discovery. Format: "<node_id>@<host>:<port>".
+# Obtain <node_id> with `garage node id` on each node. Leave empty for a
+# single-node cluster.
+garage_bootstrap_peers: []
+
+# --- Layout ---
+garage_zone: "dc1"
+garage_node_capacity: "250G"
+
+# --- Bucket ---
+garage_bucket_name: "gossip-observer-data"
+
+# --- Per-researcher read-only keys ---
+# Add a name to provision a new key; remove to revoke.
+garage_reader_keys:
+  - internal
+# Example:
+# garage_reader_keys:
+#   - alice
+#   - bob
