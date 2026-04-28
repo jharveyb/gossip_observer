@@ -1,0 +1,41 @@
+{# Admin API is left at its default bind (127.0.0.1:2019). `caddy reload`
+   — triggered by `systemctl reload caddy` — posts to that endpoint to
+   hot-swap config, so disabling it would make every reload error with
+   "connection refused on :2019". Localhost-only by default, so not a
+   public exposure. #}
+
+{# Caddy's `tls internal` issues a self-signed certificate for the site's
+   hostname(s). For an IP-only deployment we must put the IP in the site
+   address so the cert is issued for it; a bare `:port` address would
+   otherwise default to HTTP. When a real domain is configured, Caddy
+   handles ACME/Let's Encrypt automatically and no internal TLS is needed. #}
+{{ caddy_site_address | default(ansible_default_ipv4.address) }}:{{ caddy_public_port }} {
+{% if caddy_site_address is not defined and caddy_use_internal_tls %}
+	tls internal
+{% endif %}
+
+	# Transparent reverse proxy: do NOT rewrite the Host header — AWS SigV4
+	# includes it in the signature, so any rewrite causes signature
+	# mismatches on signed S3 requests.
+	reverse_proxy {{ caddy_garage_upstream }} {
+		# Parquet range requests and large file streams shouldn't be buffered.
+		flush_interval -1
+{% if caddy_health_check_upstream is defined %}
+		health_uri /health
+		health_port {{ caddy_health_check_upstream.split(':')[1] | default(3903) }}
+{% endif %}
+	}
+
+	# S3 uploads can be large; set a reasonable limit.
+	request_body {
+		max_size {{ caddy_max_request_size }}
+	}
+
+	# Access log goes to stderr; systemd routes that to journald. Tail with
+	# `journalctl -u caddy`. Rotation is handled by journald's own size caps
+	# (SystemMaxUse etc. in journald.conf) — avoids file-writer permission
+	# issues and matches how other services in this repo log.
+	log {
+		format json
+	}
+}

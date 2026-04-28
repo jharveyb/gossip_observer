@@ -8,3 +8,14 @@ archiver_db_url: "postgres://postgres:hunter2@vpshostname:5432/gossip_observer_s
 # since this is a dictionary, not a list
 gossip_collector_mnemonics:
   "4d34181f-899c-49cc-a43d-2c39d54b1047": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+# --- Garage (self-hosted S3) secrets ---
+# rpc_secret: 32-byte hex string shared by all Garage nodes.
+#   Generate with: openssl rand -hex 32
+garage_rpc_secret: "0000000000000000000000000000000000000000000000000000000000000000"
+# admin_token: full admin API access (bucket/key management, cluster status).
+#   Generate with: openssl rand -base64 32
+garage_admin_token: "change-me-admin-token"
+# metrics_token: scoped to GET /metrics only, for Prometheus scraping.
+#   Generate with: openssl rand -base64 32
+garage_metrics_token: "change-me-metrics-token"

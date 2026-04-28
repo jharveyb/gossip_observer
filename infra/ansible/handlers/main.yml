@@ -61,3 +61,14 @@
   ansible.builtin.systemd:
     name: systemd-journald
     state: restarted
+
+- name: Restart Garage
+  ansible.builtin.systemd:
+    name: garage
+    state: restarted
+    daemon_reload: true
+
+- name: Reload Caddy
+  ansible.builtin.systemd:
+    name: caddy
+    state: reloaded

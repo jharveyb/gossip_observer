@@ -1,0 +1,66 @@
+# Installs Caddy from the official Cloudsmith apt repo and templates a
+# Caddyfile that reverse-proxies to Garage's S3 API.
+
+- name: Install Caddy apt repo signing key
+  ansible.builtin.get_url:
+    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    dest: /etc/apt/keyrings/caddy-stable.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Caddy apt repo
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/caddy-stable.asc] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main"
+    filename: caddy-stable
+    state: present
+    update_cache: true
+
+- name: Install Caddy
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+
+- name: Deploy Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: caddy
+    mode: "0640"
+    validate: "caddy validate --config %s --adapter caddyfile"
+  notify: Reload Caddy
+
+- name: Find interface with public IP
+  ansible.builtin.set_fact:
+    public_interface: "{{ item }}"
+    public_ip: "{{ ansible_facts[item].ipv4.address }}"
+  # The 'is truthy' condition converts the return value (an IP address) to a bool type
+  # while still allowing the ipaddr() function to short-circuit if False
+  when:
+    - ansible_facts[item].ipv4.address is defined
+    - ansible_facts[item].ipv4.address | ansible.utils.ipaddr('public') is truthy
+  loop: "{{ ansible_facts.interfaces }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Display selected public interface
+  ansible.builtin.debug:
+    msg: "Public interface: {{ public_interface }} with IP: {{ public_ip }}"
+  when: public_interface is defined
+
+- name: Allow public Caddy port in UFW
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "{{ caddy_public_port }}"
+    interface_in: "{{ public_interface }}"
+    comment: "Caddy-garage-s3-public"
+    insert: 1
+  when: "'digitalocean' in group_names or 'baremetal' in group_names"
+
+- name: Enable and start Caddy
+  ansible.builtin.systemd:
+    name: caddy
+    enabled: true
+    state: reloaded

@@ -1,0 +1,34 @@
+# On-demand display of Garage key credentials. Intended for operator use
+# when onboarding a researcher: credentials aren't persisted to disk, so
+# this task is the supported way to retrieve them via Ansible.
+#
+# Run with: ansible-playbook data_sharing_init.yml --tags show_keys
+#
+# Shows every key currently in the cluster, including archiver-sync and any
+# reader-<name> keys. Output is printed via ansible.builtin.debug; copy the
+# relevant block out-of-band and share with the intended recipient.
+
+- name: List all Garage keys
+  ansible.builtin.command: garage key list
+  register: garage_key_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+- name: Fetch credentials for each key
+  ansible.builtin.command:
+    cmd: "garage key info --show-secret {{ item.split()[2] }}"
+  loop: "{{ garage_key_list.stdout_lines | select('match', '^GK') | list }}"
+  loop_control:
+    label: "{{ item.split()[2] }}"
+  register: garage_key_details
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+- name: Display each key's credentials
+  ansible.builtin.debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ garage_key_details.results }}"
+  loop_control:
+    label: "{{ item.item.split()[2] }}"

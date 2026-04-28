@@ -1,0 +1,67 @@
+---
+# Deploys the public-data-sharing pipeline:
+#   1. Install Garage (self-hosted S3) on hosts in the [garage] group.
+#   2. Install a Caddy reverse proxy in front of Garage on hosts in the
+#      [caddy_proxy] group, exposing the S3 API over HTTPS with a
+#      self-signed cert.
+#   3. On archiver hosts, configure an rclone systemd timer that syncs
+#      freshly-exported Parquet files into the Garage bucket.
+#   4. On archiver hosts, maintain a git-based manifest recording which
+#      files have been published.
+#
+# Each play is independent; you can limit execution with --limit or --tags.
+# Garage, Caddy, and the archiver can all run on the same host if desired.
+
+- name: Install Garage
+  hosts: garage
+  become: true
+  tags: garage
+  pre_tasks:
+    - name: Load vault variables
+      ansible.builtin.include_vars: vault.yml
+  tasks:
+    - name: Garage setup
+      ansible.builtin.import_tasks: tasks/garage.yml
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+
+- name: Install Caddy reverse proxy
+  hosts: caddy_proxy
+  become: true
+  tags: caddy
+  tasks:
+    - name: Caddy proxy setup
+      ansible.builtin.import_tasks: tasks/caddy_proxy.yml
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+
+# - name: Configure rclone sync on archivers
+#   hosts: archivers
+#   become: true
+#   pre_tasks:
+#     - name: Load vault variables
+#       ansible.builtin.include_vars: vault.yml
+#   tasks:
+#     - name: Rclone sync setup
+#       ansible.builtin.import_tasks: tasks/rclone_sync.yml
+#   handlers:
+#     - name: Import handlers
+#       ansible.builtin.import_tasks: handlers/main.yml
+# 
+# - name: Configure publication manifest on archivers
+#   hosts: archivers
+#   become: true
+#   pre_tasks:
+#     - name: Load vault variables
+#       ansible.builtin.include_vars: vault.yml
+#     - name: Filter archivers for this host
+#       ansible.builtin.set_fact:
+#         host_archivers: "{{ gossip_archivers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+#   tasks:
+#     - name: Manifest setup
+#       ansible.builtin.import_tasks: tasks/data_manifest.yml
+#   handlers:
+#     - name: Import handlers
+#       ansible.builtin.import_tasks: handlers/main.yml

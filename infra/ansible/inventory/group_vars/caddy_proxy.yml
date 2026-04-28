@@ -1,0 +1,21 @@
+# Caddy reverse-proxy group variables.
+#
+# Used to expose the Garage S3 API to external researchers with self-signed
+# TLS (Caddy's `tls internal`). When Caddy runs on the same host as Garage,
+# caddy_garage_upstream should point to loopback; otherwise to the Garage
+# host's private IP.
+
+# Port on the public interface. Researchers connect to https://<ip>:<port>.
+caddy_public_port: 3939
+
+# Upstream Garage S3 API. Loopback if co-located on the same host.
+caddy_garage_upstream: "127.0.0.1:3900"
+
+# When true, Caddy issues a self-signed certificate via its internal CA.
+# Set to false once a real domain with ACME is configured.
+caddy_use_internal_tls: true
+
+caddy_max_request_size: "3GB"
+
+# If a domain is configured, set this instead of relying on tls internal.
+# caddy_site_address: "data.example.com"
