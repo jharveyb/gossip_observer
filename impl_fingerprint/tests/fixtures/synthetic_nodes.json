@@ -1,0 +1,23 @@
+[
+  {"pubkey": "aa01000000000000000000000000000000000000000000000000000000000001", "info": {"last_update_timestamp": 1700000000, "alias": "L1-lnd-v015", "addresses": [], "node_features": "88a000888a52a1"}},
+  {"pubkey": "aa02000000000000000000000000000000000000000000000000000000000002", "info": {"last_update_timestamp": 1700000000, "alias": "L1-lnd-v018", "addresses": [], "node_features": "2000000000000000000000000200000088a0008a8a51a1"}},
+  {"pubkey": "aa03000000000000000000000000000000000000000000000000000000000003", "info": {"last_update_timestamp": 1700000000, "alias": "L1-cln-v2311", "addresses": [], "node_features": "4004554415555551"}},
+  {"pubkey": "aa04000000000000000000000000000000000000000000000000000000000004", "info": {"last_update_timestamp": 1700000000, "alias": "L1-cln-v2408", "addresses": [], "node_features": "4004554415455551"}},
+  {"pubkey": "aa05000000000000000000000000000000000000000000000000000000000005", "info": {"last_update_timestamp": 1700000000, "alias": "L1-ldk-v0118", "addresses": [], "node_features": "88a000080a5121"}},
+  {"pubkey": "aa06000000000000000000000000000000000000000000000000000000000006", "info": {"last_update_timestamp": 1700000000, "alias": "L1-ldk-v022", "addresses": [], "node_features": "808898080a0a5121"}},
+  {"pubkey": "aa07000000000000000000000000000000000000000000000000000000000007", "info": {"last_update_timestamp": 1700000000, "alias": "L1-eclair-v090", "addresses": [], "node_features": "a080088a6982"}},
+  {"pubkey": "aa08000000000000000000000000000000000000000000000000000000000008", "info": {"last_update_timestamp": 1700000000, "alias": "L1-eclair-v010", "addresses": [], "node_features": "a080288a5941"}},
+
+  {"pubkey": "bb01000000000000000000000000000000000000000000000000000000000001", "info": {"last_update_timestamp": 1700000000, "alias": "L2-lnd-bit2-flip", "addresses": [], "node_features": "88a000888a52a5"}},
+  {"pubkey": "bb02000000000000000000000000000000000000000000000000000000000002", "info": {"last_update_timestamp": 1700000000, "alias": "L2-cln-bit2-flip", "addresses": [], "node_features": "4004554415555555"}},
+  {"pubkey": "bb03000000000000000000000000000000000000000000000000000000000003", "info": {"last_update_timestamp": 1700000000, "alias": "L2-ldk-bit2-flip", "addresses": [], "node_features": "88a0000a0a5125"}},
+  {"pubkey": "bb04000000000000000000000000000000000000000000000000000000000004", "info": {"last_update_timestamp": 1700000000, "alias": "L2-eclair-bit2-flip", "addresses": [], "node_features": "a080288a5945"}},
+
+  {"pubkey": "cc01000000000000000000000000000000000000000000000000000000000001", "info": {"last_update_timestamp": 1700000000, "alias": "L3-lnd-policy", "addresses": [], "node_features": ""}},
+  {"pubkey": "cc02000000000000000000000000000000000000000000000000000000000002", "info": {"last_update_timestamp": 1700000000, "alias": "L3-cln-policy", "addresses": [], "node_features": ""}},
+  {"pubkey": "cc03000000000000000000000000000000000000000000000000000000000003", "info": {"last_update_timestamp": 1700000000, "alias": "L3-ldk-policy", "addresses": [], "node_features": ""}},
+  {"pubkey": "cc04000000000000000000000000000000000000000000000000000000000004", "info": {"last_update_timestamp": 1700000000, "alias": "L3-eclair-policy", "addresses": [], "node_features": ""}},
+
+  {"pubkey": "dd01000000000000000000000000000000000000000000000000000000000001", "info": {"last_update_timestamp": 1700000000, "alias": "unknown-no-features-no-channels", "addresses": [], "node_features": ""}},
+  {"pubkey": "dd02000000000000000000000000000000000000000000000000000000000002", "info": {"last_update_timestamp": 1700000000, "alias": "unknown-weird-features", "addresses": [], "node_features": "ff"}}
+]
