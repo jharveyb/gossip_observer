@@ -1,0 +1,61 @@
+Debian 13 non-desktop default seems to be ifupdown + dhcpcd, with the systemd unit being 'networking'
+Tailscale works best with systemd-resolved
+
+Order of operations:
+
+1:
+
+Reformat info in /etc/network/interfaces to systemd-networkd format + drop-in
+
+Ex.:
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+allow-hotplug enp3s0
+iface enp3s0 inet dhcp
+
+To:
+
+[Match]
+Name=enp3s0
+
+[Network]
+DHCP=yes
+DNS=127.0.0.53        # let resolved handle it
+
+2:
+
+Install systemd-resolved, which will then take over DNS + symlink /etc/resolv.conf
+This may break networking, unclear
+
+```bash
+apt install systemd-resolved
+systemctl enable --now systemd-resolved
+resolvectl
+```
+
+3:
+
+Enable systemd-networkd, which was already present
+```bash
+systemctl enable --now systemd-networkd
+networkctl
+
+systemctl restart systemd-hostnamed
+hostnamectl
+```
+
+4: remove cruft
+
+```bash
+apt remove ifupdown
+apt remove dhcpcd-base
+pkill dhcpcd
+```
+
+5. Reboot and see what happens
