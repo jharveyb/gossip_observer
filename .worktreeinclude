@@ -1,0 +1,15 @@
+*.code-workspace
+/.vscode
+/.claude
+
+/target
+.env
+
+/archiver_config*
+/collector_config*
+/controller_config*
+
+infra/ansible/vault.yml
+.ansible
+infra/ansible/inventory/hosts.ini*
+infra/ansible/binaries/
