@@ -895,6 +895,73 @@ JOIN message_first_seen mfs ON m.hash = mfs.hash
 WHERE mfs.first_seen >= '2026-03-01' AND mfs.first_seen < '2026-03-02'
 ```
 
+### Multi-Day Per-Entity Average ≠ Mean of Per-Day Counts
+
+When computing "average activity per day" per entity (e.g., avg msgs/day per SCID) over a multi-day range, **divide the entity's total distinct count by `num_days`**, not by the mean of per-day counts. The latter silently drops days where the entity was inactive (no row → not in the mean), inflating the average for sparse entities.
+
+```python
+# ❌ Wrong — entities seen on only 1 of 7 days get avg=msg_count, not msg_count/7
+avg_daily = df.group_by("scid").agg(pl.col("msg_count").mean())
+
+# ✅ Right — total distinct over the whole range, divided by num_days
+total = query_total(conn)  # COUNT(DISTINCT inner_hash) per entity, no day grouping
+avg_daily = total.with_columns((pl.col("total_msg_count") / num_days).alias("avg_daily"))
+```
+
+This also enables a meaningful "0–1" histogram bucket for entities that broadcast less than once per day on average — the per-day-mean approach can never produce values < 1 because it only averages over days the entity *was* active.
+
+### DuckDB Multi-File Views via `read_parquet([paths])`
+
+To union multiple daily Parquet files into a single view, pass a list literal to `read_parquet` rather than registering each file separately:
+
+```python
+paths = [parquet_path(data_dir, table, d) for d in dates]
+existing = [p for p in paths if os.path.exists(p)]
+paths_sql = "[" + ", ".join(f"'{p}'" for p in existing) + "]"
+conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet({paths_sql})")
+```
+
+DuckDB unions files with compatible schemas automatically. Caveat: companion tables (`metadata`, `message_first_seen`) are often partitioned by *first-appearance day*, not by full-history-per-day. A hash whose first appearance was *before* the loaded range will be missing from these views even if the `timings` exports for the loaded range reference it — joins on those tables will silently drop rows. Worth verifying empirically before trusting multi-day aggregates that depend on these joins.
+
+### Histogram Bucket Boundaries: Avoid Overlap Across Integer/Float
+
+For `bucket_counts`-style histograms where buckets are `(lo, hi, label)` tuples, the safe pattern is "first bucket inclusive on both bounds, subsequent buckets exclusive on lower bound":
+
+- Bucket 0: `value >= lo AND value <= hi`
+- Bucket i > 0: `value > prev_hi AND value <= hi`
+
+This works for both integer and float values without double-counting boundary cases. With integer-only data, the original "lo of next bucket = prev_hi + 1" pattern works too, but it breaks for floats (e.g., `1.5` falls in neither `(1, 1, "0-1")` nor `(11, 50, "11-50")` if you literally use the `>= lo` semantics with overlapping bounds). Sort order on Altair categorical axes also needs the threshold list passed explicitly via `sort=`, otherwise unrecognized labels (like a newly-added `"0-1"`) fall to the end of the axis.
+
+### Altair: Separate Legends per Layer with Matching Colors
+
+When layering two marks (e.g., a line series and an averaged-value rule overlay) and you want **separate legend entries that share colors per group**, use independent color scales with explicit parallel sorted domains:
+
+```python
+line_domain = sorted(plot_df[color_col].unique().to_list())
+avg_domain = sorted(avg_df[avg_label_col].to_list())  # parallel order
+
+line = chart.encode(alt.Color(f"{color_col}:N", scale=alt.Scale(domain=line_domain, scheme="category10")))
+rule = chart.encode(alt.Color(f"{avg_label_col}:N", scale=alt.Scale(domain=avg_domain, scheme="category10")))
+
+(line + rule).resolve_scale(color="independent")  # two legends; matching colors per index
+```
+
+Without `resolve_scale(color="independent")`, the layers' legends merge into one. Without explicit sorted domains, the two scales may assign different palette positions and the colors won't visually match between the legends.
+
+### Altair: 24-Hour X-Axis with Date Shown Once Per Day
+
+Vega-Lite defaults to 12-hour time format (locale-dependent) on temporal axes. To force 24-hour and only show the date on the first tick of each day (avoiding date repetition on every label):
+
+```python
+axis=alt.Axis(labelExpr=(
+    "hours(datum.value) < 6 "
+    "? timeFormat(datum.value, '%m-%d-%H%M') "
+    ": timeFormat(datum.value, '%H%M')"
+))
+```
+
+The `hours < 6` heuristic catches the post-midnight tick when Vega-Lite picks 6h tick spacing (ticks land on 03:00, 09:00, 15:00, 21:00). Robust for 6h/12h/24h spacing; not ideal at 1h spacing where it would label 6 ticks per day.
+
 ### Parquet Recovery: file existence ≠ validity
 
 When a file export is interrupted mid-write (e.g. SIGINT, OOM kill), a truncated file is left on disk. If your recovery path checks only existence — `if path.exists(): skip` — it will silently treat the corrupt file as complete, and downstream readers fail with cryptic "file too small" / "invalid footer" errors.

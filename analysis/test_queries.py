@@ -63,6 +63,23 @@ HIST_THRESHOLDS = [
     (1001, None, "1001+"),
 ]
 
+# Variant for fractional avg-per-day values (e.g. msg_count / num_days).
+# Adds a "0-1" bucket for entities that broadcast less than once per day.
+# Bucket boundaries are interpreted as: first bucket is `>= lo AND <= hi`,
+# subsequent buckets are `> prev_hi AND <= hi`, so they don't overlap for
+# either integer or float values.
+AVG_DAILY_HIST_THRESHOLDS = [
+    (0, 1, "0-1"),
+    (2, 10, "2-10"),
+    (11, 50, "11-50"),
+    (51, 100, "51-100"),
+    (101, 144, "101-144"),
+    (145, 200, "145-200"),
+    (201, 500, "201-500"),
+    (501, 1000, "501-1000"),
+    (1001, None, "1001+"),
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -140,10 +157,21 @@ def save_time_series(
     y_title: str = "Value",
     color_title: str | None = None,
     shorten_labels: int | None = None,
+    y_scale_type: str | None = None,
+    show_avg_lines: bool = False,
     filename: str = "time_series",
     output_dir: str = "data",
 ) -> None:
-    """Save a time-series line chart as PNG."""
+    """Save a time-series line chart as PNG.
+
+    `y_scale_type`: pass "log" for a log-scaled y-axis (useful when one
+    series dominates by orders of magnitude). Default is linear.
+
+    `show_avg_lines`: when True and a `color_col` is set, overlay a
+    horizontal dashed rule at the mean y-value for each color group, in
+    a lighter shade (via opacity) of the same color used for that group's
+    line. Useful for showing the long-run average alongside the time series.
+    """
     plot_df = df
     encode_color = color_col
     if color_col and shorten_labels:
@@ -152,18 +180,88 @@ def save_time_series(
             pl.col(color_col).str.slice(0, shorten_labels).alias(short_col)
         )
         encode_color = short_col
-    chart = (
+
+    # Per-group means (one row per color group), used for the rule overlay
+    # and a separate "Average" legend. Compute before building any chart so
+    # we can derive matching color palettes.
+    avg_df = None
+    avg_color_col = None
+    if show_avg_lines and encode_color:
+        avg_df = plot_df.group_by(encode_color).agg(pl.col(y_col).mean().alias(y_col))
+        # The rule layer gets its own categorical column whose values include
+        # the numeric mean. The line and rule share the *same* sorted color
+        # domain → identical palette positions → matching colors per group.
+        avg_color_col = f"{encode_color}_avg_label"
+        avg_df = avg_df.with_columns(
+            (
+                pl.col(encode_color) + ": " + pl.col(y_col).round(1).cast(pl.String)
+            ).alias(avg_color_col)
+        )
+
+    # Show the full "MM-DD-HHMM" date+time only on the first tick of each day;
+    # subsequent ticks within the same day show "HHMM" only. Heuristic: with
+    # the auto-picked tick spacing (typically 6h), only one tick per day has
+    # an hour < 6, which is the post-midnight tick — so we detect "first tick
+    # of day" via that hour cutoff. Robust for 6h/12h/24h spacing; not ideal
+    # at 1h spacing but rate plots use coarser spacing in practice.
+    x_label_expr = (
+        "hours(datum.value) < 6 "
+        "? timeFormat(datum.value, '%m-%d-%H%M') "
+        ": timeFormat(datum.value, '%H%M')"
+    )
+    if y_scale_type:
+        y_enc = alt.Y(f"{y_col}:Q", title=y_title, scale=alt.Scale(type=y_scale_type))
+    else:
+        y_enc = alt.Y(f"{y_col}:Q", title=y_title)
+
+    line_chart = (
         alt.Chart(plot_df.to_pandas())
         .mark_line(point=True)
         .encode(
-            alt.X(f"{x_col}:T", title=x_title),
-            alt.Y(f"{y_col}:Q", title=y_title),
+            alt.X(
+                f"{x_col}:T",
+                title=x_title,
+                axis=alt.Axis(labelExpr=x_label_expr),
+            ),
+            y_enc,
         )
     )
     if encode_color:
-        chart = chart.encode(
+        line_chart = line_chart.encode(
             alt.Color(f"{encode_color}:N", title=color_title or encode_color)
         )
+
+    chart = line_chart
+    if avg_df is not None:
+        # Sorted domain ensures both legends order entries identically → the
+        # Nth entry in each legend uses the Nth color from `category10`.
+        line_domain = sorted(plot_df[encode_color].unique().to_list())
+        avg_domain = sorted(avg_df[avg_color_col].to_list())
+        palette = "category10"
+        # Re-encode line chart's color with explicit scale so positions match.
+        line_chart = line_chart.encode(
+            alt.Color(
+                f"{encode_color}:N",
+                title=color_title or encode_color,
+                scale=alt.Scale(domain=line_domain, scheme=palette),
+            )
+        )
+        # Avg rule uses its own scale (same scheme, parallel domain order)
+        # so it gets matching colors per group, but a *separate* legend.
+        avg_chart = (
+            alt.Chart(avg_df.to_pandas())
+            .mark_rule(strokeDash=[6, 4], opacity=0.5, strokeWidth=2)
+            .encode(
+                y_enc,
+                alt.Color(
+                    f"{avg_color_col}:N",
+                    title="Average",
+                    scale=alt.Scale(domain=avg_domain, scheme=palette),
+                ),
+            )
+        )
+        chart = (line_chart + avg_chart).resolve_scale(color="independent")
+
     chart = chart.properties(title=title, width=700, height=350)
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{filename}.png")
@@ -179,11 +277,20 @@ def save_histogram(
     x_title: str = "Message Count",
     label_col: str | None = None,
     label_fmt: str = "d",
+    thresholds: list | None = None,
     filename: str = "histogram",
     output_dir: str = "data",
 ) -> None:
-    """Save a histogram bar chart as PNG."""
-    bucket_order = [label for _, _, label in HIST_THRESHOLDS]
+    """Save a histogram bar chart as PNG.
+
+    `thresholds`: pass the same threshold list used by `bucket_counts` so
+    the x-axis sort order matches. Defaults to HIST_THRESHOLDS; use
+    AVG_DAILY_HIST_THRESHOLDS for the multi-day-average variants (otherwise
+    the "0-1" bucket falls to the end of the x-axis).
+    """
+    if thresholds is None:
+        thresholds = HIST_THRESHOLDS
+    bucket_order = [label for _, _, label in thresholds]
     bars = (
         alt.Chart(bucketed.to_pandas())
         .mark_bar(color="#f4a582")
@@ -209,15 +316,31 @@ def save_histogram(
     print(f"  saved {path}")
 
 
-def bucket_counts(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
-    """Bucket entity counts into histogram ranges and compute message percentages."""
+def bucket_counts(
+    df: pl.DataFrame,
+    count_col: str,
+    thresholds: list | None = None,
+) -> pl.DataFrame:
+    """Bucket entity counts into histogram ranges and compute message percentages.
+
+    First bucket uses `>= lo AND <= hi`; subsequent buckets use
+    `> prev_hi AND <= hi` so adjacent ranges don't overlap (works for both
+    integer and float values). Pass `thresholds=AVG_DAILY_HIST_THRESHOLDS`
+    for the fractional avg-per-day variant.
+    """
+    if thresholds is None:
+        thresholds = HIST_THRESHOLDS
     rows = []
-    for lo, hi, label in HIST_THRESHOLDS:
-        if hi is not None:
-            subset = df.filter((pl.col(count_col) >= lo) & (pl.col(count_col) <= hi))
+    prev_hi = None
+    for i, (lo, hi, label) in enumerate(thresholds):
+        if i == 0:
+            cond = pl.col(count_col) >= lo
         else:
-            subset = df.filter(pl.col(count_col) >= lo)
-        msg_sum = int(subset[count_col].sum()) if len(subset) > 0 else 0
+            cond = pl.col(count_col) > prev_hi
+        if hi is not None:
+            cond = cond & (pl.col(count_col) <= hi)
+        subset = df.filter(cond)
+        msg_sum = subset[count_col].sum() if len(subset) > 0 else 0
         rows.append(
             {
                 "bucket": label,
@@ -225,6 +348,7 @@ def bucket_counts(df: pl.DataFrame, count_col: str) -> pl.DataFrame:
                 "message_sum": msg_sum,
             }
         )
+        prev_hi = hi
     result = pl.DataFrame(rows)
     total_msgs = result["message_sum"].sum()
     if total_msgs > 0:
@@ -250,8 +374,15 @@ def summarize_delay(df):
     available = [c for c in pct_cols if c in df.columns]
     if "qualifying_messages" in df.columns:
         # Already a single aggregate row — pass through with consistent column order.
-        keep = [c for c in ["qualifying_messages", "total_receipts", "median_peers"] + available if c in df.columns]
-        return df.select([pl.col(c).round(4) if c in available else pl.col(c) for c in keep])
+        keep = [
+            c
+            for c in ["qualifying_messages", "total_receipts", "median_peers"]
+            + available
+            if c in df.columns
+        ]
+        return df.select(
+            [pl.col(c).round(4) if c in available else pl.col(c) for c in keep]
+        )
     return df.select(
         [
             pl.len().alias("messages"),
@@ -368,25 +499,32 @@ def render_peer_count(df: pl.DataFrame, output_dir: str = "data") -> None:
 def render_message_rate(df: pl.DataFrame, output_dir: str = "data") -> None:
     if len(df) == 0:
         return
+    # Log y-scale: channel_update volume is orders of magnitude higher than
+    # node_announcement / channel_announcement, so a linear axis flattens
+    # the smaller series to the floor.
     save_time_series(
         df=df,
         x_col="period",
-        y_col="receipts_per_hour",
+        y_col="unique_messages",
         color_col="type_name",
-        title="Message Receipt Rate by Type (hourly avg)",
+        title="Message Receipt Rate by Type",
         y_title="Receipts / Hour",
         color_title="Message Type",
+        y_scale_type="log",
+        show_avg_lines=True,
         filename="message_rate_receipts",
         output_dir=output_dir,
     )
     save_time_series(
         df=df,
         x_col="period",
-        y_col="unique_messages",
+        y_col="unique_messages_inner",
         color_col="type_name",
-        title="Unique Messages by Type (6h windows)",
-        y_title="Unique Messages",
+        title="Message with Unique Contents Receipt Rate by Type",
+        y_title="Messages / Hour",
         color_title="Message Type",
+        y_scale_type="log",
+        show_avg_lines=True,
         filename="message_rate_unique",
         output_dir=output_dir,
     )

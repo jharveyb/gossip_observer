@@ -3,10 +3,14 @@ Replicate gossip analysis queries from test_queries.py using DuckDB on
 exported Parquet files, instead of querying TimescaleDB.
 
 Usage:
-    cd analysis && uv run python parquet_queries.py <date> [--data-dir DIR] [sections...]
+    cd analysis && uv run python parquet_queries.py <date> [--days N] [--data-dir DIR] [sections...]
     cd analysis && uv run python parquet_queries.py 2026-03-15
+    cd analysis && uv run python parquet_queries.py 2026-03-15 --days 7
     cd analysis && uv run python parquet_queries.py 2026-03-15 --data-dir /mnt/exports stats
     cd analysis && uv run python parquet_queries.py 2026-03-15 outer stats
+
+`date` is the END of the range (inclusive); `--days N` (default 1) controls
+how many consecutive days to load backwards from that date.
 
 Sections:
     outer        Propagation delay (outer hash + collector-originated)
@@ -23,12 +27,14 @@ import argparse
 import os
 import sys
 import time
+from datetime import date as date_type, timedelta
 
 import duckdb
 import polars as pl
 
 # Reuse chart/output helpers from test_queries
 from test_queries import (
+    AVG_DAILY_HIST_THRESHOLDS,
     bucket_counts,
     print_section,
     render_message_rate,
@@ -52,18 +58,39 @@ def parquet_path(data_dir: str, table: str, date: str) -> str:
     return os.path.join(data_dir, table, y, m, d, f"{table}_{date}.parquet")
 
 
-def load_day(conn: duckdb.DuckDBPyConnection, data_dir: str, date: str) -> None:
-    """Register Parquet files for a single day as DuckDB views."""
+def load_range(
+    conn: duckdb.DuckDBPyConnection,
+    data_dir: str,
+    end_date: str,
+    num_days: int,
+) -> None:
+    """Register Parquet files for a date range as DuckDB views.
+
+    Reads `num_days` consecutive daily Parquet files backwards starting from
+    `end_date` (inclusive) and unions them into one view per table.
+    Missing files are warned about but do not abort loading.
+    """
+    end = date_type.fromisoformat(end_date)
+    dates = [(end - timedelta(days=i)).isoformat() for i in range(num_days)]
+
     for table in ["timings", "metadata", "message_first_seen"]:
-        path = parquet_path(data_dir, table, date)
-        if not os.path.exists(path):
-            print(f"  WARNING: missing {path}")
+        paths = []
+        for d in dates:
+            path = parquet_path(data_dir, table, d)
+            if os.path.exists(path):
+                paths.append(path)
+            else:
+                print(f"  WARNING: missing {path}")
+        if not paths:
+            print(f"  WARNING: no files found for {table}, skipping")
             continue
+        # DuckDB's read_parquet accepts a list literal of paths and unions them.
+        paths_sql = "[" + ", ".join(f"'{p}'" for p in paths) + "]"
         conn.execute(
-            f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet('{path}')"
+            f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet({paths_sql})"
         )
         row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(f"  loaded {table}: {row_count:,} rows")
+        print(f"  loaded {table}: {row_count:,} rows from {len(paths)} file(s)")
 
 
 def run_query(conn: duckdb.DuckDBPyConnection, sql: str) -> pl.DataFrame:
@@ -371,20 +398,22 @@ def query_distinct_outbound_hashes(
 
 
 def query_message_rate(conn: duckdb.DuckDBPyConnection) -> pl.DataFrame:
-    """Message rate per 6-hour period, by type.
+    """Message rate per hour, by type.
 
-    Equivalent to test_queries.query_message_rate.
+    Buckets by 1 hour and reports both raw inbound receipt count and
+    distinct outer-hash count per (hour, type). Column names match what
+    `render_message_rate` expects (`receipts_per_hour`, `unique_messages`).
     """
     sql = """
     SELECT
-        time_bucket(INTERVAL '6 hours', t.net_timestamp) AS period,
+        time_bucket(INTERVAL '1 hour', t.net_timestamp) AS period,
         m.type,
         CASE m.type
             WHEN 1 THEN 'channel_announcement'
             WHEN 2 THEN 'node_announcement'
             WHEN 3 THEN 'channel_update'
         END AS type_name,
-        COUNT(DISTINCT t.hash) / 6 AS messages_per_hour,
+        COUNT(*) AS receipts_per_hour,
         COUNT(DISTINCT t.hash) AS unique_messages,
         COUNT(DISTINCT t.inner_hash) AS unique_messages_inner
     FROM timings t
@@ -457,11 +486,135 @@ def query_channel_update_distribution(
 
 
 # ---------------------------------------------------------------------------
+# Query 6: Node announcement distribution per node pubkey
+# ---------------------------------------------------------------------------
+
+
+def query_node_announcement_distribution(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Daily unique node_announcement inner messages per orig_node.
+
+    Counterpart to query_channel_update_distribution: groups by node pubkey
+    (orig_node) instead of SCID, filters to type=2 (node_announcement).
+    """
+    sql = """
+    SELECT
+        date_trunc('day', t.net_timestamp) AS day,
+        m.orig_node,
+        COUNT(DISTINCT t.inner_hash) AS msg_count
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 1
+      AND m.type = 2
+      AND m.orig_node IS NOT NULL
+    GROUP BY day, m.orig_node
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 7: Channel announcement distribution per SCID
+# ---------------------------------------------------------------------------
+
+
+def query_channel_announcement_distribution(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Daily unique channel_announcement inner messages per SCID.
+
+    Same shape as query_channel_update_distribution but filtered to type=1.
+    Most SCIDs see a single announcement, so the distribution is heavily
+    skewed toward the "1-10" bucket.
+    """
+    sql = """
+    SELECT
+        date_trunc('day', t.net_timestamp) AS day,
+        hex(m.scid) AS scid,
+        COUNT(DISTINCT t.inner_hash) AS msg_count
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 1
+      AND m.type = 1
+      AND m.scid IS NOT NULL
+    GROUP BY day, m.scid
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Queries 8-10: Multi-day total distribution variants
+# ---------------------------------------------------------------------------
+#
+# These do NOT bucket by day in SQL — they count distinct inner_hash across
+# the entire loaded range, per entity (SCID or node). The caller divides by
+# num_days to get an average that correctly accounts for inactive days
+# (entities seen 0 times on some days won't be missing rows; they'll show
+# a low per-day average like 0.5 for "1 message in 2 days").
+
+
+def query_channel_update_total(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Total distinct channel_update inner messages per SCID over loaded range."""
+    sql = """
+    SELECT
+        hex(m.scid) AS scid,
+        COUNT(DISTINCT t.inner_hash) AS total_msg_count
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 1
+      AND m.type = 3
+      AND m.scid IS NOT NULL
+    GROUP BY m.scid
+    """
+    return run_query(conn, sql)
+
+
+def query_node_announcement_total(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Total distinct node_announcement inner messages per orig_node."""
+    sql = """
+    SELECT
+        m.orig_node,
+        COUNT(DISTINCT t.inner_hash) AS total_msg_count
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 1
+      AND m.type = 2
+      AND m.orig_node IS NOT NULL
+    GROUP BY m.orig_node
+    """
+    return run_query(conn, sql)
+
+
+def query_channel_announcement_total(
+    conn: duckdb.DuckDBPyConnection,
+) -> pl.DataFrame:
+    """Total distinct channel_announcement inner messages per SCID."""
+    sql = """
+    SELECT
+        hex(m.scid) AS scid,
+        COUNT(DISTINCT t.inner_hash) AS total_msg_count
+    FROM timings t
+    JOIN metadata m ON t.hash = m.hash
+    WHERE t.dir = 1
+      AND m.type = 1
+      AND m.scid IS NOT NULL
+    GROUP BY m.scid
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
 # Section runners
 # ---------------------------------------------------------------------------
 
 
-def run_outer(conn: duckdb.DuckDBPyConnection, peer_cutoff: int) -> None:
+def run_outer(
+    conn: duckdb.DuckDBPyConnection, peer_cutoff: int, originated_cutoff: int
+) -> None:
     """Outer hash propagation delay (box plot)."""
     outer_summaries: dict[str, pl.DataFrame | None] = {}
 
@@ -495,10 +648,7 @@ def run_outer(conn: duckdb.DuckDBPyConnection, peer_cutoff: int) -> None:
     df = query_distinct_outbound_hashes(conn)
     print_section("2d. Distinct Outbound Hashes (cross-check)", df)
 
-    collector_originated_cutoff = 5
-    df = query_collector_originated_propagation(
-        conn, peer_cutoff=collector_originated_cutoff
-    )
+    df = query_collector_originated_propagation(conn, peer_cutoff=originated_cutoff)
     summary = summarize_delay(df) if len(df) > 0 else None
     print_section("3. Collector-Originated Propagation Delay", df, summary)
     outer_summaries["Observer"] = summary
@@ -508,11 +658,11 @@ def run_outer(conn: duckdb.DuckDBPyConnection, peer_cutoff: int) -> None:
     )
 
 
-def run_stats(conn: duckdb.DuckDBPyConnection) -> None:
+def run_stats(conn: duckdb.DuckDBPyConnection, num_days: int = 1) -> None:
     """Message rate, peer count, channel update distribution."""
     # --- Message rate ---
     df = query_message_rate(conn)
-    print_section("7. Message Rate by Type (6-hour buckets)", df)
+    print_section("7. Message Rate by Type (hourly)", df)
     for type_name in df["type_name"].unique().sort().to_list():
         sub = df.filter(pl.col("type_name") == type_name).drop("type", "type_name")
         write_csv(sub, f"message_rate_{type_name}_parquet")
@@ -548,7 +698,126 @@ def run_stats(conn: duckdb.DuckDBPyConnection) -> None:
         title="channel_update Avg Daily Messages per SCID (Parquet)",
         y_title="% of Total Messages",
         x_title="Avg Daily Message Count per SCID",
+        label_col="pct_label",
         filename="chan_update_msg_count_parquet",
+    )
+
+    # --- Node announcement distribution ---
+    df = query_node_announcement_distribution(conn)
+    print_section("14. Node Announcement Distribution (daily)", df)
+    avg_daily = df.group_by("orig_node").agg(
+        pl.col("msg_count").mean().round(1).alias("avg_daily")
+    )
+    bucketed = bucket_counts(avg_daily, "avg_daily")
+    bucketed = bucketed.with_columns(
+        (pl.col("message_pct").cast(pl.String) + "%").alias("pct_label")
+    )
+    with pl.Config(tbl_cols=-1, tbl_width_chars=120):
+        print(bucketed)
+    save_histogram(
+        bucketed,
+        y_col="message_pct",
+        title="node_announcement Avg Daily Messages per Node (Parquet)",
+        y_title="% of Total Messages",
+        x_title="Avg Daily Message Count per Node",
+        label_col="pct_label",
+        filename="node_ann_msg_count_parquet",
+    )
+
+    # --- Channel announcement distribution ---
+    df = query_channel_announcement_distribution(conn)
+    print_section("15. Channel Announcement Distribution (daily)", df)
+    avg_daily = df.group_by("scid").agg(
+        pl.col("msg_count").mean().round(1).alias("avg_daily")
+    )
+    bucketed = bucket_counts(avg_daily, "avg_daily")
+    bucketed = bucketed.with_columns(
+        (pl.col("message_pct").cast(pl.String) + "%").alias("pct_label")
+    )
+    with pl.Config(tbl_cols=-1, tbl_width_chars=120):
+        print(bucketed)
+    save_histogram(
+        bucketed,
+        y_col="message_pct",
+        title="channel_announcement Avg Daily Messages per SCID (Parquet)",
+        y_title="% of Total Messages",
+        x_title="Avg Daily Message Count per SCID",
+        label_col="pct_label",
+        filename="chan_ann_msg_count_parquet",
+    )
+
+    # --- Multi-day total distributions ---
+    # These count distinct messages once across the whole loaded range, then
+    # divide by num_days. Unlike the per-day variants above, this captures
+    # entities that broadcast less than once per day (which fall in the new
+    # "0-1" bucket).
+    _render_total_distribution(
+        df=query_channel_update_total(conn),
+        entity_col="scid",
+        num_days=num_days,
+        section_label="13b. Channel Update Avg Daily Messages (multi-day total)",
+        title="channel_update Avg Daily Messages per SCID (multi-day)",
+        x_title="Avg Daily Message Count per SCID",
+        filename="chan_update_msg_count_avg_parquet",
+    )
+    _render_total_distribution(
+        df=query_node_announcement_total(conn),
+        entity_col="orig_node",
+        num_days=num_days,
+        section_label="14b. Node Announcement Avg Daily Messages (multi-day total)",
+        title="node_announcement Avg Daily Messages per Node (multi-day)",
+        x_title="Avg Daily Message Count per Node",
+        filename="node_ann_msg_count_avg_parquet",
+    )
+    _render_total_distribution(
+        df=query_channel_announcement_total(conn),
+        entity_col="scid",
+        num_days=num_days,
+        section_label="15b. Channel Announcement Avg Daily Messages (multi-day total)",
+        title="channel_announcement Avg Daily Messages per SCID (multi-day)",
+        x_title="Avg Daily Message Count per SCID",
+        filename="chan_ann_msg_count_avg_parquet",
+    )
+
+
+def _render_total_distribution(
+    df: pl.DataFrame,
+    entity_col: str,
+    num_days: int,
+    section_label: str,
+    title: str,
+    x_title: str,
+    filename: str,
+) -> None:
+    """Render a histogram of avg daily message count over the whole range.
+
+    Divides per-entity total distinct messages by `num_days` to get the
+    multi-day average, buckets via `AVG_DAILY_HIST_THRESHOLDS` (which has
+    a 0-1 bucket for sub-daily-frequency entities), and saves the histogram.
+    """
+    print_section(section_label, df)
+    if len(df) == 0:
+        return
+    avg_daily = df.with_columns(
+        (pl.col("total_msg_count") / num_days).round(2).alias("avg_daily")
+    )
+    bucketed = bucket_counts(
+        avg_daily, "avg_daily", thresholds=AVG_DAILY_HIST_THRESHOLDS
+    )
+    bucketed = bucketed.with_columns(
+        (pl.col("message_pct").cast(pl.String) + "%").alias("pct_label")
+    )
+    with pl.Config(tbl_cols=-1, tbl_width_chars=120):
+        print(bucketed)
+    save_histogram(
+        bucketed,
+        y_col="message_pct",
+        title=title,
+        y_title="% of Total Messages",
+        x_title=x_title,
+        label_col="pct_label",
+        thresholds=AVG_DAILY_HIST_THRESHOLDS,
+        filename=filename,
     )
 
 
@@ -561,10 +830,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run gossip analysis queries on exported Parquet files."
     )
-    parser.add_argument("date", help="Date to analyze (YYYY-MM-DD)")
+    parser.add_argument("date", help="End date of range, inclusive (YYYY-MM-DD)")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        help="Number of consecutive days to load ending at `date` (default: 1)",
+    )
     parser.add_argument(
         "--data-dir",
-        default="../data/mainnet/archiver/exports",
         help="Root directory containing Parquet exports (default: ../exports)",
     )
     parser.add_argument(
@@ -580,22 +854,31 @@ def main():
         default=100,
         help="Minimum peer count for propagation queries (default: 100)",
     )
+    parser.add_argument(
+        "--originated-cutoff",
+        type=int,
+        default=5,
+        help="Minimum receive count for queries on collector-originated messages (default: 5)",
+    )
     args = parser.parse_args()
     sections = set(args.sections)
 
-    print(f"\nDate: {args.date}")
+    start_date = (
+        date_type.fromisoformat(args.date) - timedelta(days=args.days - 1)
+    ).isoformat()
+    print(f"\nDate range: {start_date} to {args.date} to ({args.days} day(s))")
     print(f"Data dir: {args.data_dir}")
     print(f"Peer cutoff: {args.peer_cutoff}")
     print(f"Sections: {', '.join(sorted(sections))}")
 
     conn = duckdb.connect()
-    load_day(conn, args.data_dir, args.date)
+    load_range(conn, args.data_dir, args.date, args.days)
 
     if "outer" in sections:
-        run_outer(conn, args.peer_cutoff)
+        run_outer(conn, args.peer_cutoff, args.originated_cutoff)
 
     if "stats" in sections:
-        run_stats(conn)
+        run_stats(conn, num_days=args.days)
 
     conn.close()
     print(f"\n{'=' * 70}")
