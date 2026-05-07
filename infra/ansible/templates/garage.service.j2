@@ -21,6 +21,8 @@ ReadWritePaths=/var/lib/garage{% if garage_data_dir_is_external %} {{ garage_dat
 
 PrivateTmp=true
 NoNewPrivileges=true
+MemoryHigh=50%
+CPUQuota=200%
 LimitNOFILE=42000
 Restart=on-failure
 RestartSec=15

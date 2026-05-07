@@ -33,6 +33,12 @@ baremetal_pkgs:
   - linux-cpupower
   - lshw
   - screenfetch
+  - build-essential
+  - cmake
+  - libtool
+  - cpuinfo
+  - python3-debian
+  - g++
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"
