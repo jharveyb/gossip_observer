@@ -1,5 +1,5 @@
 [build]
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = ["--cfg", "tokio_unstable", "-C", "target-cpu=x86-64-v3"]
 
 [target.'cfg(all())']
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = ["--cfg", "tokio_unstable", "-C", "target-cpu=x86-64-v3"]

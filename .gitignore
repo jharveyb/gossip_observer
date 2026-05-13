@@ -1,6 +1,7 @@
 *.code-workspace
 /.vscode
 /.claude
+/.serena
 
 **/ldk_node_data.sqlite
 **/keys_seed
