@@ -1719,6 +1719,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "hex",
  "ldk-node",
  "lightning-types",
  "observer_common",
@@ -2219,6 +2220,19 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "impl_fingerprint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "lightning-types",
+ "observer_common",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

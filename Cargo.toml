@@ -3,6 +3,7 @@ members = [
         "gossip_collector",
         "gossip_analyze",
         "gossip_archiver",
+        "impl_fingerprint",
         "observer_common",
         "observer_controller",
         "electrum-cli",

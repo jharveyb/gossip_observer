@@ -98,6 +98,10 @@ pub struct NodeAnnouncementInfo {
     pub alias: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "3")]
     pub addresses: ::prost::alloc::vec::Vec<SocketAddress>,
+    /// Raw feature bits in little-endian byte order (wire format from BOLT 9).
+    /// Empty when the node has no features or features are unknown.
+    #[prost(bytes = "vec", tag = "4")]
+    pub node_features: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GossipChannelDirectionInfo {
