@@ -4,16 +4,24 @@
    "connection refused on :2019". Localhost-only by default, so not a
    public exposure. #}
 
-{# Caddy's `tls internal` issues a self-signed certificate for the site's
-   hostname(s). For an IP-only deployment we must put the IP in the site
-   address so the cert is issued for it; a bare `:port` address would
-   otherwise default to HTTP. When a real domain is configured, Caddy
-   handles ACME/Let's Encrypt automatically and no internal TLS is needed. #}
-{{ caddy_site_address | default(ansible_default_ipv4.address) }}:{{ caddy_public_port }} {
-{% if caddy_site_address is not defined and caddy_use_internal_tls %}
-	tls internal
-{% endif %}
+{# Caddy listens on loopback only. Public traffic reaches us via Cloudflare
+   Tunnel (cloudflared) → Caddy → Garage. TLS is terminated at Cloudflare's
+   edge, so Caddy speaks plain HTTP on the loopback. The S3 SigV4 signature
+   in each request is verified by Garage downstream — Cloudflare and Caddy
+   are pure transit and don't see the auth credentials in any usable form.
 
+   Site address is `:port` (no host) plus an explicit `bind 127.0.0.1`:
+   - `:port` (no host) matches any Host header the client sent — required
+     because cloudflared forwards requests with the public hostname
+     (e.g. `data.example.com`) in the Host header, not `localhost`.
+   - `bind 127.0.0.1` constrains the listening interface to loopback.
+
+   Caveat: `localhost:port` or `http://localhost:port` would also serve
+   plain HTTP on loopback, BUT would constrain Caddy's Host matching to
+   `localhost`, so cloudflared traffic would fall through to a no-handler
+   state (visible as "NOP" log entries with status=0 / empty response). #}
+:{{ caddy_public_port }} {
+	bind localhost
 	# Transparent reverse proxy: do NOT rewrite the Host header — AWS SigV4
 	# includes it in the signature, so any rewrite causes signature
 	# mismatches on signed S3 requests.

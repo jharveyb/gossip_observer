@@ -1,16 +1,17 @@
 ---
 # Deploys the public-data-sharing pipeline:
 #   1. Install Garage (self-hosted S3) on hosts in the [garage] group.
-#   2. Install a Caddy reverse proxy in front of Garage on hosts in the
-#      [caddy_proxy] group, exposing the S3 API over HTTPS with a
-#      self-signed cert.
-#   3. On archiver hosts, configure an rclone systemd timer that syncs
+#   2. Install a Caddy reverse proxy on hosts in the [caddy_proxy] group.
+#      Caddy listens on loopback only.
+#   3. Install cloudflared manually.
+#   4. On archiver hosts, configure an rclone systemd timer that syncs
 #      freshly-exported Parquet files into the Garage bucket.
-#   4. On archiver hosts, maintain a git-based manifest recording which
+#   5. On archiver hosts, maintain a git-based manifest recording which
 #      files have been published.
 #
 # Each play is independent; you can limit execution with --limit or --tags.
-# Garage, Caddy, and the archiver can all run on the same host if desired.
+# Garage, Caddy, cloudflared, and the archiver can all run on the same
+# host if desired.
 
 - name: Install Garage
   hosts: garage
@@ -49,7 +50,7 @@
 #   handlers:
 #     - name: Import handlers
 #       ansible.builtin.import_tasks: handlers/main.yml
-# 
+#
 # - name: Configure publication manifest on archivers
 #   hosts: archivers
 #   become: true
