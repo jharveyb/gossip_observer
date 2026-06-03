@@ -28,6 +28,35 @@ tree $DATADIR/message_hashes/
 
 So, ./TABLE_NAME/YYYY/MM/DD/table_name_YYYY-MM-DD.parquet.
 
+### Fetching data
+
+Use any S3-compatible tool for downloads. The endpoint is <https://observer-data.jharveyb.xyz/>. Ask me for read-only credentials.
+
+Right now the published data size is ~700 MB per day (as compressed Parquet, counting all tables). So ~20 GB per month.
+
+With [rclone](https://rclone.org/), you can use the config snippet in `infra/ansible/DATA_SHARING.md` for bucket access. To fetch the March data:
+
+```bash
+# Confirm our rclone config is working
+rclone lsd observer-data:gossip-observer-data
+
+# Should show multiple folders, 'timings', 'messages', etc.
+
+# Create our target directories
+mkdir -p timings/2026/03
+mkdir -p metadata/2026/03
+mkdir -p messages/2026/03
+mkdir -p message_hashes/2026/03
+mkdir -p message_first_seen/2026/03
+
+# Copy the March data for each table
+rclone copy observer-data:gossip-observer-data/timings/2026/03 ./timings/2026/03/ -P
+rclone copy observer-data:gossip-observer-data/metadata/2026/03 ./metadata/2026/03/ -P
+rclone copy observer-data:gossip-observer-data/messages/2026/03 ./messages/2026/03/ -P
+rclone copy observer-data:gossip-observer-data/message_hashes/2026/03 ./message_hashes/2026/03/ -P
+rclone copy observer-data:gossip-observer-data/message_first_seen/2026/03 ./message_first_seen/2026/03/ -P
+```
+
 ## Examples
 
 ```sh

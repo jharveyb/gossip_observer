@@ -60,7 +60,4 @@ garage_bucket_name: "gossip-observer-data"
 # Add a name to provision a new key; remove to revoke.
 garage_reader_keys:
   - internal
-# Example:
-# garage_reader_keys:
-#   - alice
-#   - bob
+  - alice
