@@ -3,7 +3,12 @@
 
 [Unit]
 After=tailscaled.service
+Wants=tailscaled.service
 
 [Service]
-# Wait 10 seconds after Tailscale starts to ensure interface is fully initialized
-ExecStartPre=/bin/sleep 10
+# Wait (up to 60s) for tailscale0 to actually have an IPv4 address before
+# starting. `After=tailscaled` only guarantees the daemon launched, not that it
+# has authenticated to the tailnet and assigned an IP, so a fixed sleep races on
+# a cold boot. Fall through after the timeout so the DB still starts on localhost
+# if Tailscale is down (exit 0 regardless — a non-zero ExecStartPre blocks start).
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip -4 addr show tailscale0 2>/dev/null | grep -q "inet " && exit 0; sleep 1; done; echo "tailscale0 has no IPv4 after 60s; starting on localhost only" >&2; exit 0'
