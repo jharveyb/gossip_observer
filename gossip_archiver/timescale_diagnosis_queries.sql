@@ -65,3 +65,16 @@ ORDER BY range_start ASC, range_table ASC;
 -- existing hypertables (compressed tables)
 SELECT * FROM timescaledb_information.chunks WHERE hypertable_name LIKE 'timings' ORDER BY range_start;
 
+-- find first-seen times for messages in a specific time window
+SELECT encode(hash::bytea, 'hex'), first_seen FROM public.message_first_seen
+WHERE first_seen < '2026-03-11 00:00+00'::timestamptz
+AND first_seen > '2026-03-10 00:00+00'::timestamptz
+ORDER BY first_seen ASC LIMIT 30000;
+
+-- lookup all observations of a message with a specific outer hash,
+-- in a specific compressed chunk of the timings table (1-day range)
+SELECT * FROM timings WHERE hash = decode('05a8dfad2a4b5658', 'hex')
+AND net_timestamp < '2026-03-11 00:00+00'::timestamptz
+AND net_timestamp > '2026-03-10 00:00+00'::timestamptz
+ORDER BY net_timestamp ASC LIMIT 1000;
+
