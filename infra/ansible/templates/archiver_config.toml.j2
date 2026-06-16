@@ -21,3 +21,21 @@ batch_size = {{ archiver_db_batch_size | default(2500) }}
 
 # Seconds between unconditional DB flushes
 flush_interval = {{ archiver_db_flush_interval | default(2) }}
+
+[export]
+# Parquet export subsystem. Should only be true once message_first_seen table
+# is populated in the DB.
+enabled = {{ item.export_enabled | default(false) | lower }}
+
+{% if item.export_dir is defined %}
+# Output + DuckDB temp-spill location. Set per-instance to a roomy non-root
+# volume: both the Parquet files and the duckdb_tmp spill directory live here.
+# Omit to fall back to the binary default of {storage_dir}/exports.
+dir = "{{ item.export_dir }}"
+{% endif %}
+
+# DuckDB buffer memory limit (MB). Conservative on this 8 GB VPS, which also
+# runs Postgres and (potentially) the other archiver instance's DuckDB. Past
+# this limit DuckDB spills to dir/duckdb_tmp instead of OOMing.
+soft_memory_limit = {{ item.export_soft_memory_limit | default(1024) }}
+threads = {{ item.export_threads | default(2) }}

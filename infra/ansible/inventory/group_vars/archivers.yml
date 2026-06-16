@@ -3,18 +3,39 @@
 # Binary path for deployment (points to staging directory)
 gossip_archiver_binary_path: "{{ binary_staging_dir }}/current/gossip_archiver"
 
+# Storing this in Vault since its potentially sensitive
+# archiver_export_dir_base: "/mnt/big_volume_00"
+
 # List of archiver instances
 # Each archiver can point to a different database (staging vs production)
 # Database URLs are stored in vault.yml as 'archiver_db_urls' dictionary keyed by UUID
+
+# Note, the soft_memory_limit here is for the temporary DuckDB instance embedded
+# in the archiver, that runs ~daily to produce compressed Parquet. In staging,
+# DuckDB OOM'd with 2 threads and a limit of 256 MiB; I'm not sure what the
+# exact bounds are for this for the prod. instance. Double-check the Postgres
+# settings via a timescaledb-tune dry-run before messing with these values.
 gossip_archivers:
   - uuid: "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"
-    host: "do-medium"  # Must match inventory_hostname
+    host: "do-medium" # Must match inventory_hostname
     console_port: 6670
     nats_server: "{{ nats_server_addr_staging }}"
+    export_enabled: true # staging DB — safe to export freely
+    # export_dir: "<NON_ROOT_VOLUME>/gossip_archiver/019b3768-e9ea-7ce3-ae28-9a4acc0ad17f/exports"
+    export_dir: "{{ archiver_export_dir_base }}/staging_exports"
+    export_soft_memory_limit: 512 # staging data is small
+    export_threads: 1
   - uuid: "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e"
     host: "do-medium"
     console_port: 6671
     nats_server: "{{ nats_server_addr_prod }}"
+    # Keep false until message_first_seen is backfilled AND verified on prod;
+    # flip to true only then (companion exports are logged once and never re-run).
+    export_enabled: true
+    # export_dir: "<NON_ROOT_VOLUME>/gossip_archiver/019c26be-a6d2-7bb8-ab6b-07b28bf96c1e/exports"
+    export_dir: "{{ archiver_export_dir_base }}/exports"
+    export_soft_memory_limit: 2048
+    export_threads: 1
 
 # Database configuration (shared by all archivers)
 # Lower than we used in dev due to high traffic and slow inserts into timings
