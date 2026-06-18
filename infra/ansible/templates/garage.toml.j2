@@ -31,10 +31,11 @@ bootstrap_peers = [
 bootstrap_peers = []
 {% endif %}
 
+# No root domain param., as it's optional and we'll use path-style requests
+# anyways.
 [s3_api]
 s3_region = "garage"
 api_bind_addr = "{{ garage_s3_api_bind_addr }}"
-root_domain = ".s3.garage.local"
 
 [admin]
 api_bind_addr = "{{ tailscale_ip + ':' + (garage_admin_bind_port | string) }}"

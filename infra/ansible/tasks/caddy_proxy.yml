@@ -3,6 +3,15 @@
 # API. Public traffic reaches Caddy via Cloudflare Tunnel (cloudflared);
 # no public port is opened in UFW.
 
+- name: Check Tailscale is available
+  ansible.builtin.fail:
+    msg: "Tailscale interface (tailscale0) not found. Ensure Tailscale is installed and running."
+  when: ansible_facts['tailscale0'] is not defined
+
+- name: Get Tailscale IP address
+  ansible.builtin.set_fact:
+    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
+
 - name: Install Caddy apt repo signing key
   ansible.builtin.get_url:
     url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
@@ -32,7 +41,6 @@
     mode: "0640"
     validate: "caddy validate --config %s --adapter caddyfile"
   notify: Reload Caddy
-
 
 - name: Enable and start Caddy
   ansible.builtin.systemd:

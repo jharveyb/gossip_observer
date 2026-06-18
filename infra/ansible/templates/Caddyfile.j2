@@ -20,18 +20,31 @@
    plain HTTP on loopback, BUT would constrain Caddy's Host matching to
    `localhost`, so cloudflared traffic would fall through to a no-handler
    state (visible as "NOP" log entries with status=0 / empty response). #}
+
 :{{ caddy_public_port }} {
-	bind localhost
+	bind localhost {{ tailscale_ip }}
+	# Matcher for requests missing the Authorization header
+	@missing_auth {
+                not header Authorization *
+        }
+
+        # Serve 404 if the matcher matches
+        handle @missing_auth {
+                respond "Not Found" 404
+        }
+
 	# Transparent reverse proxy: do NOT rewrite the Host header — AWS SigV4
 	# includes it in the signature, so any rewrite causes signature
 	# mismatches on signed S3 requests.
-	reverse_proxy {{ caddy_garage_upstream }} {
-		# Parquet range requests and large file streams shouldn't be buffered.
-		flush_interval -1
+	handle {
+	        reverse_proxy {{ caddy_garage_upstream }} {
+	        	# Parquet range requests and large file streams shouldn't be buffered.
+	        	flush_interval -1
 {% if caddy_health_check_upstream is defined %}
-		health_uri /health
-		health_port {{ caddy_health_check_upstream.split(':')[1] | default(3903) }}
+	        	health_uri /health
+	        	health_port {{ caddy_health_check_upstream.split(':')[1] | default(3903) }}
 {% endif %}
+	        }
 	}
 
 	# S3 uploads can be large; set a reasonable limit.
