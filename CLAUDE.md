@@ -1029,6 +1029,64 @@ This manifests as: "origin collector emitted `dir=2` but no other collector ever
 
 When debugging gaps in `query_collector_originated_propagation` or fanout queries, check whether the zero-fanout hashes correspond to channels unique to the origin collector.
 
+## Data Sharing Stack (Garage + Caddy + Cloudflare Tunnel)
+
+For deployment workflow and researcher onboarding, see `infra/ansible/DATA_SHARING.md`.
+
+Public Parquet exports are served via Cloudflare Tunnel → Caddy (loopback) → Garage S3. Five gotchas in this chain burned a deploy cycle each; capturing them here so future sessions don't rediscover them.
+
+### Garage CLI: parse `key info --show-secret`, never `key create`
+
+The output format of `garage key create <name>` changed between v1.x and v2.x. Don't write code or regexes that parse its stdout. Instead, run the creation step and then parse `garage key info --show-secret <name>` separately — that output is stable across versions and includes `Key ID:` and `Secret key:` labels with predictable formatting. See `tasks/garage_bootstrap.yml` for the idempotent pattern (probe → create-if-missing → fetch-with-info).
+
+### Garage `layout apply --version N` requires N == current + 1
+
+The `--version` flag is the *new* layout version, and Garage rejects any value that isn't exactly `current_version + 1`. Hardcoding `--version 1` works only on a brand-new cluster; on re-run after the layout was already applied, it errors with `Invalid new layout version` (HTTP 500). Read the current version from `garage layout show` and increment:
+
+```yaml
+- name: Parse current version
+  ansible.builtin.set_fact:
+    current_version: >-
+      {{ ((layout_show.stdout
+           | regex_findall('Current cluster layout version:\s*(\d+)'))
+          + ['0']) | first | int }}
+
+- name: Apply new layout
+  ansible.builtin.command:
+    cmd: "garage layout apply --version {{ current_version | int + 1 }}"
+```
+
+### rclone behind Cloudflare needs `--s3-sign-accept-encoding=false` (rclone ≥ v1.65)
+
+Cloudflare's edge rewrites the request's `Accept-Encoding` header (adds `gzip, br`). rclone signs `Accept-Encoding` in its SigV4 canonical headers by default, so the mutation causes Garage to compute a different signature → `403 Forbidden: Invalid signature`.
+
+Client-side workarounds:
+
+- rclone CLI: `--s3-sign-accept-encoding=false`
+- rclone.conf: `sign_accept_encoding = false`
+- Pin minimum rclone version to **v1.65** when telling researchers — older versions don't have the flag and silently fail the same way.
+
+DuckDB httpfs and boto3 don't sign `Accept-Encoding`, so they work behind Cloudflare unmodified. The issue is rclone-specific. See [Garage issue #895](https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/895).
+
+### Caddy v2 site address is also a Host matcher
+
+In a Caddyfile, the site address (`localhost:3939`, `127.0.0.1:3939`, `example.com:443`) constrains **both** the listen interface AND the Host header that requests must carry to match. Writing `localhost:3939 { ... }` makes Caddy only handle requests where the Host header is literally `localhost`. Requests coming through Cloudflare Tunnel (Host = `data.example.com`) fall through to a no-handler state, logged as `"msg":"NOP"` access log entries with `status: 0` and a blank response body.
+
+To get "loopback-only listen, any-Host match", split the concerns:
+
+```caddy
+:3939 {
+    bind 127.0.0.1
+    reverse_proxy 127.0.0.1:3900 { ... }
+}
+```
+
+`:3939` (no host) matches any Host; `bind 127.0.0.1` restricts the listening interface to loopback.
+
+### `admin off` in Caddyfile breaks `systemctl reload caddy`
+
+`caddy reload` (invoked by `systemctl reload caddy` and by Ansible handlers using `state: reloaded`) posts the new config to the admin API at `127.0.0.1:2019`. Disabling it with `admin off` in the global options block makes every reload fail with `connection refused on :2019`, leaving the service stuck in `reloading` state for the systemd timeout. Leave the admin API enabled — it's loopback-bound by default, so not a public exposure concern.
+
 ## Available MCP Tools
 
 ### Bitcoin Knowledge Base (bkb)
