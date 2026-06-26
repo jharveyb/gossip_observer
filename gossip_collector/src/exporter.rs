@@ -300,10 +300,10 @@ impl NATSExporter {
             .nats_subject
             .clone();
 
-        let mut total_upload_time = 0;
+        let mut total_upload_time: u128 = 0;
         let mut msg_send_time;
-        let mut msg_submit_interval;
-        let mut upload_count = 0;
+        let mut msg_submit_interval: u128;
+        let mut upload_count: u128 = 0;
         let mut stats_waiter = time::interval(STATS_INTERVAL);
         let mut msg_batch = Vec::with_capacity(batch_size);
 
@@ -324,9 +324,9 @@ impl NATSExporter {
                     break;
                 }
                 _ = stats_waiter.tick() => {
-                    if upload_count > 0 {
+                    if let Some(avg_time_ms) = total_upload_time.checked_div(upload_count) {
                         info!(
-                            avg_time_ms = total_upload_time / upload_count,
+                            avg_time_ms,
                             "Avg. NATS upload + ACK time"
                         );
                         upload_count = 0;

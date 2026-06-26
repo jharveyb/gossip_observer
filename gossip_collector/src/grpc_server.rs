@@ -163,12 +163,7 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
         &self,
         _req: Request<ShutdownRequest>,
     ) -> Result<Response<ShutdownResponse>, Status> {
-        // TODO: what do we want to dump from node before shutdown?
-        // nodelist, channel list, peer list, etc.
-        info!("Collector: grpc server: received shutdown request");
-        let _ = self.node.stop();
-        info!("Collector: grpc server: shut down LDK node");
-
+        // Let the main task shut down the LDK node.
         // Possible weird behavior since the gRPC server is using the same token?
         self.stop_token.cancel();
         info!("Collector: grpc server: sent shutdown signal");

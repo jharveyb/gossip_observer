@@ -9,6 +9,9 @@ pub struct Ldk {
     pub network: String,
     pub esplora: Option<String>,
     pub electrum: Option<String>,
+    pub onchain_sync_interval: Option<u64>,
+    pub lightning_sync_interval: Option<u64>,
+    pub feerate_sync_interval: Option<u64>,
     pub storage_dir: String,
     pub log_level: String,
     pub listen_addr: String,
@@ -16,6 +19,7 @@ pub struct Ldk {
     pub tor_proxy_addr: String,
     pub tor_proxy_port: u16,
     pub enable_tor: bool,
+    pub watchdog_fail_limit: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +69,13 @@ pub struct Collector {
     pub controller_addr: String,
 
     pub graph_upload_cron: String,
+
+    // Seconds to wait for tasks to exit during shutdown before forcing a
+    // process exit (so systemd restarts us).
+    pub shutdown_timeout_secs: u32,
+
+    // Seconds between checks that the embedded LDK node is still running.
+    pub ldk_health_check_interval_secs: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +119,7 @@ impl CollectorConfig {
             .set_default("ldk.tor_proxy_addr", "127.0.0.1")?
             .set_default("ldk.tor_proxy_port", 9050)?
             .set_default("ldk.enable_tor", false)?
+            .set_default("ldk.watchdog_fail_limit", 3)?
             .set_default("apiserver.hostname", "127.0.0.1")?
             .set_default("apiserver.grpc_port", 50051)?
             .set_default("nats.server_addr", "localhost:4222")?
@@ -125,12 +137,16 @@ impl CollectorConfig {
             // .set_default("collector.target_peer_count", 10)?
             .set_default("collector.target_peer_count", 0)?
             // Default to 2 workers for collector and LDK; may want to bump LDK up for tons of peers
-            .set_default("collector.runtime_worker_threads", 2)?
-            .set_default("collector.ldk_runtime_worker_threads", 2)?
+            .set_default("collector.runtime_worker_threads", 3)?
+            .set_default("collector.ldk_runtime_worker_threads", 3)?
             .set_default("collector.storage_dir", storage_dir)?
             .set_default("collector.log_level", "info")?
             // Every 2 hours to start. The seconds are picked randomly at startup.
             .set_default("collector.graph_upload_cron", "0 */2 * * *")?
+            // Force a process exit if graceful shutdown takes longer than this.
+            .set_default("collector.shutdown_timeout_secs", 90)?
+            // Check that the LDK node is still running on this interval.
+            .set_default("collector.ldk_health_check_interval_secs", 60)?
             .add_source(File::with_name(&cfg_path).required(false))
             .add_source(Environment::with_prefix("COLLECTOR"))
             .build()?;

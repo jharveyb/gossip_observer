@@ -17,8 +17,7 @@ use tokio::task::{self, JoinSet};
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info, warn};
 
-use tokio::time::interval;
-use tokio::time::sleep;
+use tokio::time::{interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use observer_common::controller_client::ControllerClient;
@@ -31,7 +30,7 @@ mod node_manager;
 mod peer_conn_manager;
 use crate::config::CollectorConfig;
 use crate::exporter::NATSExporter;
-use crate::node_manager::{balances, connected_peer_count, next_address};
+use crate::node_manager::{balances, connected_peer_count, ldk_watchdog, next_address, stop_node};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
 fn main() -> anyhow::Result<()> {
@@ -85,23 +84,28 @@ async fn async_main(
     builder.set_runtime(ldk_runtime.handle().clone());
     builder.set_gossip_source_p2p();
 
-    // Use larger sync intervals.
-    let sync_cfg = BackgroundSyncConfig {
-        onchain_wallet_sync_interval_secs: 60 * 8,
-        lightning_wallet_sync_interval_secs: 60 * 4,
-        fee_rate_cache_update_interval_secs: 60 * 10,
-    };
+    let mut sync_cfg = BackgroundSyncConfig::default();
+    if let Some(onchain_interval) = cfg.ldk.onchain_sync_interval {
+        sync_cfg.onchain_wallet_sync_interval_secs = onchain_interval;
+    }
+    if let Some(lightning_interval) = cfg.ldk.lightning_sync_interval {
+        sync_cfg.lightning_wallet_sync_interval_secs = lightning_interval;
+    }
+    if let Some(feerate_interval) = cfg.ldk.feerate_sync_interval {
+        sync_cfg.fee_rate_cache_update_interval_secs = feerate_interval;
+    }
 
     match (cfg.ldk.esplora, cfg.ldk.electrum) {
         (None, None) | (Some(_), Some(_)) => {
             bail!("Exactly one chain source must be specified")
         }
         (None, Some(server_url)) => {
-            let _cfg = ElectrumSyncConfig {
+            let cfg = ElectrumSyncConfig {
                 background_sync_config: Some(sync_cfg),
             };
             // builder.set_chain_source_electrum(server_url, Some(cfg));
-            builder.set_chain_source_electrum(server_url, None);
+            // Use default cfg, now that we're using a private endpoint
+            builder.set_chain_source_electrum(server_url, Some(cfg));
         }
         (Some(server_url), None) => {
             let cfg = EsploraSyncConfig {
@@ -255,6 +259,20 @@ async fn async_main(
         target_peer_count.clone(),
     ));
 
+    // Shut down the collector if the embedded LDK node stops. Systemd should
+    // restart the collector later.
+    let ldk_watchdog_stop_signal = stop_signal.clone();
+    main_tasks.spawn(ldk_watchdog(
+        node.clone(),
+        interval(Duration::from_secs(
+            cfg.collector.ldk_health_check_interval_secs.into(),
+        )),
+        ldk_watchdog_stop_signal,
+        sync_cfg,
+        cfg.collector.ldk_health_check_interval_secs,
+        cfg.ldk.watchdog_fail_limit,
+    ));
+
     info!(start_time = %chrono::Utc::now().to_rfc3339(), "Collector start time");
 
     // Start gRPC server
@@ -311,6 +329,7 @@ async fn async_main(
 
     let ctrl_handler_stop_recv = stop_signal.child_token();
     let ctrl_handle_stop_send = stop_signal.clone();
+    let shutdown_timeout = Duration::from_secs(cfg.collector.shutdown_timeout_secs.into());
     main_tasks.spawn(async move {
         tokio::select! {
             _ = ctrl_handler_stop_recv.cancelled() => {
@@ -320,7 +339,12 @@ async fn async_main(
                 info!("Signal handler: Ctrl-C received, shutting down");
             },
         }
-        let _ = node.clone().stop();
+
+        // Use a timeout; LDK may want to write to disk, but it may also
+        // get stuck on a network call or other blocking operation.
+        if let Err(ldk_shutdown) = stop_node(node, shutdown_timeout).await {
+            error!(error = ?ldk_shutdown, "Signal handler: possible LDK unclean shutdown");
+        }
         info!("Signal handler: shut down LDK node");
         ctrl_handle_stop_send.cancel();
         info!("Signal handler: sent shutdown signal");
@@ -328,10 +352,24 @@ async fn async_main(
     });
 
     // All tokio tasks spawned earlier should have a child cancellation token.
-    return if let Some(res) = main_tasks.join_next().await {
+    if let Some(res) = main_tasks.join_next().await {
         let mut task_res = vec![res?];
         stop_signal.cancel();
-        task_res.append(&mut main_tasks.join_all().await);
+
+        // Set a timeout for graceful task shutdown after sending the cancel
+        // signal. This should help catch tasks that may have 'lost wakers' /
+        // are stuck. We want to guarantee shut down, so systemd can restart us.
+        match timeout(shutdown_timeout, main_tasks.join_all()).await {
+            Ok(mut remaining) => task_res.append(&mut remaining),
+            Err(_) => {
+                error!(
+                    timeout_secs = shutdown_timeout.as_secs(),
+                    "Graceful shutdown timed out; forcing exit"
+                );
+                std::process::exit(1);
+            }
+        }
+
         let mut final_err = false;
         for task in task_res {
             if let Err(e) = task {
@@ -346,7 +384,7 @@ async fn async_main(
         }
     } else {
         Ok(())
-    };
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
