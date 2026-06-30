@@ -16,26 +16,7 @@ from datetime import date as date_type, timedelta
 
 import duckdb
 
-from parquet_queries import load_range
-
-
-def le_blob_to_u64(col: str) -> str:
-    """SQL fragment decoding an 8-byte little-endian BLOB column to UBIGINT.
-
-    All three BLOB columns we export (outer_hash, inner_hash, scid) are stored
-    as `u64.to_le_bytes()` by gossip_archiver
-    (gossip_archiver/src/lib.rs:117,132-133). DuckDB has no native bytes->int
-    conversion (decode/from_binary go the other way), so we hex-encode, swap
-    the byte pairs (LE -> BE), and parse the result as a 0x-prefixed UBIGINT
-    literal.
-    """
-    return rf"""
-        ('0x' || regexp_replace(
-            hex({col}),
-            '(..)(..)(..)(..)(..)(..)(..)(..)',
-            '\8\7\6\5\4\3\2\1'
-        ))::UBIGINT
-    """
+from parquet_queries import le_blob_to_u64, load_range
 
 
 def export_compact(conn: duckdb.DuckDBPyConnection, output_path: str) -> int:

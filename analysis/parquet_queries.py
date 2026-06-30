@@ -103,6 +103,169 @@ def run_query(conn: duckdb.DuckDBPyConnection, sql: str) -> pl.DataFrame:
     return df
 
 
+def le_blob_to_u64(col: str) -> str:
+    """SQL fragment decoding an 8-byte little-endian BLOB column to UBIGINT.
+
+    All three BLOB columns we export (outer_hash, inner_hash, scid) are stored
+    as `u64.to_le_bytes()` by gossip_archiver
+    (gossip_archiver/src/lib.rs:117,132-133). DuckDB has no native bytes->int
+    conversion (decode/from_binary go the other way), so we hex-encode, swap
+    the byte pairs (LE -> BE), and parse the result as a 0x-prefixed UBIGINT
+    literal.
+    """
+    return rf"""
+        ('0x' || regexp_replace(
+            hex({col}),
+            '(..)(..)(..)(..)(..)(..)(..)(..)',
+            '\8\7\6\5\4\3\2\1'
+        ))::UBIGINT
+    """
+
+
+# ---------------------------------------------------------------------------
+# Collector identity / channel-ownership maps
+# ---------------------------------------------------------------------------
+#
+# Keyed by collector pubkey (= `timings.collector`). A collector "has a channel"
+# iff its `balances` dict is non-empty. These let us tell genuine
+# collector-ORIGINATED gossip apart from sync-served gossip: dir=2 only means
+# "transmitted to a peer" — dominated by serving our graph to syncing peers — so
+# a channelless collector legitimately emits large dir=2 channel counts. See
+# query_collector_origination for the exact-origination logic.
+#
+# Source: controller status endpoint (balances/uuid) and query_results/notes.md
+# (channel SCIDs). Update when channels are opened/closed.
+COLLECTOR_INFO: dict[str, dict] = {
+    "039646e24ed7067af3340717c8a1ae0dba8fae56cacdba2d4be4161a9a5d92308d": {
+        "uuid": "019bfdbc-10b8-794f-91cb-132c5f4cc390",
+        "balances": {},
+    },
+    "02be86fcfd15193884d72332ba5a7112c2b929dd388c87e2f6bb36b3e0fc1af7c8": {
+        "uuid": "019c26b4-9efe-7333-9c5e-7b3336d9b733",
+        "balances": {"totalOnchain": "1787", "totalLightningBalance": "39051"},
+    },
+    "03f217cf79e6e24ed3547a3ea32e6c149ad4849bccbd92ed759f9e680f66855954": {
+        "uuid": "019c26b5-3e05-7d13-91ab-182eb98219e1",
+        "balances": {},
+    },
+    "03ddc4f6b61d1d6826acb6fbe0013d478e930b90e5cd31e0fd3a6ba80963256a06": {
+        "uuid": "019c26b5-a344-7be0-91a5-8221c53446a2",
+        "balances": {},
+    },
+    "02a7089f81bb535403031b248cad512f8d8267dbe91241cd4dbbb92afcdc2baec2": {
+        "uuid": "019c26b6-aff9-74e0-935f-0cd39683850f",
+        "balances": {},
+    },
+    "03fa502117c9dacc575ee87b770ac07f6f574ed32e831bb1a025e2a3d130b87df5": {
+        "uuid": "019c26b7-1636-73e7-aa3b-a9ca4020d220",
+        "balances": {},
+    },
+    "029ab8668a756d0bcfa11e76c8f2e5e4de27121acf417bedaa3e38044361b51ecd": {
+        "uuid": "019c26b8-3118-72db-9059-d0d7eab225ba",
+        "balances": {"totalOnchain": "9844", "totalLightningBalance": "39051"},
+    },
+    "029c0a4817877ec7b5857269ec47cbfd6221649eef2e8928129a9213b5aaec4ab7": {
+        "uuid": "019c26b8-3125-798a-afbf-cf3f308089cd",
+        "balances": {},
+    },
+    "037f0eecd594484c49dc53683602ebb1bc50af0717dec53b0022877384703623ea": {
+        "uuid": "019c26b8-3137-7cb2-bf48-250a5ce79d8d",
+        "balances": {},
+    },
+    "026396c83abf5eedd7d7b3d4047790ab46b875e9918501810fc031d1f374e914ae": {
+        "uuid": "019c26b8-3148-759c-8494-454ce6b62c57",
+        "balances": {"totalOnchain": "19844", "totalLightningBalance": "159051"},
+    },
+    "027865bd89b9ae0270cccb65060a92511b86a1f1ee29f6e611a85157ab7110e397": {
+        "uuid": "019c26b8-315a-77b2-9e80-61f45ec40f15",
+        "balances": {},
+    },
+    "022398a4472f19fb55e5cbfca722579b69b65c323f508abd9030afef4056d3107f": {
+        "uuid": "019c26b8-316d-7d55-9e6d-18990aed72a2",
+        "balances": {"totalOnchain": "13556", "totalLightningBalance": "114051"},
+    },
+    "03d42ada2b0f7930f41bafc3dd98245dd445faf14f6242618a103994920fece0df": {
+        "uuid": "019c26b8-3180-7332-b0fe-a48931990692",
+        "balances": {},
+    },
+    "03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371": {
+        "uuid": "019c26b8-3191-7fff-895f-5ed752c53bdc",
+        "balances": {
+            "totalOnchain": "25912",
+            "spendableOnchain": "912",
+            "totalLightningBalance": "39051",
+        },
+    },
+    "027f0ce3198b762a0879a63e57ac8c04fac9f0de8cbae923fa2d454f7bbdc705f5": {
+        "uuid": "019c26b8-31a6-7954-9de7-881d681e742e",
+        "balances": {},
+    },
+    "03c926a800929fcc99826c23dd1a39a4e1253c96f6249595bab7620c3d810f3662": {
+        "uuid": "019c26b8-31b8-7cc9-bb95-1b0223d7b5b1",
+        "balances": {"totalOnchain": "4844", "totalLightningBalance": "49051"},
+    },
+    "021b4c2e6135d016e4ef27e7a187c3f71b1f6f236a4fee48773c76b25fd3ebe498": {
+        "uuid": "019c26b8-31d4-7973-b55f-b6218e03d7ea",
+        "balances": {},
+    },
+    "0370942652c1778a683f85be315fb167cef474d16d091ece242b9606f36303feed": {
+        "uuid": "019c26b8-31e4-741f-9034-71f14cdb8753",
+        "balances": {},
+    },
+    "03fb60edd9a56e9946cf136187e9093f44e6e131b71524c1c78b148310c9cb3797": {
+        "uuid": "019c26b8-31f2-7969-9266-3536fc515d27",
+        "balances": {},
+    },
+    "02590d4fac69d138a88a2e3684f196236e8664e40b941acf80bfaf1c57f2c2472a": {
+        "uuid": "019c26b8-3205-7c55-8236-24db921b665e",
+        "balances": {"totalOnchain": "9844", "totalLightningBalance": "79051"},
+    },
+    "0201b7019f3b07676994d49e34dadd6954854c239d6fbd7c8c2998ea18ee606dc1": {
+        "uuid": "019c26b8-3219-7c9b-aa3f-312979fffa20",
+        "balances": {},
+    },
+}
+
+# pubkey -> list of canonical u64 SCIDs for the channels this collector is an
+# endpoint of. Used by query_collector_origination to isolate the collector's
+# own channel_announcement/channel_update (metadata.scid, LE-decoded). Values
+# are the BOLT-7 short_channel_id as an unsigned 64-bit integer.
+#
+# Verified against data this session: 029ab866 and 03c926a8 SCIDs were derived
+# independently from the exports and match exactly (notes.md had a stray minus
+# sign on 03c926a8). 02be86fc, 026396c8, 03abd822, 02590d4f confirmed present in
+# metadata. 022398a4 (satsquares) is from notes.md but was NOT observed in the
+# loaded range — if its origination query returns nothing, re-derive the SCID.
+COLLECTOR_SCIDS: dict[str, list[int]] = {
+    "03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371": [
+        1028429300572553216
+    ],  # emzy
+    "03c926a800929fcc99826c23dd1a39a4e1253c96f6249595bab7620c3d810f3662": [
+        1028571137643905025
+    ],  # SchroedingersCat
+    "02be86fcfd15193884d72332ba5a7112c2b929dd388c87e2f6bb36b3e0fc1af7c8": [
+        1028571137643839489
+    ],  # Star Service
+    "029ab8668a756d0bcfa11e76c8f2e5e4de27121acf417bedaa3e38044361b51ecd": [
+        1028579933714841601
+    ],  # Amboss.Space
+    "026396c83abf5eedd7d7b3d4047790ab46b875e9918501810fc031d1f374e914ae": [
+        1028578834279497729
+    ],  # Megalithic
+    "022398a4472f19fb55e5cbfca722579b69b65c323f508abd9030afef4056d3107f": [
+        1028964762817527809
+    ],  # satsquares (unverified)
+    "02590d4fac69d138a88a2e3684f196236e8664e40b941acf80bfaf1c57f2c2472a": [
+        1028964762816937984
+    ],  # CoinGate
+}
+
+
+def has_channel(pubkey: str) -> bool:
+    """True if the collector owns at least one channel (non-empty balances)."""
+    return bool(COLLECTOR_INFO.get(pubkey, {}).get("balances"))
+
+
 # ---------------------------------------------------------------------------
 # Query 1: Outer hash propagation delay
 # ---------------------------------------------------------------------------
@@ -119,11 +282,23 @@ def query_outer_hash_propagation(
     avoids a self-join on timings and gives correct results across
     multi-day queries (where MIN(net_timestamp) within the window would
     miss messages that first appeared earlier).
+
+    `peer_cutoff` and `total_peers` count **distinct peer pubkeys** we received
+    the message from (over dir=1), NOT raw receipt rows — a peer that relays the
+    same hash to several of our collectors counts once. We use
+    `approx_count_distinct` (HyperLogLog): exact `COUNT(DISTINCT peer)` grouped by
+    hash over a multi-day range holds a distinct set per hash and exhausts memory,
+    while the approximate sketch is bounded (~2% error, fine for a cutoff filter).
+
+    Only receipts within **1 hour** of `first_seen` are considered, matching the
+    TimescaleDB query (test_queries.query_outer_hash_propagation) and queries
+    2c/3. Without this bound, a late re-receipt (e.g. a re-broadcast hours later)
+    inflates the tail percentiles far past the 3600 s ceiling.
     """
     type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
     sql = f"""
     SELECT
-        COUNT(*) AS total_peers,
+        approx_count_distinct(t.peer) AS total_peers,
         quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.05) AS p05,
         quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.25) AS p25,
         quantile_cont(epoch(t.net_timestamp) - epoch(mfs.first_seen), 0.50) AS p50,
@@ -135,14 +310,16 @@ def query_outer_hash_propagation(
     WHERE t.dir = 1
       AND m.type IN (1, 2, 3)
       {type_filter}
+      -- Only receipts within 1 hour of first observation (delay ceiling = 3600s)
+      AND t.net_timestamp <= mfs.first_seen + INTERVAL '1 hour'
     GROUP BY t.hash, mfs.first_seen
-    HAVING COUNT(*) >= {peer_cutoff}
+    HAVING approx_count_distinct(t.peer) >= {peer_cutoff}
     """
     return run_query(conn, sql)
 
 
 # ---------------------------------------------------------------------------
-# Query 2: Collector-originated propagation delay
+# Query 3: Collector-originated propagation delay
 # ---------------------------------------------------------------------------
 
 
@@ -151,194 +328,97 @@ def query_collector_originated_propagation(
     msg_type: int | None = None,
     peer_cutoff: int = 10,
 ) -> pl.DataFrame:
-    """Propagation delay from first outbound to inbound receipts.
+    """Aggregate propagation delay for gossip OUR collectors originated.
 
-    Equivalent to test_queries.query_collector_originated_propagation.
+    Aggregate companion to query_collector_fanout_originated (2c). Restricts to
+    messages a collector truly originated (owned-SCID for channel gossip,
+    `orig_node == collector` for node_announcement), anchors t0 at
+    `message_first_seen.first_seen`, and reports delay percentiles of inbound
+    receipts at other collectors within 1 hour of t0.
+
+    `peer_cutoff` counts **distinct receiving collectors** (reach), matching 2c's
+    `distinct_recv_collectors` — NOT raw receipt rows. A message qualifies if it
+    reached >= peer_cutoff *other* collectors; the default is intentionally low
+    (~20 collectors total). `qualifying_messages` here equals the sum of 2c's
+    `msgs_qualifying` over all rows.
+
+    History: this used to anchor on `MIN(dir=2)` ("first time any collector sent
+    it outbound") on the assumption that dir=2 == origination. That is wrong —
+    dir=2 is SERVE time (sync-dump serving), decoupled from creation — so the old
+    version credited sync-dump servers as originators and produced meaningless
+    delays. The owned-SCID gate + first_seen anchor fixes both. Because we only
+    own a handful of channels, the qualifying set is small; query 1
+    (query_outer_hash_propagation) is the all-messages, non-attributed view.
     """
     type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
-    sql = f"""
-    -- Step 1: Find the earliest time each message was sent outbound (dir=2)
-    -- by ANY of our collectors. This is the "origin time" — the moment the
-    -- message entered the gossip network from our perspective.
-    WITH outbound_origins AS (
-        SELECT t.hash, MIN(t.net_timestamp) AS origin_time
-        FROM timings t
-        JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 2                     -- outbound = collector sent to peer
-          AND m.type IN (1, 2, 3)           -- gossip types only (not ping/pong)
-          {type_filter}
-        GROUP BY t.hash                     -- one origin_time per message
-    ),
 
-    -- Step 2: For each outbound message, find all inbound receipts (dir=1)
-    -- that arrived within 1 hour of origin. The window function counts how
-    -- many inbound receipts each message got (= how many peers relayed it
-    -- back to any of our collectors).
-    inbound_with_origin AS (
-        SELECT
-            t.hash,
-            o.origin_time,
-            t.net_timestamp,
-            -- Window function: count rows per hash WITHOUT collapsing them,
-            -- so we can still access individual timestamps later.
-            COUNT(*) OVER (PARTITION BY t.hash) AS peer_count
+    owned_rows = [
+        f"('{pk}', {scid}::UBIGINT)"
+        for pk, scids in COLLECTOR_SCIDS.items()
+        for scid in scids
+    ]
+    owned_values = ",\n        ".join(owned_rows)
+
+    sql = f"""
+    WITH owned(collector, scid_u64) AS (
+        VALUES {owned_values}
+    ),
+    -- (hash, owner) pairs our collectors originated (exact gate, see 2b/2c)
+    originated AS (
+        SELECT DISTINCT t.hash, t.collector
         FROM timings t
-        JOIN outbound_origins o ON t.hash = o.hash
         JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 1                     -- inbound = peer sent to collector
+        LEFT JOIN owned o
+            ON o.collector = t.collector
+            AND o.scid_u64 = {le_blob_to_u64("m.scid")}
+        WHERE t.dir = 2
           AND m.type IN (1, 2, 3)
           {type_filter}
+          AND (
+              (m.type IN (1, 3) AND o.collector IS NOT NULL)
+              OR (m.type = 2 AND m.orig_node = t.collector)
+          )
+    ),
+    -- t0 = first time the message was observed by any collector (create proxy)
+    origin AS (
+        SELECT og.hash, og.collector AS origin_collector, f.first_seen AS origin_time
+        FROM originated og
+        JOIN message_first_seen f ON og.hash = f.hash
+    ),
+
+    -- Inbound receipts at OTHER collectors within 1 hour of t0 (one row each).
+    inbound AS (
+        SELECT o.hash, o.origin_time, t.collector AS recv_collector, t.net_timestamp
+        FROM origin o
+        JOIN timings t ON t.hash = o.hash
+        WHERE t.dir = 1
+          AND t.collector <> o.origin_collector
           AND t.net_timestamp >= o.origin_time
           AND t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
     ),
-
-    -- Step 3: Deduplicate to one row per message hash (for counting messages
-    -- and computing the median peer count without receipt-count weighting).
+    -- Per message: reach = how many DISTINCT other collectors received it.
     per_hash AS (
-        SELECT DISTINCT i.hash, i.peer_count
-        FROM inbound_with_origin i
-        WHERE peer_count >= {peer_cutoff}   -- only well-propagated messages
+        SELECT hash, COUNT(DISTINCT recv_collector) AS recv_collectors
+        FROM inbound
+        GROUP BY hash
+    ),
+    -- Messages that reached >= peer_cutoff distinct other collectors.
+    qualifying_hashes AS (
+        SELECT hash, recv_collectors FROM per_hash WHERE recv_collectors >= {peer_cutoff}
     )
 
-    -- Step 4: Compute aggregate statistics across ALL qualifying messages.
-    -- The JOIN brings back all individual receipt rows so that delay
-    -- percentiles are computed over every receipt, not just per-hash medians.
     SELECT
-        COUNT(*)                                                            AS qualifying_messages,
-        SUM(p.peer_count)                                                  AS total_receipts,
-        quantile_cont(p.peer_count::DOUBLE, 0.50)                          AS median_peers,
-        -- Delay = seconds between origin (first outbound) and each inbound receipt
+        (SELECT COUNT(*) FROM qualifying_hashes)                                     AS qualifying_messages,
+        COUNT(*)                                                                     AS total_receipts,
+        (SELECT quantile_cont(recv_collectors::DOUBLE, 0.50) FROM qualifying_hashes) AS median_recv_collectors,
+        -- Delay = seconds between t0 (first observation) and each inbound receipt
         quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.05) AS p05,
         quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.25) AS p25,
         quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.50) AS p50,
         quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.75) AS p75,
         quantile_cont(epoch(i.net_timestamp) - epoch(i.origin_time), 0.95) AS p95
-    FROM per_hash p
-    JOIN inbound_with_origin i ON p.hash = i.hash
-    """
-    return run_query(conn, sql)
-
-
-# ---------------------------------------------------------------------------
-# Query 2b: Outbound message stats (debug)
-# ---------------------------------------------------------------------------
-
-
-def query_outbound_stats(conn: duckdb.DuckDBPyConnection) -> pl.DataFrame:
-    """Count outbound (dir=2) messages per day, by type and collector.
-
-    Useful for diagnosing why collector-originated propagation returns 0 rows.
-    """
-    sql = """
-    SELECT
-        date_trunc('day', t.net_timestamp) AS day,
-        m.type,
-        CASE m.type
-            WHEN 1 THEN 'channel_announcement'
-            WHEN 2 THEN 'node_announcement'
-            WHEN 3 THEN 'channel_update'
-        END AS type_name,
-        t.collector,
-
-        -- Total dir=2 rows for this (day, type, collector).
-        -- Each row = one peer-send event. If a collector sends a message to
-        -- N stable peers, that produces N rows. Low counts (e.g. 2) indicate
-        -- few peers passed the pending_connection_delay filter, NOT few peers
-        -- overall.
-        COUNT(*) AS outbound_receipts,
-
-        -- Distinct message hashes this collector sent outbound.
-        -- NOTE: the same hash can appear in MULTIPLE rows of this output
-        -- (once per collector that sent it). To get the true global distinct
-        -- count, use query 2d instead.
-        COUNT(DISTINCT t.hash) AS unique_outer,
-
-        -- Distinct inner (content) hashes — messages with different outer
-        -- hashes but identical content (re-signed by different nodes) share
-        -- the same inner_hash.
-        COUNT(DISTINCT t.inner_hash) AS unique_inner
-
-    FROM timings t
-    JOIN metadata m ON t.hash = m.hash
-    WHERE t.dir = 2                     -- outbound only
-      AND m.type IN (1, 2, 3)          -- gossip types (not ping/pong)
-    GROUP BY day, m.type, t.collector   -- one row per (day, type, collector)
-    ORDER BY day, m.type, t.collector
-    """
-    return run_query(conn, sql)
-
-
-# ---------------------------------------------------------------------------
-# Query 2c: Collector fanout with propagation delay (debug)
-# ---------------------------------------------------------------------------
-
-
-def query_collector_fanout(
-    conn: duckdb.DuckDBPyConnection,
-    msg_type: int | None = None,
-) -> pl.DataFrame:
-    """For each collector that originates outbound messages, measure fanout:
-    how many other collectors received the message inbound, how many receipts
-    in total, and the distribution of receipt delays relative to origin_time.
-
-    origin_time is MIN(dir=2 net_timestamp) per (hash, origin_collector).
-    Delay = (inbound receipt at another collector) - origin_time, clamped to
-    the 1-hour window after origin.
-    """
-    type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
-    sql = f"""
-    WITH outbound_ranked AS (
-        SELECT
-            t.hash,
-            t.collector,
-            t.net_timestamp,
-            ROW_NUMBER() OVER (PARTITION BY t.hash ORDER BY t.net_timestamp) AS rn
-        FROM timings t
-        JOIN metadata m ON t.hash = m.hash
-        WHERE t.dir = 2
-          AND m.type IN (1, 2, 3)
-          {type_filter}
-    ),
-    outbound AS (
-        SELECT
-            hash,
-            collector AS origin_collector,
-            net_timestamp AS origin_time
-        FROM outbound_ranked
-        WHERE rn = 1
-    ),
-    inbound_at_others AS (
-        -- LEFT JOIN so origin collectors still appear even when zero fanout
-        -- is observed. Join conditions sit in ON (not WHERE) to preserve
-        -- unmatched outbound rows.
-        SELECT
-            o.origin_collector,
-            o.hash,
-            o.origin_time,
-            t.collector AS receiving_collector,
-            t.net_timestamp AS receipt_time
-        FROM outbound o
-        LEFT JOIN timings t
-            ON o.hash = t.hash
-            AND t.dir = 1
-            AND t.collector <> o.origin_collector
-            AND t.net_timestamp >= o.origin_time
-            AND t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
-    )
-    SELECT
-        date_trunc('day', origin_time)                                          AS day,
-        origin_collector,
-        COUNT(DISTINCT hash)                                                    AS msgs_originated,
-        COUNT(DISTINCT receiving_collector)                                     AS distinct_recv_collectors,
-        COUNT(receipt_time)                                                     AS total_inbound_receipts,
-        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.05)           AS delay_p05,
-        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.25)           AS delay_p25,
-        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.50)           AS delay_p50,
-        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.75)           AS delay_p75,
-        quantile_cont(epoch(receipt_time) - epoch(origin_time), 0.95)           AS delay_p95
-    FROM inbound_at_others
-    GROUP BY day, origin_collector
-    ORDER BY day, origin_collector
+    FROM inbound i
+    JOIN qualifying_hashes q ON i.hash = q.hash
     """
     return run_query(conn, sql)
 
@@ -353,19 +433,15 @@ def query_distinct_outbound_hashes(
 ) -> pl.DataFrame:
     """Global distinct dir=2 hash count per (day, type).
 
-    Cross-check for 2b and 2c: 2b's unique_outer sum double-counts hashes
-    that multiple collectors relay, so it will be >= this number. 2c's
-    msgs_originated sum (across days) should equal this number.
+    Cross-check / scale reference: how many truly distinct gossip messages were
+    transmitted outbound on each day, regardless of which collector sent them.
+    A hash served by multiple collectors is counted once here, so this is <= the
+    sum of any per-collector dir=2 counts. Recall dir=2 is sync-serving (not
+    origination, not relay — see query_collector_origination, 2b).
     """
     sql = """
-    -- Cross-check query: how many truly distinct messages were sent outbound
-    -- on each day, regardless of which collector sent them?
-    --
-    -- Use this to verify query 2b and 2c:
-    --   - 2b's SUM(unique_outer) >= this number (because 2b counts per
-    --     collector, so a hash relayed by 3 collectors is counted 3 times)
-    --   - 2c's SUM(msgs_originated) should equal this number (because 2c
-    --     assigns each hash to exactly one origin collector)
+    -- How many truly distinct messages were transmitted outbound (dir=2) on each
+    -- day, regardless of which collector sent them (no per-collector double-count).
     SELECT
         date_trunc('day', t.net_timestamp) AS day,
         m.type,
@@ -388,6 +464,230 @@ def query_distinct_outbound_hashes(
       AND m.type IN (1, 2, 3)
     GROUP BY day, m.type
     ORDER BY day, m.type
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 2b: Collector-ORIGINATED gossip (exact)
+# ---------------------------------------------------------------------------
+
+
+def query_collector_origination(
+    conn: duckdb.DuckDBPyConnection,
+    msg_type: int | None = None,
+) -> pl.DataFrame:
+    """Per-day count of gossip a collector actually ORIGINATED, by type.
+
+    `dir=2` only means "the collector transmitted this message to a peer", which
+    in the export is dominated by SYNC SERVING — when a peer requests a full
+    sync, the node streams its whole network graph to that one peer (the fork
+    only exports gossip that goes through `enqueue_message`; broadcast relay and
+    the node's own freshly-created broadcasts use a separate, unexported path).
+    So a channelless collector legitimately shows huge dir=2 channel counts.
+
+    Origination is identified exactly, per type:
+      - channel_announcement / channel_update (types 1, 3): `metadata.orig_node`
+        is NULL for these, so we gate on channel ownership — the message's SCID
+        must be one of the collector's own channels (COLLECTOR_SCIDS). A
+        channelless collector therefore originates none.
+      - node_announcement (type 2): exact and free — `metadata.orig_node` equals
+        the collector's own pubkey.
+
+    Note: the JOIN to `metadata` can undercount when a hash's first-appearance
+    day predates the loaded range (metadata is partitioned by first_seen).
+    Channel gossip the collector re-serves daily is normally present, but widen
+    `--days` if a known channel shows zero.
+    """
+    type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
+
+    owned_rows = [
+        f"('{pk}', {scid}::UBIGINT)"
+        for pk, scids in COLLECTOR_SCIDS.items()
+        for scid in scids
+    ]
+    owned_values = ",\n        ".join(owned_rows)
+
+    sql = f"""
+    WITH owned(collector, scid_u64) AS (
+        VALUES {owned_values}
+    ),
+    gossip AS (
+        SELECT
+            date_trunc('day', t.net_timestamp) AS day,
+            t.collector,
+            m.type,
+            m.orig_node,
+            t.hash,
+            t.inner_hash,
+            {le_blob_to_u64("m.scid")} AS scid_u64
+        FROM timings t
+        JOIN metadata m ON t.hash = m.hash
+        WHERE t.dir = 2                       -- collector transmitted it
+          AND m.type IN (1, 2, 3)
+          {type_filter}
+    )
+    SELECT
+        g.day,
+        g.type,
+        CASE g.type
+            WHEN 1 THEN 'channel_announcement'
+            WHEN 2 THEN 'node_announcement'
+            WHEN 3 THEN 'channel_update'
+        END AS type_name,
+        g.collector,
+        COUNT(*)                       AS originated_receipts,
+        COUNT(DISTINCT g.hash)         AS unique_outer,
+        COUNT(DISTINCT g.inner_hash)   AS unique_inner
+    FROM gossip g
+    LEFT JOIN owned o
+        ON o.collector = g.collector AND o.scid_u64 = g.scid_u64
+    WHERE
+        -- channel gossip: collector must own the channel (SCID match)
+        (g.type IN (1, 3) AND o.collector IS NOT NULL)
+        -- node_announcement: collector is the originating node
+        OR (g.type = 2 AND g.orig_node = g.collector)
+    GROUP BY g.day, g.type, g.collector
+    ORDER BY g.day, g.type, g.collector
+    """
+    return run_query(conn, sql)
+
+
+# ---------------------------------------------------------------------------
+# Query 2c: Collector fanout for EXACT originations
+# ---------------------------------------------------------------------------
+
+
+def query_collector_fanout_originated(
+    conn: duckdb.DuckDBPyConnection,
+    msg_type: int | None = None,
+    peer_cutoff: int = 5,
+) -> pl.DataFrame:
+    """Fanout per origin collector, restricted to messages it truly ORIGINATED.
+
+    For each origin collector: how many of its messages reached other collectors,
+    how many were "well-propagated", total inbound receipts, and receipt-delay
+    percentiles within 1 hour of t0.
+
+    The origin collector is identified exactly (same gate as
+    query_collector_origination, 2b):
+      - channel_announcement / channel_update (types 1, 3): the sending collector
+        owns the channel (SCID in COLLECTOR_SCIDS). Each such hash has exactly one
+        owner, so no first-sender tie-break is needed.
+      - node_announcement (type 2): `metadata.orig_node` == the collector pubkey.
+
+    t0 (origin_time) = `message_first_seen.first_seen` — the earliest time the
+    message was observed by ANY collector (the best create-time proxy we have).
+    We deliberately do NOT use MIN(dir=2): dir=2 is SERVE time (a collector
+    streams its graph to a syncing peer), which can be hours/days after the
+    message was created and broadcast, so MIN(dir=2) would put t0 long after the
+    receipts and yield near-zero fanout. (A collector's own channel_update is
+    broadcast via a path the fork does not export, so the export only sees it
+    later as a sync-serve; first_seen sidesteps that.)
+
+    Columns:
+      - `msgs_originated`: distinct messages the collector originated (incl. ones
+        with zero fanout — most served own-updates are stale re-serves whose
+        receipts predate t0+1h).
+      - `msgs_qualifying`: of those, how many reached >= `peer_cutoff` DISTINCT
+        other collectors. Summing this column equals query 3's
+        `qualifying_messages` (same gate + cutoff).
+      - `distinct_recv_collectors` / `total_inbound_receipts`: group-level union /
+        receipt count across ALL the collector's messages (do not read these as
+        per-message reach).
+    """
+    type_filter = f"AND m.type = {msg_type}" if msg_type is not None else ""
+
+    owned_rows = [
+        f"('{pk}', {scid}::UBIGINT)"
+        for pk, scids in COLLECTOR_SCIDS.items()
+        for scid in scids
+    ]
+    owned_values = ",\n        ".join(owned_rows)
+
+    sql = f"""
+    WITH owned(collector, scid_u64) AS (
+        VALUES {owned_values}
+    ),
+    -- (hash, owner) pairs the owner actually originated (exact gate). The owner
+    -- must have a dir=2 row for the hash (it appears in the export when served).
+    originated AS (
+        SELECT DISTINCT t.hash, t.collector
+        FROM timings t
+        JOIN metadata m ON t.hash = m.hash
+        LEFT JOIN owned o
+            ON o.collector = t.collector
+            AND o.scid_u64 = {le_blob_to_u64("m.scid")}
+        WHERE t.dir = 2
+          AND m.type IN (1, 2, 3)
+          {type_filter}
+          AND (
+              (m.type IN (1, 3) AND o.collector IS NOT NULL)
+              OR (m.type = 2 AND m.orig_node = t.collector)
+          )
+    ),
+    -- one origin row per hash: owner + first-observed time (create-time proxy)
+    origin AS (
+        SELECT og.hash, og.collector AS origin_collector, f.first_seen AS origin_time
+        FROM originated og
+        JOIN message_first_seen f ON og.hash = f.hash
+    ),
+    inbound_at_others AS (
+        -- LEFT JOIN so origin collectors still appear even with zero fanout;
+        -- join conditions in ON (not WHERE) preserve unmatched origins.
+        SELECT
+            o.origin_collector,
+            o.hash,
+            o.origin_time,
+            t.collector AS receiving_collector,
+            t.net_timestamp AS receipt_time
+        FROM origin o
+        LEFT JOIN timings t
+            ON o.hash = t.hash
+            AND t.dir = 1
+            AND t.collector <> o.origin_collector
+            AND t.net_timestamp >= o.origin_time
+            AND t.net_timestamp <= o.origin_time + INTERVAL '1 hour'
+    ),
+    -- per message: reach = distinct other collectors that received it
+    per_hash AS (
+        SELECT
+            origin_collector,
+            hash,
+            origin_time,
+            COUNT(DISTINCT receiving_collector) AS recv_collectors
+        FROM inbound_at_others
+        GROUP BY origin_collector, hash, origin_time
+    ),
+    -- per (day, collector): message counts (total + well-propagated)
+    msg_stats AS (
+        SELECT
+            date_trunc('day', origin_time) AS day,
+            origin_collector,
+            COUNT(*)                                                       AS msgs_originated,
+            SUM(CASE WHEN recv_collectors >= {peer_cutoff} THEN 1 ELSE 0 END) AS msgs_qualifying
+        FROM per_hash
+        GROUP BY 1, 2
+    )
+    SELECT
+        date_trunc('day', i.origin_time)                                        AS day,
+        i.origin_collector,
+        ms.msgs_originated,
+        ms.msgs_qualifying,
+        COUNT(DISTINCT i.receiving_collector)                                   AS distinct_recv_collectors,
+        COUNT(i.receipt_time)                                                   AS total_inbound_receipts,
+        quantile_cont(epoch(i.receipt_time) - epoch(i.origin_time), 0.05)       AS delay_p05,
+        quantile_cont(epoch(i.receipt_time) - epoch(i.origin_time), 0.25)       AS delay_p25,
+        quantile_cont(epoch(i.receipt_time) - epoch(i.origin_time), 0.50)       AS delay_p50,
+        quantile_cont(epoch(i.receipt_time) - epoch(i.origin_time), 0.75)       AS delay_p75,
+        quantile_cont(epoch(i.receipt_time) - epoch(i.origin_time), 0.95)       AS delay_p95
+    FROM inbound_at_others i
+    JOIN msg_stats ms
+        ON ms.day = date_trunc('day', i.origin_time)
+        AND ms.origin_collector = i.origin_collector
+    GROUP BY date_trunc('day', i.origin_time), i.origin_collector,
+             ms.msgs_originated, ms.msgs_qualifying
+    ORDER BY 1, 2
     """
     return run_query(conn, sql)
 
@@ -635,18 +935,21 @@ def run_outer(
         print_section(f"1. Outer Hash Propagation Delay: ({label})", df, summary)
         outer_summaries[label] = summary
 
-    # Debug: show outbound message counts before running collector-originated
-    df = query_outbound_stats(conn)
-    print_section("2b. Outbound Message Stats (dir=2)", df)
-
-    # Debug: fanout — for each origin collector, show how messages it sent
-    # are received at other collectors, with delay percentiles.
-    df = query_collector_fanout(conn)
-    print_section("2c. Collector Fanout with Propagation Delay", df)
-
     # Debug: cross-check — globally distinct dir=2 hash count per day/type.
     df = query_distinct_outbound_hashes(conn)
     print_section("2d. Distinct Outbound Hashes (cross-check)", df)
+
+    # Exact origination: only messages the collector actually originated
+    # (own-channel SCID for types 1/3, orig_node for type 2). dir=2 itself is
+    # sync-serving, not origination, so the SCID gate is what isolates own gossip.
+    df = query_collector_origination(conn)
+    print_section("2b. Collector-Originated Gossip (exact)", df)
+
+    # Fanout for exact originations: origin = channel owner (2b gate); t0 =
+    # message_first_seen (NOT first dir=2, which is serve time). msgs_qualifying
+    # uses the same distinct-collector cutoff as query 3, so they reconcile.
+    df = query_collector_fanout_originated(conn, peer_cutoff=originated_cutoff)
+    print_section("2c. Collector Fanout for Exact Originations", df)
 
     df = query_collector_originated_propagation(conn, peer_cutoff=originated_cutoff)
     summary = summarize_delay(df) if len(df) > 0 else None

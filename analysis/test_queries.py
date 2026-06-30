@@ -376,7 +376,12 @@ def summarize_delay(df):
         # Already a single aggregate row — pass through with consistent column order.
         keep = [
             c
-            for c in ["qualifying_messages", "total_receipts", "median_peers"]
+            for c in [
+                "qualifying_messages",
+                "total_receipts",
+                "median_peers",
+                "median_recv_collectors",
+            ]
             + available
             if c in df.columns
         ]
