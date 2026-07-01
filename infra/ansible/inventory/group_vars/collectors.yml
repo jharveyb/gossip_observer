@@ -4,6 +4,9 @@
 gossip_collector_binary_path: "{{ binary_staging_dir }}/current/gossip_collector"
 # Every hour; raise this based on storage size
 collector_graph_cron: "0 */4 * * *"
+# Count of how many times LDK can fail to sync with its chain backend before
+# we restart the collector
+watchdog_fail_limit: 7
 
 # Collector instances - deployed to hosts based on 'host' property
 # Each collector instance has a unique UUID and specifies which host to deploy to

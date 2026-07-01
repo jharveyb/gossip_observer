@@ -11,7 +11,7 @@
     dest: "/etc/gossip_collector/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0644"
   loop: "{{ host_collectors }}"
   register: config_deploy_results
   loop_control:
@@ -23,7 +23,7 @@
     dest: /usr/local/bin/gossip_collector
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
   register: binary_deploy_result
 
 - name: Install gossip collector systemd template
@@ -32,7 +32,7 @@
     dest: /etc/systemd/system/gossip-collector@.service
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
   register: systemd_template_result
 
 - name: Reload systemd if template changed

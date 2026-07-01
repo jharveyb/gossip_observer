@@ -11,6 +11,7 @@ listen_port = {{ item.ldk_port | default(9735) }}
 tor_proxy_addr = "{{ item.tor_proxy_addr | default('127.0.0.1') }}"
 tor_proxy_port = {{ item.tor_proxy_port | default(9050) }}
 enable_tor = {{ item.enable_tor | default('true') }}
+watchdog_fail_limit = {{ watchdog_fail_limit }} 
 
 [apiserver]
 hostname = "{{ tailscale_ip }}"
