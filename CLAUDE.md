@@ -923,6 +923,18 @@ conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet({pat
 
 DuckDB unions files with compatible schemas automatically. Caveat: companion tables (`metadata`, `message_first_seen`) are often partitioned by *first-appearance day*, not by full-history-per-day. A hash whose first appearance was *before* the loaded range will be missing from these views even if the `timings` exports for the loaded range reference it — joins on those tables will silently drop rows. Worth verifying empirically before trusting multi-day aggregates that depend on these joins.
 
+### Keep DuckDB Queries Over `data/exports` to 1–2 Days
+
+Each day of `timings` is ~85M rows; loading 5 days (~418M) and running `COUNT(DISTINCT …) GROUP BY hash` or `quantile_cont` **OOMs** the machine (~50 GiB). Scope every exploratory/validation query to **1–2 days**. If a full-range run is genuinely needed, hand the command to the user to run rather than running it in-session.
+
+### Propagation-Delay Queries: Bound the Window at `first_seen + 1 hour`
+
+Any delay query (delay = receipt `net_timestamp` − anchor) **must** cap receipts at `anchor + INTERVAL '1 hour'`. Without it, a late re-receipt (a re-broadcast hours later) lands in the tail and inflates p95/p99 far past the intended 3600 s ceiling (observed: a channel_announcement p95 of 43,115 s). Anchor t0 on `message_first_seen.first_seen` (earliest observation = create-time proxy), **not** `MIN(dir=2)` (that is *serve* time — see the dir=2 note below). This bound exists in the TimescaleDB originals (`test_queries.py`: `ca.bucket <= first_bucket + INTERVAL '1 hour'`); don't drop it when porting to DuckDB/Parquet. Applies to `query_outer_hash_propagation` (1) and the collector-originated queries (2b/2c/3) in `analysis/parquet_queries.py`.
+
+### "Peer count" = distinct peer pubkeys, not receipt rows
+
+"How many peers relayed a message to us" = `COUNT(DISTINCT peer)` over `dir=1` rows for that hash, **not** `COUNT(*)` — each receipt from each peer is a separate `timings` row, and one peer pubkey connected to several collectors inflates the raw count (e.g. one message: 110 receipt rows vs 109 distinct peers vs 16 distinct collectors). Pick the metric deliberately: distinct peers for network reach, `COUNT(DISTINCT collector)` for "how many of our collectors got it". Over a multi-day range, exact `COUNT(DISTINCT peer) GROUP BY hash` OOMs (builds a set per hash) — use `approx_count_distinct(peer)` (HyperLogLog, ~2% error) for cutoffs/display. `COUNT(DISTINCT collector)` is cheap (~20 collectors) so exact is fine. Note: a *group-level* `COUNT(DISTINCT collector)` (e.g. per day/collector) is a **union across all that group's messages**, not per-message reach — to count "messages that reached ≥ N collectors" you need a per-hash reach CTE first (see `query_collector_fanout_originated`'s `msgs_qualifying`).
+
 ### Histogram Bucket Boundaries: Avoid Overlap Across Integer/Float
 
 For `bucket_counts`-style histograms where buckets are `(lo, hi, label)` tuples, the safe pattern is "first bucket inclusive on both bounds, subsequent buckets exclusive on lower bound":
@@ -1021,11 +1033,27 @@ The `LogWriterExporter` in `observer_common/src/logging.rs` only exports log lin
 
 When outbound receipt counts look suspiciously low (e.g., 2 per message), the pending-peer filter is almost always why. The actual LN gossip broadcast reaches many more peers — they're just not logged.
 
+### `dir=2` = gossip we *serve* to peers (not relay, not origination)
+
+`dir=2` means "the collector **transmitted** this message to a peer," not "originated" and not "relayed". Verified in the rust-lightning fork (`gossip_observer-v0.2`): the only outbound export hook is in `PeerManager::enqueue_message` (`ln/peer_handler.rs`), gated by `is_outbound_msg_for_export` to **ChannelAnnouncement / ChannelUpdate / NodeAnnouncement (+ Ping/Pong)**. Two things are therefore **NOT exported**:
+
+- **Broadcast relay AND the node's own freshly-created broadcasts.** Both go through `forward_broadcast_msg` → `gossip_broadcast_buffer`, a separate path that never calls `enqueue_message`. So the relay firehose is absent from `dir=2`, and a collector's own channel_update at *creation* is not captured — it only shows up later when re-served.
+- **Gossip query control msgs** (query/reply_channel_range, query_short_channel_ids, reply_short_channel_ids_end).
+
+What dir=2 gossip **is**: point-to-point sends via `enqueue_message`, dominated by **initial-sync serving** — when a peer requests a full sync (Init `initial_routing_sync` without gossip_queries, or a `gossip_timestamp_filter` with `first_timestamp` > 6 h old), `do_attempt_write_data` walks the network graph (`get_next_channel_announcement`/`get_next_node_announcement`) and enqueues each message to that one peer. Signature: a large bursty count to a **single `peer`** over a few minutes spanning thousands of distinct SCIDs the collector does not own (observed: 13,359 channel_updates → 1 peer, 6,976 SCIDs, 7 min, from a **channelless** collector). So a channelless collector legitimately shows large `dir=2` channel counts. Inbound `dir=1` DOES capture the received firehose (46M rows for one collector over 5 days).
+
+Consequences for analysis:
+
+- **`dir=2` timestamps are *serve* time, not *create* time.** Never use `MIN(dir=2)` as "when the message entered the network" — serving happens at arbitrary sync times. For propagation/fanout anchor t0 on `message_first_seen.first_seen` (earliest observation = best create-time proxy). This is the fix applied to `query_collector_fanout_originated` (2c) and `query_collector_originated_propagation` (3).
+- `metadata.orig_node` is populated **only for `node_announcement` (type 2)**; NULL for channel_announcement/channel_update, so it cannot identify channel-gossip origination.
+- For **exact** origination use `analysis/parquet_queries.py:query_collector_origination` (2b): gate channel gossip on owned-SCID match (`COLLECTOR_SCIDS`, decoded via `le_blob_to_u64`), type-2 on `orig_node == collector`. `COLLECTOR_INFO`/`COLLECTOR_SCIDS` map collector pubkey → balances/owned channels (`has_channel()` = non-empty balances). Because own broadcasts aren't exported, this captures own gossip only as later sync-serves — fine for attribution via SCID.
+- Outbound queries **undercount**: the `JOIN metadata` drops dir=2 rows whose hash first appeared before the loaded date range (metadata is partitioned by `first_seen`).
+
 ### LDK Silently Drops `channel_update`s for Unknown Channels
 
 LDK's `P2PGossipSync` only relays `channel_update` messages for channels already present in its network graph. If a collector broadcasts a `channel_update` for a channel that other collectors' peers don't know about (e.g., the collector's own private/unannounced channels, or very new channels without a preceding `channel_announcement`), those peers will silently drop it rather than relay it onward.
 
-This manifests as: "origin collector emitted `dir=2` but no other collector ever logged `dir=1` for that hash" — zero fanout in the `query_collector_fanout` debug query. It is **not** a propagation delay or filter issue; the message simply never enters the broader gossip graph.
+This manifests as: "origin collector emitted `dir=2` but no other collector ever logged `dir=1` for that hash" — zero fanout in the `query_collector_fanout_originated` (2c) debug query. It is **not** a propagation delay or filter issue; the message simply never enters the broader gossip graph.
 
 When debugging gaps in `query_collector_originated_propagation` or fanout queries, check whether the zero-fanout hashes correspond to channels unique to the origin collector.
 
