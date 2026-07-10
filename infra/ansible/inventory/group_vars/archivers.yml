@@ -25,6 +25,12 @@ gossip_archivers:
     export_dir: "{{ archiver_export_dir_base }}/staging_exports"
     export_soft_memory_limit: 512 # staging data is small
     export_threads: 1
+    # Data retention: off + dry-run until the verify pipeline is proven.
+    deletion_enabled: true
+    deletion_dry_run: false
+    retention_after_days: 150
+    verify_endpoint: "do-medium:3939" # Garage host tailscale name + Caddy port
+    verify_bucket: "gossip-observer-data-staging"
   - uuid: "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e"
     host: "do-medium"
     console_port: 6671
@@ -36,6 +42,25 @@ gossip_archivers:
     export_dir: "{{ archiver_export_dir_base }}/exports"
     export_soft_memory_limit: 2048
     export_threads: 1
+    # Data retention: off + dry-run until the verify pipeline is proven on prod.
+    # Flip deletion_dry_run=false only after the "DRY RUN: would drop" logs and
+    # chunk_deletion_log look correct.
+    deletion_enabled: false
+    deletion_dry_run: true
+    verify_endpoint: "do-medium:3939" # Garage host tailscale name + Caddy port
+
+# Read-only Garage S3 creds for the retention verify pass. Provisioned in vault
+# (the verify_key of each garage_buckets entry, created by tasks/garage_keys.yml),
+# templated into config.toml by
+# archiver_config.toml.j2 alongside db_url. Keyed by instance UUID, same pattern
+# as archiver_db_urls, so staging and prod get distinct read-only keys:
+#   archiver_verify_s3_keys:
+#     "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f":   # staging
+#       key_id: "GK…"
+#       secret: "…"
+#     "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e":   # prod
+#       key_id: "GK…"
+#       secret: "…"
 
 # Database configuration (shared by all archivers)
 # Lower than we used in dev due to high traffic and slow inserts into timings

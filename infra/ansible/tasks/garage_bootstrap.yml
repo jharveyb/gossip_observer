@@ -3,10 +3,10 @@
 # re-bootstrap.
 #
 # This task is idempotent against three failure modes:
-#   - Cluster never initialized: creates layout v1, bucket, and the
-#     archiver-sync write key.
+#   - Cluster never initialized: creates layout v1, every bucket in
+#     garage_buckets, and each bucket's read+write key.
 #   - Cluster partially initialized (layout applied but bootstrap failed
-#     later): detects existing layout/bucket/key and picks up where the
+#     later): detects existing layout/buckets/keys and picks up where the
 #     previous run left off.
 #   - Cluster fully initialized: all tasks short-circuit.
 #
@@ -36,7 +36,7 @@
   ansible.builtin.set_fact:
     tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
-- name: Bootstrap Garage cluster (layout + bucket + archiver-sync key)
+- name: Bootstrap Garage cluster (layout + buckets + write keys)
   run_once: true
   delegate_to: "{{ groups['garage'][0] }}"
   block:
@@ -74,36 +74,57 @@
       when: garage_layout_assign.results | selectattr('changed', 'equalto', true) | list | length > 0
       changed_when: true
 
-    # --- Bucket ---
-    - name: Check whether bucket exists
-      ansible.builtin.command: "garage bucket info {{ garage_bucket_name }}"
-      register: garage_bucket_probe
+    # --- Buckets (one per environment; see garage_buckets in group_vars) ---
+    - name: Check whether each bucket exists
+      ansible.builtin.command: "garage bucket info {{ item.name }}"
+      loop: "{{ garage_buckets }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: garage_bucket_probes
       changed_when: false
       failed_when: false
 
-    - name: Create bucket
-      ansible.builtin.command: "garage bucket create {{ garage_bucket_name }}"
+    - name: Create missing buckets
+      ansible.builtin.command: "garage bucket create {{ probe.item.name }}"
+      loop: "{{ garage_bucket_probes.results }}"
+      loop_control:
+        loop_var: probe
+        label: "{{ probe.item.name }}"
+      when: probe.rc != 0
       changed_when: true
-      when: garage_bucket_probe.rc != 0
 
-    # --- archiver-sync write key ---
-    - name: Check whether archiver-sync key exists
-      ansible.builtin.command: garage key info archiver-sync
-      register: garage_archiver_key_probe
+    # --- Per-bucket write keys (read+write, used by the archiver to upload) ---
+    - name: Check whether each write key exists
+      ansible.builtin.command: "garage key info {{ item.write_key }}"
+      loop: "{{ garage_buckets }}"
+      loop_control:
+        label: "{{ item.write_key }}"
+      register: garage_write_key_probes
       changed_when: false
       failed_when: false
 
-    - name: Create archiver-sync write key
-      ansible.builtin.command: garage key create archiver-sync
+    - name: Create missing write keys
+      ansible.builtin.command: "garage key create {{ probe.item.write_key }}"
+      loop: "{{ garage_write_key_probes.results }}"
+      loop_control:
+        loop_var: probe
+        label: "{{ probe.item.write_key }}"
+      when: probe.rc != 0
       changed_when: true
-      when: garage_archiver_key_probe.rc != 0
 
     # Idempotent: Garage accepts re-granting existing permissions as a no-op.
-    - name: Grant archiver-sync key read+write on bucket
+    - name: Grant each write key read+write on its bucket
       ansible.builtin.command:
         cmd: >-
           garage bucket allow
           --read --write
-          --key archiver-sync
-          {{ garage_bucket_name }}
+          --key {{ item.write_key }}
+          {{ item.name }}
+      loop: "{{ garage_buckets }}"
+      loop_control:
+        label: "{{ item.write_key }} -> {{ item.name }}"
       changed_when: true
+
+    # Read-only verify keys (retention pass) are provisioned in the re-runnable
+    # tasks/garage_keys.yml, alongside the per-researcher reader keys — they're
+    # ongoing key management, not one-time cluster bootstrap.

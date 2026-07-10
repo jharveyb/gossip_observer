@@ -53,11 +53,32 @@ garage_bootstrap_peers: []
 garage_zone: "dc1"
 garage_node_capacity: "250G"
 
-# --- Bucket ---
-garage_bucket_name: "gossip-observer-data"
+# --- Buckets ---
+# One entry per bucket/environment. Each carries the two archiver keys it needs:
+#   write_key  — read+write, used by the archiver to UPLOAD Parquet (archiver-sync).
+#   verify_key — read-only, used by the archiver's retention pass to read exported
+#                Parquet back and verify it before dropping DB chunks (least
+#                privilege: a deletion bug can never mutate the bucket).
+# Add a bucket here to provision a whole new environment; garage_bootstrap creates
+# each bucket + write_key, and tasks/garage_keys.yml creates each verify_key. Fetch
+# key secrets with `garage key info --show-secret <name>` and place the verify-key
+# creds in vault as archiver_verify_s3_keys, keyed by the archiver instance UUID.
+# The FIRST entry is treated as the public/prod bucket that researcher reader keys
+# are granted read on (see garage_reader_keys below).
+garage_buckets:
+  - name: "gossip-observer-data"
+    write_key: "archiver-sync"
+    verify_key: "archiver-verify"
+  - name: "gossip-observer-data-staging"
+    write_key: "archiver-staging-sync"
+    verify_key: "archiver-staging-verify"
+
+# Public/prod bucket that per-researcher reader keys are granted read access on.
+garage_public_bucket: "{{ garage_buckets[0].name }}"
 
 # --- Per-researcher read-only keys ---
 # Add a name to provision a new key; remove to revoke.
 garage_reader_keys:
   - internal
   - alice
+  - office

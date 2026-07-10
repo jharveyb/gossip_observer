@@ -39,3 +39,26 @@ dir = "{{ item.export_dir }}"
 # this limit DuckDB spills to dir/duckdb_tmp instead of OOMing.
 soft_memory_limit = {{ item.export_soft_memory_limit | default(1024) }}
 threads = {{ item.export_threads | default(2) }}
+
+# --- Data retention: drop old timings chunks after verifying their export ---
+# Both flags default safe. deletion never happens unless deletion_enabled=true,
+# dry_run=false, AND the read-only S3 creds are provided.
+deletion_enabled = {{ item.deletion_enabled | default(false) | lower }}
+deletion_dry_run = {{ item.deletion_dry_run | default(true) | lower }}
+retention_after_days = {{ item.retention_after_days | default(45) }}
+# Garage S3 endpoint for verification reads: the Garage host's tailscale name +
+# Caddy port (plain HTTP over tailscale). Caddy already binds the tailscale IP.
+verify_endpoint = "{{ item.verify_endpoint | default('') }}"
+# SSL needed if we use public HTTPS domain
+verify_use_ssl = {{ item.verify_use_ssl | default(false) | lower }}
+verify_bucket = "{{ item.verify_bucket | default('gossip-observer-data') }}"
+verify_region = "{{ item.verify_region | default('garage') }}"
+{% if archiver_verify_s3_keys is defined and item.uuid in archiver_verify_s3_keys %}
+# Read-only Garage S3 creds for the retention verify pass, from vault. Keyed by
+# instance UUID (same pattern as archiver_db_urls) so staging and prod get
+# distinct read-only keys. Same treatment as the db_url password above (this file
+# already holds it). A missing entry leaves the creds unset, disabling deletion
+# regardless of the flags.
+verify_access_key_id = "{{ archiver_verify_s3_keys[item.uuid].key_id }}"
+verify_secret_access_key = "{{ archiver_verify_s3_keys[item.uuid].secret }}"
+{% endif %}

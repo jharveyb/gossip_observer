@@ -30,8 +30,59 @@
       garage bucket allow
       --read
       --key reader-{{ item }}
-      {{ garage_bucket_name }}
+      {{ garage_public_bucket }}
   loop: "{{ garage_reader_keys }}"
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+# --- Archiver read-only verify keys (retention pass) ---
+# One read-only key per bucket/environment (garage_buckets[].verify_key), used by
+# the archiver's retention pass to read exported Parquet back and verify it before
+# dropping DB chunks. Read-only by design (least privilege): a bug in deletion
+# logic can never mutate the bucket. Secrets are fetched on demand with
+# `garage key info --show-secret <name>` (show_keys task) and placed in vault as
+# archiver_verify_s3_keys, keyed by archiver instance UUID.
+# NOTE: each bucket must already exist (garage_bootstrap) for the grant to succeed.
+#
+# Existence is probed per-key with `garage key info` rather than substring-testing
+# garage_key_list.stdout, because one verify_key name can be a prefix of another
+# (e.g. "archiver-verify" vs "archiver-verify-sync") and a substring test would
+# wrongly skip the shorter.
+- name: Probe whether verify keys exist
+  ansible.builtin.command: "garage key info {{ item.verify_key }}"
+  loop: "{{ garage_buckets }}"
+  loop_control:
+    label: "{{ item.verify_key }}"
+  register: garage_verify_probes
+  changed_when: false
+  failed_when: false
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+- name: Create missing verify keys
+  when: probe.rc != 0
+  ansible.builtin.command:
+    cmd: "garage key create {{ probe.item.verify_key }}"
+  loop: "{{ garage_verify_probes.results }}"
+  loop_control:
+    loop_var: probe
+    label: "{{ probe.item.verify_key }}"
+  changed_when: true
+  run_once: true
+  delegate_to: "{{ groups['garage'][0] }}"
+
+# `garage bucket allow` is idempotent server-side; re-granting is a no-op.
+- name: Grant each verify key read-only on its bucket
+  ansible.builtin.command:
+    cmd: >-
+      garage bucket allow
+      --read
+      --key {{ item.verify_key }}
+      {{ item.name }}
+  loop: "{{ garage_buckets }}"
+  loop_control:
+    label: "{{ item.verify_key }} -> {{ item.name }}"
   changed_when: true
   run_once: true
   delegate_to: "{{ groups['garage'][0] }}"
