@@ -1,6 +1,8 @@
 *.code-workspace
 /.vscode
-/.claude
+# Ignore personal Claude Code config, but share the project rule files with contributors.
+/.claude/*
+!/.claude/rules/
 /.serena
 
 **/ldk_node_data.sqlite
