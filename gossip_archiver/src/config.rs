@@ -30,6 +30,31 @@ pub struct DataExport {
     pub soft_memory_limit: u32,
     /// DuckDB total thread count
     pub threads: u32,
+
+    // --- Data retention: drop old timings chunks after verifying their export ---
+    /// Master switch for the retention pass. When false, nothing is ever dropped.
+    pub deletion_enabled: bool,
+    /// When true, run the full verification + logging but skip the actual
+    /// `drop_chunks` call. Safe default for shaking out the pipeline in prod.
+    pub deletion_dry_run: bool,
+    /// Drop verified timings chunks older than this many days.
+    pub retention_after_days: u32,
+    /// Garage S3 endpoint used to read exported Parquet back for verification.
+    /// The Garage host's tailscale name + Caddy port, e.g. "do-medium:3939".
+    pub verify_endpoint: String,
+    /// Plain HTTP (false) vs TLS (true). Caddy speaks plain HTTP over tailscale.
+    pub verify_use_ssl: bool,
+    /// Garage bucket holding the exported Parquet.
+    pub verify_bucket: String,
+    /// S3 region string configured in Garage (a label, not a real AWS region).
+    pub verify_region: String,
+    /// Read-only S3 access key id, templated from vault into config.toml
+    /// alongside db_url. None (key absent) disables the retention pass.
+    #[serde(default)]
+    pub verify_access_key_id: Option<String>,
+    /// Read-only S3 secret access key, templated from vault, as above.
+    #[serde(default)]
+    pub verify_secret_access_key: Option<String>,
 }
 
 // Constants used to configure how we flush to the DB.
@@ -109,6 +134,15 @@ impl ArchiverConfig {
             // to disk during export is fine, it just makes export a bit slower.
             .set_default("export.soft_memory_limit", 2048)?
             .set_default("export.threads", 3)?
+            // Data retention: off + dry-run by default; both must be explicitly
+            // set (and read-only S3 creds provided) before any chunk is dropped.
+            .set_default("export.deletion_enabled", false)?
+            .set_default("export.deletion_dry_run", true)?
+            .set_default("export.retention_after_days", 45)?
+            .set_default("export.verify_endpoint", "")?
+            .set_default("export.verify_use_ssl", false)?
+            .set_default("export.verify_bucket", "gossip-observer-data")?
+            .set_default("export.verify_region", "garage")?
             .set_default("storage_dir", storage_dir)?
             .set_default("log_level", "info")?
             .add_source(File::with_name(&cfg_path).required(false))

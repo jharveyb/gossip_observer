@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO chunk_deletion_log\n            (range_start, range_end, range_table, db_row_count, parquet_row_count,\n             log_row_count, file_size_bytes, file_path)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0bef0a102724bff459646d3865083c5811ea32f3b6a951cc888167c2cdfe2df0"
+}

@@ -6,9 +6,7 @@
 **/ldk_node_data.sqlite
 **/keys_seed
 **/ldk_node.log
-/data/mainnet
-/data/exports
-/data/gossip_graph_dumps
+/data/**
 
 /target
 

@@ -87,6 +87,11 @@ pub async fn chunk_archiver_task(
                     Ok(0) => {}
                     Ok(n) => info!(archived_chunks = n, "Archived chunks to Parquet"),
                     Err(e) => error!(error = %e, "Chunk archival failed, will retry next interval"),
+                };
+                match drop_verified_chunks(&pool, &cfg).await {
+                    Ok(0) => {}
+                    Ok(n) => info!(dropped_chunks = n, "Dropped chunks from main DB"),
+                    Err(e) => error!(error = %e, "Chunk dropping failed, will retry next interval"),
                 }
             }
         }
@@ -100,6 +105,17 @@ pub async fn chunk_archiver_task(
 struct UnarchivedChunkRange {
     range_start: Option<DateTime<Utc>>,
     range_end: Option<DateTime<Utc>>,
+}
+
+// A compressed timings chunk old enough for retention, joined to its recorded
+// `timings` export so we can verify (row_count + file_size_bytes) before dropping.
+#[derive(sqlx::FromRow, Debug)]
+struct EligibleChunk {
+    range_start: Option<DateTime<Utc>>,
+    range_end: Option<DateTime<Utc>>,
+    row_count: i64,
+    file_size_bytes: i64,
+    file_path: String,
 }
 
 async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Result<u32> {
@@ -248,6 +264,18 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
             }
         }
         cleanup_temp_duckdb(duckdb, cfg).await;
+    }
+
+    // Retention: drop old timings chunks whose Parquet export we can verify on
+    // Garage. Gated on config (deletion_enabled), and a no-op otherwise. Failures
+    // here must not fail the export tick, so we log and move on.
+    match drop_verified_chunks(pool, cfg).await {
+        Ok(0) => {}
+        Ok(n) => info!(
+            dropped_chunks = n,
+            "Retention: dropped verified timings chunks"
+        ),
+        Err(e) => error!(error = %e, "Retention pass failed"),
     }
 
     Ok(archived)
@@ -621,4 +649,304 @@ async fn count_parquet_rows(duckdb: &async_duckdb::Client, path: &Path) -> anyho
         })
         .await
         .map_err(anyhow::Error::from)
+}
+
+/// Retention pass: for compressed `timings` chunks older than
+/// `retention_after_days`, verify the recorded Parquet export against the live
+/// DB and the copy on Garage, then drop the chunk from the hypertable.
+///
+/// Verification is a strict four-way match — any mismatch, unreadable, or
+/// unreachable file → skip and warn, never drop on doubt:
+///   chunk_archive_log.row_count == live count(*) == Parquet num_rows,  and
+///   chunk_archive_log.file_size_bytes == Parquet file_size_bytes.
+///
+/// With `deletion_dry_run` (the default) everything runs except the drop, so the
+/// selection + verification can be observed in prod logs before enabling for real.
+async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Result<u32> {
+    if !cfg.export.deletion_enabled {
+        return Ok(0);
+    }
+    // Deletion requires read-only S3 creds + an endpoint to verify against.
+    let (Some(key_id), Some(secret)) = (
+        cfg.export.verify_access_key_id.as_deref(),
+        cfg.export.verify_secret_access_key.as_deref(),
+    ) else {
+        warn!("deletion_enabled but S3 verify credentials are unset; skipping retention");
+        return Ok(0);
+    };
+    if cfg.export.verify_endpoint.is_empty() {
+        warn!("deletion_enabled but export.verify_endpoint is empty; skipping retention");
+        return Ok(0);
+    }
+
+    // Eligible: compressed timings chunks older than retention_after_days that
+    // already have a 'timings' export logged. Oldest first.
+    let rows: Vec<EligibleChunk> = sqlx::query_as!(
+        EligibleChunk,
+        r#"
+        SELECT c.range_start, c.range_end, l.row_count, l.file_size_bytes, l.file_path
+        FROM timescaledb_information.chunks c
+        JOIN chunk_archive_log l
+          ON l.range_start = c.range_start AND l.range_end = c.range_end
+             AND l.range_table = 'timings'
+        WHERE c.hypertable_name = 'timings'
+          AND c.is_compressed = true
+          AND c.range_end < NOW() - ($1::integer * INTERVAL '1 day')
+        ORDER BY c.range_start
+        "#,
+        cfg.export.retention_after_days as i32
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    info!(
+        chunk_count = rows.len(),
+        dry_run = cfg.export.deletion_dry_run,
+        "Retention: verifying exported chunks eligible for deletion"
+    );
+
+    let duckdb = init_verify_duckdb(cfg, key_id, secret).await?;
+    let mut dropped = 0u32;
+
+    for row in rows {
+        let range_start = row
+            .range_start
+            .ok_or(anyhow!("eligible chunk missing range_start"))?;
+        let range_end = row
+            .range_end
+            .ok_or(anyhow!("eligible chunk missing range_end"))?;
+
+        // (1) live DB count of the chunk (cheap on a compressed chunk).
+        // This actually takes 20+ seconds right now, hmm.
+        let db_count: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM timings WHERE net_timestamp >= $1 AND net_timestamp < $2",
+            range_start,
+            range_end
+        )
+        .fetch_one(pool)
+        .await?
+        .unwrap_or(0);
+
+        // (2) Garage Parquet metadata (num_rows + file_size_bytes); a successful
+        //     read also proves the file is present and readable.
+        let key = format!(
+            "timings/{}/timings_{}.parquet",
+            range_start.format("%Y/%m/%d"),
+            range_start.format("%Y-%m-%d")
+        );
+        let (parquet_rows, parquet_bytes) = match parquet_s3_metadata(
+            &duckdb,
+            &cfg.export.verify_bucket,
+            &key,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, key, %range_start, %range_end, "Parquet unreadable on Garage; NOT dropping chunk");
+                continue;
+            }
+        };
+
+        // (3) strict four-way match.
+        let count_matches = (db_count == row.row_count) && (row.row_count as u64 == parquet_rows);
+        let size_matches = parquet_bytes == row.file_size_bytes as u64;
+        let verified = count_matches && size_matches;
+        if !verified {
+            warn!(
+                %range_start, %range_end,
+                db_count, parquet_rows, log_row_count = row.row_count,
+                parquet_bytes, log_file_size_bytes = row.file_size_bytes,
+                "Retention verification mismatch; NOT dropping chunk"
+            );
+            continue;
+        }
+
+        if cfg.export.deletion_dry_run {
+            info!(%range_start, %range_end, db_count, parquet_rows, parquet_bytes, "DRY RUN: chunk verified, would drop");
+            continue;
+        }
+
+        // Scope the drop to exactly this chunk via its own bounds — never a
+        // blanket older_than that could catch an older, un-verified chunk.
+        let names: Vec<(String,)> = sqlx::query_as(
+            "SELECT drop_chunks('timings', newer_than => $1::timestamptz, older_than => $2::timestamptz)::text",
+        )
+        .bind(range_start)
+        .bind(range_end)
+        .fetch_all(pool)
+        .await
+        .context("drop_chunks failed")?;
+
+        if names.len() != 1 {
+            warn!(dropped = names.len(), %range_start, %range_end, "drop_chunks returned != 1 chunk; skipping (not recording)");
+            continue;
+        }
+
+        record_deletion(
+            pool,
+            range_start,
+            range_end,
+            "timings",
+            db_count,
+            parquet_rows as i64,
+            row.row_count,
+            parquet_bytes as i64,
+            &row.file_path,
+        )
+        .await?;
+        info!(
+            %range_start, %range_end, db_count, parquet_rows,
+            chunk = %names[0].0,
+            "Retention: dropped exported+verified timings chunk"
+        );
+        dropped += 1;
+    }
+
+    cleanup_verify_duckdb(duckdb, &cfg).await;
+
+    Ok(dropped)
+}
+
+/// A DuckDB instance configured to read exported Parquet back from Garage over
+/// the standard S3 path (httpfs + a read-only S3 secret). In-memory — this path
+/// only reads file-level metadata, never scans data.
+async fn init_verify_duckdb(
+    cfg: &ArchiverConfig,
+    key_id: &str,
+    secret: &str,
+) -> anyhow::Result<async_duckdb::Client> {
+    let archive_dir = PathBuf::from(&cfg.export.dir);
+
+    let tmp_dir = archive_dir.join("duckdb_verify_tmp");
+    if let Ok(true) = tokio::fs::try_exists(&tmp_dir).await {
+        tokio::fs::remove_dir_all(&tmp_dir)
+            .await
+            .context("Failed to remove existing DuckDB temp directory")?;
+    };
+
+    tokio::fs::create_dir_all(&tmp_dir)
+        .await
+        .context("Failed to create DuckDB temp directory")?;
+    let db_path = tmp_dir.join("archiver.duckdb");
+
+    let duckdb = ClientBuilder::new()
+        .path(db_path)
+        .open()
+        .await
+        .context("Failed to open verify DuckDB")?;
+
+    let endpoint = cfg.export.verify_endpoint.clone();
+    let region = cfg.export.verify_region.clone();
+    let use_ssl = cfg.export.verify_use_ssl;
+    let key_id = key_id.to_string();
+    let secret = secret.to_string();
+    let tmp_dir_str = tmp_dir.to_string_lossy().into_owned();
+    let db_mem_limit = cfg.export.soft_memory_limit;
+    let db_threads = cfg.export.threads;
+
+    duckdb
+        .conn(move |conn| {
+            conn.execute_batch("INSTALL httpfs; LOAD httpfs;")?;
+            conn.execute_batch(&format!(
+                "SET memory_limit = '{db_mem_limit}MB';
+                        SET threads = '{db_threads}';
+                     SET temp_directory = '{tmp_dir_str}';"
+            ))?;
+            conn.execute_batch(&format!(
+                "CREATE OR REPLACE SECRET s3 (
+                     TYPE s3,
+                     KEY_ID '{key_id}',
+                     SECRET '{secret}',
+                     URL_STYLE 'path',
+                     REGION '{region}',
+                     ENDPOINT '{endpoint}',
+                     USE_SSL {use_ssl}
+                 );"
+            ))
+        })
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    info!(endpoint = %cfg.export.verify_endpoint, "Verify DuckDB initialized (httpfs + s3 secret)");
+    Ok(duckdb)
+}
+
+async fn cleanup_verify_duckdb(duckdb: async_duckdb::Client, cfg: &ArchiverConfig) {
+    if let Err(db_close) = duckdb.close().await {
+        error!(error = %db_close, "Failed to close DuckDB; deleted DB files anyway");
+    }
+
+    let archive_dir = PathBuf::from(&cfg.export.dir);
+    let tmp_dir = archive_dir.join("duckdb_verify_tmp");
+    if let Err(rm_dir) = tokio::fs::remove_dir_all(&tmp_dir).await {
+        error!(error = %rm_dir, "Failed to remove DuckDB temp directory");
+    }
+
+    info!(archive_dir = %archive_dir.display(), "Temporary DuckDB removed");
+}
+
+/// Read `num_rows` and `file_size_bytes` from a Parquet file's footer metadata on
+/// Garage in one cheap metadata read (no full download). Errors if the object is
+/// missing or unreadable — which is exactly the readability check we want.
+async fn parquet_s3_metadata(
+    duckdb: &async_duckdb::Client,
+    bucket: &str,
+    key: &str,
+) -> anyhow::Result<(u64, u64)> {
+    let uri = format!("s3://{bucket}/{key}");
+    let (num_rows, file_size_bytes): (i64, i64) = duckdb
+        .conn(move |conn| {
+            conn.query_row(
+                // Cast uint64 file_size_bytes to BIGINT for a stable Rust type.
+                &format!(
+                    "SELECT num_rows::BIGINT, file_size_bytes::BIGINT \
+                     FROM parquet_file_metadata('{uri}')"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok((num_rows as u64, file_size_bytes as u64))
+}
+
+/// Record a dropped chunk in `chunk_deletion_log` (audit trail beyond the logs).
+#[allow(clippy::too_many_arguments)]
+async fn record_deletion(
+    pool: &PgPool,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    range_table: &str,
+    db_row_count: i64,
+    parquet_row_count: i64,
+    log_row_count: i64,
+    file_size_bytes: i64,
+    file_path: &str,
+) -> anyhow::Result<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO chunk_deletion_log
+            (range_start, range_end, range_table, db_row_count, parquet_row_count,
+             log_row_count, file_size_bytes, file_path)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT DO NOTHING
+        "#,
+        range_start,
+        range_end,
+        range_table,
+        db_row_count,
+        parquet_row_count,
+        log_row_count,
+        file_size_bytes,
+        file_path
+    )
+    .execute(pool)
+    .await
+    .context("Failed to insert chunk_deletion_log entry")?;
+    Ok(())
 }
