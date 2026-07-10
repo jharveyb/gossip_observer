@@ -72,6 +72,9 @@ message NodeAnnouncementInfo {
   uint32 last_update = 1;
   string alias = 2;
   repeated SocketAddress addresses = 3;
+  // Raw feature bits in little-endian byte order (wire format from BOLT 9).
+  // Empty when the node has no features or features are unknown.
+  bytes node_features = 4;
 }
 
 message GossipChannelDirectionInfo {
