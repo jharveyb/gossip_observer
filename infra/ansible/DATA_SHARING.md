@@ -233,8 +233,7 @@ Garage keys are cluster-global and per-researcher:
    dedicated `show_keys` task, which prints every key's id + secret:
 
    ```bash
-   ansible-playbook data_sharing_init.yml --ask-vault-pass \
-     --tags show_keys
+   ansible-playbook data_sharing_init.yml --tags show_keys
    ```
 
    …or ssh into the Garage host and run:

@@ -28,7 +28,6 @@ gossip_archivers:
     # Data retention: off + dry-run until the verify pipeline is proven.
     deletion_enabled: true
     deletion_dry_run: false
-    retention_after_days: 150
     verify_endpoint: "do-medium:3939" # Garage host tailscale name + Caddy port
     verify_bucket: "gossip-observer-data-staging"
   - uuid: "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e"
@@ -45,8 +44,8 @@ gossip_archivers:
     # Data retention: off + dry-run until the verify pipeline is proven on prod.
     # Flip deletion_dry_run=false only after the "DRY RUN: would drop" logs and
     # chunk_deletion_log look correct.
-    deletion_enabled: false
-    deletion_dry_run: true
+    deletion_enabled: true
+    deletion_dry_run: false
     verify_endpoint: "do-medium:3939" # Garage host tailscale name + Caddy port
 
 # Read-only Garage S3 creds for the retention verify pass. Provisioned in vault
