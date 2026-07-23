@@ -420,7 +420,7 @@ pub async fn ping_controller(
         }
 
         info.peer_count = connected_peer_count(node.clone()).await as u32;
-        info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await;
+        info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await?;
         info.target_count = peer_target.load(SeqCst) as u32;
         info.onchain_addr = next_address(node.clone())?;
         info.balances = balances(node.clone()).into();

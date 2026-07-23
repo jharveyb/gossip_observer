@@ -29,5 +29,6 @@ tokio-util         = { version = "0.7.16", features = ["full", "rt"] }
 
 bip39           = { version = "2.2.2", features = ["zeroize"] }
 observer_common = { path = "../observer_common" }
+thiserror       = "2.0"
 tonic           = "0.14"
 croner = "3.0.1"

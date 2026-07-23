@@ -2,6 +2,7 @@ use config::{Config, Environment, File};
 use observer_common::logging::ConsoleConfig;
 use serde::Deserialize;
 use std::env;
+use std::fmt;
 
 // Params to pass to embedded LDK node.
 #[derive(Debug, Deserialize)]
@@ -152,5 +153,11 @@ impl CollectorConfig {
             .build()?;
 
         cfg.try_deserialize().map_err(anyhow::Error::new)
+    }
+}
+
+impl fmt::Display for CollectorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }

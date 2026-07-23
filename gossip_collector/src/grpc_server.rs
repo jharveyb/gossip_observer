@@ -66,7 +66,9 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
             .try_into()
             .map_err(|e: anyhow::Error| Status::internal(e.to_string()))?;
         for peer in peers {
-            self.conn_manager.add_eligible_peer(peer);
+            self.conn_manager
+                .add_eligible_peer(peer)
+                .map_err(|e| Status::unavailable(e.to_string()))?;
         }
 
         Ok(Response::new(collectorrpc::EligiblePeersResponse {}))

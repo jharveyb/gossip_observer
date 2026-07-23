@@ -42,6 +42,30 @@ pub enum ConnManagerMsg {
     EmptyEligiblePeers,
 }
 
+// The actor mailbox only closes when the manager task has exited (i.e. during
+// shutdown); callers must treat these as a signal to wind down, not panic.
+#[derive(Debug, thiserror::Error)]
+pub enum PeerConnManagerError {
+    #[error("peer conn manager mailbox closed")]
+    MailboxClosed,
+    #[error("peer conn manager dropped the response channel")]
+    ResponseDropped,
+}
+
+impl From<mpsc::error::SendError<ConnManagerMsg>> for PeerConnManagerError {
+    fn from(_: mpsc::error::SendError<ConnManagerMsg>) -> Self {
+        Self::MailboxClosed
+    }
+}
+
+impl From<oneshot::error::RecvError> for PeerConnManagerError {
+    fn from(_: oneshot::error::RecvError) -> Self {
+        Self::ResponseDropped
+    }
+}
+
+type PeerConnManagerResult<T> = Result<T, PeerConnManagerError>;
+
 // The state for our actor, including any channels used for communication.
 // TODO: add a list to record when we successfully connect, so we can have a timer
 // to rotate a peer connection after some interval, say 24 hours or so.
@@ -153,42 +177,47 @@ impl PeerConnManagerHandle {
         }
     }
 
-    pub async fn next_eligible_peer(&self) -> Option<PeerConnectionInfo> {
+    pub async fn next_eligible_peer(&self) -> PeerConnManagerResult<Option<PeerConnectionInfo>> {
         let (tx, rx) = oneshot::channel();
         let msg = ConnManagerMsg::PeekEligiblePeer(tx);
-        self.mailbox.send(msg).unwrap();
-        let next_peer = rx.await.unwrap();
+        self.mailbox.send(msg)?;
+        let next_peer = rx.await?;
 
         // Always rotate the eligible peer list, so we don't repeat connection
         // attempts to the same peer when trying to increase our peer count.
         let msg = ConnManagerMsg::RotateEligiblePeers;
-        self.mailbox.send(msg).unwrap();
-        next_peer
+        self.mailbox.send(msg)?;
+        Ok(next_peer)
     }
 
-    pub fn add_eligible_peer(&self, info: PeerConnectionInfo) {
+    pub fn add_eligible_peer(&self, info: PeerConnectionInfo) -> PeerConnManagerResult<()> {
         let msg = ConnManagerMsg::AddEligiblePeer(info);
-        self.mailbox.send(msg).unwrap();
+        Ok(self.mailbox.send(msg)?)
     }
 
-    pub async fn get_eligible_peer_count(&self) -> u32 {
+    pub async fn get_eligible_peer_count(&self) -> PeerConnManagerResult<u32> {
         let (tx, rx) = oneshot::channel();
         let msg = ConnManagerMsg::GetEligiblePeerCount(tx);
-        self.mailbox.send(msg).unwrap();
-        rx.await.unwrap()
+        self.mailbox.send(msg)?;
+        Ok(rx.await?)
     }
 
-    fn add_pending_conn(&self, peer: &PeerSpecifier) {
+    pub fn sweep_pending_conns(&self, startup_delay: TimeDelta) -> PeerConnManagerResult<()> {
+        let msg = ConnManagerMsg::SweepPendingConnections(startup_delay);
+        Ok(self.mailbox.send(msg)?)
+    }
+
+    fn add_pending_conn(&self, peer: &PeerSpecifier) -> PeerConnManagerResult<()> {
         let msg = ConnManagerMsg::AddPendingConn(PendingConnection {
             peer: peer.clone(),
             conn_time: Utc::now(),
         });
-        self.mailbox.send(msg).unwrap();
+        Ok(self.mailbox.send(msg)?)
     }
 
-    fn remove_pending_conn(&self, peer: PeerSpecifier) {
+    fn remove_pending_conn(&self, peer: PeerSpecifier) -> PeerConnManagerResult<()> {
         let msg = ConnManagerMsg::RemovePendingConn(peer);
-        self.mailbox.send(msg).unwrap();
+        Ok(self.mailbox.send(msg)?)
     }
 }
 
@@ -202,8 +231,7 @@ pub async fn pending_conn_sweeper(
         tokio::select! {
                 _ = waiter.tick() => {
                     debug!("Peer conn manager: sweeper: expiring pending connections");
-                    let msg = ConnManagerMsg::SweepPendingConnections ( startup_delay );
-                    handle.mailbox.send(msg).unwrap();
+                    handle.sweep_pending_conns(startup_delay)?;
                 }
                 _ = cancel.cancelled() => {
                     info!("Peer conn manager: sweeper: shutting down");
@@ -221,11 +249,11 @@ pub async fn try_add_peer(
     cm: PeerConnManagerHandle,
     node: Arc<ldk_node::Node>,
     peer: PeerConnectionInfo,
-) {
+) -> PeerConnManagerResult<()> {
     let mut peer_specifiers = peer.split();
     peer_specifiers.sort_by(compare_for_sort);
     for spec in peer_specifiers.iter() {
-        cm.add_pending_conn(spec);
+        cm.add_pending_conn(spec)?;
     }
 
     // Wait to allow the exporter to pick up the updated filter list.
@@ -249,9 +277,11 @@ pub async fn try_add_peer(
     // TODO: is this necessary? Perhaps not
     if !connected {
         for spec in peer_specifiers {
-            cm.remove_pending_conn(spec);
+            cm.remove_pending_conn(spec)?;
         }
     }
+
+    Ok(())
 }
 
 // Watchdog that checks on our peer count, and will try to connect to new peers until we reach the target peer count.
@@ -304,11 +334,15 @@ pub async fn peer_count_monitor(
             let _permit = connect_rate_limiter.acquire().await;
             // TOOD: filter out peers we're already connected to, so we don't
             // re-add them to our filter list
-            if let Some(new_peer) = conn_mgr_handle.next_eligible_peer().await {
+            if let Some(new_peer) = conn_mgr_handle.next_eligible_peer().await? {
                 let cm = conn_mgr_handle.clone();
                 let nh = node_handle.clone();
                 tokio::spawn(async move {
-                    try_add_peer(cm, nh, new_peer).await;
+                    // Failures here mean the conn manager is gone, i.e. we are
+                    // shutting down; the attempt is moot.
+                    if let Err(e) = try_add_peer(cm, nh, new_peer).await {
+                        warn!(error = %e, "Peer conn manager: abandoned connection attempt");
+                    }
                 });
 
             // Missing eligible peers; sleep and wait for some to get added. This should only happen on startup.
