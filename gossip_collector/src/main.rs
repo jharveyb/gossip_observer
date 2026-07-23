@@ -77,6 +77,9 @@ async fn async_main(
     info!("Starting gossip collector");
     info!(%cfg.uuid, "Gossip collector initialized");
 
+    // info!("Current config:");
+    // info!(%cfg);
+
     let mut main_tasks = JoinSet::new();
     let stop_signal = CancellationToken::new();
 
@@ -353,7 +356,29 @@ async fn async_main(
 
     // All tokio tasks spawned earlier should have a child cancellation token.
     if let Some(res) = main_tasks.join_next().await {
-        let mut task_res = vec![res?];
+        // Deadman timer on a plain OS thread: async timeouts cannot cover
+        // hangs in runtime teardown or leaked spawn_blocking threads (e.g.
+        // node.stop() stuck in ldk-node), which would leave a zombie process
+        // that systemd considers healthy. If the process is still alive once
+        // the grace period expires, force an exit so systemd restarts us.
+        let deadman_delay = shutdown_timeout + Duration::from_secs(30);
+        std::thread::spawn(move || {
+            std::thread::sleep(deadman_delay);
+            error!(
+                delay_secs = deadman_delay.as_secs(),
+                "Shutdown deadman timer expired; forcing exit"
+            );
+            eprintln!(
+                "Shutdown deadman timer expired after {}s; forcing exit",
+                deadman_delay.as_secs()
+            );
+            std::process::exit(1);
+        });
+
+        // Record a panicked task as a failure instead of propagating the
+        // JoinError with `?`: bailing here would skip the cancel + timeout +
+        // forced-exit sequence below, which must always run.
+        let mut task_res = vec![res.unwrap_or_else(|e| Err(e.into()))];
         stop_signal.cancel();
 
         // Set a timeout for graceful task shutdown after sending the cancel

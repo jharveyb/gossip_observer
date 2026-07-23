@@ -20,6 +20,12 @@ static INTER_MSG_DELIM: &str = ";";
 static INTRA_MSG_DELIM: &str = ",";
 pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(600);
 
+// NATS publishes fail while JetStream is full (e.g. err 10023 "insufficient
+// resources" during an archiver outage); retry briefly, then shut down cleanly
+// so systemd restarts us once the stream drains.
+static PUBLISH_RETRY_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_MAX_ATTEMPTS: u32 = 5;
+
 // NATS subject name: observer.gossip.$NODEKEY
 // Extra credit:
 // Second subject for telemetry(?): observer.telemetry.$NODEKEY
@@ -335,28 +341,62 @@ impl NATSExporter {
             }
 
             if msg_batch.len() >= batch_size {
-                // Our vec should have the same capacity after being drained.
+                // Keep the batch intact until it is ACKed, so a failed publish
+                // can be retried without losing messages.
                 // std intersperse is nightly-only for now: https://github.com/rust-lang/rust/issues/79524
                 let batch_output =
-                    itertools::Itertools::join(&mut msg_batch.drain(..), INTER_MSG_DELIM);
+                    itertools::Itertools::join(&mut msg_batch.iter(), INTER_MSG_DELIM);
                 msg_send_time = std::time::Instant::now();
-                let ack = ctx
-                    .publish(nats_subject.clone(), batch_output.into())
-                    .await
-                    .unwrap();
-                // Wait for explicit ACK from collector.
-                tokio::select! {
-                    // TODO: propagate errors here, add timeout, etc.
-                    // The timeout (or something else) is important to be able
-                    // to handle a collector restart.
-                    // Update: maybe not
-                    ack_res = ack => {
-                        ack_res.unwrap()
-                    }
-                    _ = stop_signal.cancelled() => {
-                        break;
+
+                let mut attempts: u32 = 0;
+                let acked = loop {
+                    attempts += 1;
+                    // Publish and wait for the explicit ACK from JetStream.
+                    let publish_and_ack = async {
+                        let ack = ctx
+                            .publish(nats_subject.clone(), batch_output.clone().into())
+                            .await?
+                            .await?;
+                        anyhow::Ok(ack)
+                    };
+                    let publish_res = tokio::select! {
+                        res = publish_and_ack => res,
+                        _ = stop_signal.cancelled() => {
+                            break false;
+                        }
+                    };
+
+                    match publish_res {
+                        Ok(_) => break true,
+                        Err(e) => {
+                            if attempts >= PUBLISH_MAX_ATTEMPTS {
+                                error!(
+                                    error = %e,
+                                    attempts,
+                                    "NATS publish failed; shutting down"
+                                );
+                                bail!("NATS publish failed after {attempts} attempts: {e}");
+                            }
+                            info!(
+                                error = %e,
+                                attempts,
+                                retry_delay_secs = PUBLISH_RETRY_DELAY.as_secs(),
+                                "NATS publish failed; retrying"
+                            );
+                            tokio::select! {
+                                _ = time::sleep(PUBLISH_RETRY_DELAY) => {}
+                                _ = stop_signal.cancelled() => {
+                                    break false;
+                                }
+                            }
+                        }
                     }
                 };
+                if !acked {
+                    break;
+                }
+                // Our vec keeps its capacity after being cleared.
+                msg_batch.clear();
 
                 msg_submit_interval = msg_send_time.elapsed().as_millis();
                 total_upload_time += msg_submit_interval;
