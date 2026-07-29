@@ -1,10 +1,9 @@
 use anyhow::{anyhow, bail};
-use bitcoin::Address;
-use chrono::Utc;
-use ldk_node::config::{BackgroundSyncConfig, ChannelConfig};
+use bitcoin::{Address, BlockHash};
+use chrono::{DateTime, Utc};
+use ldk_node::config::ChannelConfig;
 use ldk_node::{BalanceDetails, NodeError, NodeStatus, PeerDetails, UserChannelId};
 use rand::prelude::*;
-use std::ops::Mul;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::spawn_blocking;
@@ -144,89 +143,64 @@ pub fn random_channel_cfg() -> ChannelConfig {
     cfg
 }
 
-/// Returns the name of the first chain sync that has gone stale, if any. Stale
-/// is some multiple of the configured sync interval.
-fn stale_sync(
-    status: &NodeStatus,
-    thresholds: &[(&'static str, i64); 3],
-    now_secs: i64,
-    elapsed_secs: i64,
-) -> Option<&'static str> {
-    let timestamps = [
-        status.latest_onchain_wallet_sync_timestamp,
-        status.latest_lightning_wallet_sync_timestamp,
-        status.latest_fee_rate_cache_update_timestamp,
-    ];
-    let mut elapsed = *thresholds;
-    for ((idx, &(name, threshold)), ts) in thresholds.iter().enumerate().zip(timestamps) {
-        if elapsed_secs <= threshold {
-            // Still within the startup grace for this sync. We may have read
-            // an old sync time from an old shut-down collector.
-            continue;
-        }
-        // The None case for a status timestamp should be caught on initial start.
-        // Rather, by the time threshold seconds have passed after LDK startup,
-        // at least one sync should have succeeded.
-        match ts {
-            // We failed to sync wihtin 'threshold' seconds from startup.
-            None => return Some(name),
-            Some(ts) => {
-                let elapsed_sync = now_secs - (ts as i64);
-                elapsed[idx].1 = elapsed_sync;
-                if elapsed_sync > threshold {
-                    info!("{elapsed:?}");
-                    return Some(name);
-                }
-            }
+/// Tracks chain-tip progress for the watchdog. The node's best block must advance
+/// at least once within `stale_secs`, or its chain backend has likely stalled and
+/// we restart the collector. This is a uniform, robust liveness signal across every
+/// chain source: they all advance `NodeStatus.current_best_block` as blocks arrive,
+/// regardless of wallet-sync internals.
+struct BestBlockMonitor {
+    stale_secs: i64,
+    last_block: BlockHash,
+    last_change: DateTime<Utc>,
+}
+
+impl BestBlockMonitor {
+    /// Seeds the monitor with the first observed best block. Anchoring
+    /// `last_change` at `now` gives a full `stale_secs` startup grace before the
+    /// tip is first required to advance.
+    fn new(initial: BlockHash, now: DateTime<Utc>, stale_secs: u64) -> Self {
+        Self {
+            stale_secs: stale_secs as i64,
+            last_block: initial,
+            last_change: now,
         }
     }
-    info!("LDK watchdog: sync check: passed");
-    info!("{elapsed:?}");
-    None
+
+    /// Records the node's current best block. Returns the seconds since the tip
+    /// last advanced and whether that now exceeds `stale_secs`. A changed tip
+    /// (new block or reorg — both change the hash) resets the timer.
+    fn observe(&mut self, current: BlockHash, now: DateTime<Utc>) -> (i64, bool) {
+        if self.last_block != current {
+            self.last_block = current;
+            self.last_change = now;
+        }
+        let elapsed = (now - self.last_change).num_seconds();
+        (elapsed, elapsed > self.stale_secs)
+    }
 }
 
 /// Watchdog task to detect if the LDK node is unhealthy. Defer the shutdown of
 /// other tasks to the main shutdown handler.
 ///
-/// Triggers if the node reports stopped, a status check fails, or if any
-/// background chain sync has gone stale. LDK keeps running even if it loses
-/// a chain backend, so we have to explicitly check the last sync times.
+/// Triggers if the node reports stopped, if `status_fail_limit` consecutive status
+/// checks fail, or if the chain tip fails to advance within `bestblock_stale_secs`.
+/// LDK keeps running even if it loses its chain backend, so we explicitly require
+/// the best block to keep moving.
 pub async fn ldk_watchdog(
     node: Arc<ldk_node::Node>,
     mut waiter: Interval,
     cancel: CancellationToken,
-    sync_cfg: BackgroundSyncConfig,
-    health_check_interval: u32,
-    fail_limit: u16,
+    bestblock_stale_secs: u64,
+    status_fail_limit: u16,
 ) -> anyhow::Result<()> {
-    info!("Starting LDK watchdog");
+    info!(
+        bestblock_stale_secs,
+        status_fail_limit, "Starting LDK watchdog"
+    );
 
-    let fail_limit_secs = |interval: u64| -> i64 {
-        // The interval duration we use should never be less than our health
-        // check interval. Otherwise, we would be checking syncs faster than
-        // we told LDK they should occur.
-        let check_interval = interval.max(health_check_interval.into()) as i64;
-        check_interval.mul(i64::from(fail_limit))
-    };
-
-    let thresholds = [
-        (
-            "onchain",
-            fail_limit_secs(sync_cfg.onchain_wallet_sync_interval_secs),
-        ),
-        (
-            "lightning",
-            fail_limit_secs(sync_cfg.lightning_wallet_sync_interval_secs),
-        ),
-        (
-            "fee_rate",
-            fail_limit_secs(sync_cfg.fee_rate_cache_update_interval_secs),
-        ),
-    ];
-    let start = Utc::now();
-
-    info!("LDK watchdog: start time: {:?}", start);
-    info!("LDK watchdog thresholds: {:?}", thresholds);
+    // Seeded from the first successful status read.
+    let mut monitor: Option<BestBlockMonitor> = None;
+    let mut consecutive_status_failures: u16 = 0;
 
     loop {
         tokio::select! {
@@ -238,11 +212,25 @@ pub async fn ldk_watchdog(
         }
 
         let status = match status(node.clone()).await {
-            Ok(s) => s,
+            Ok(s) => {
+                consecutive_status_failures = 0;
+                s
+            }
             Err(e) => {
-                error!("LDK watchdog: node status check failed");
-                cancel.cancel();
-                return Err(e);
+                // A single status-call hiccup should not restart the collector;
+                // only give up after repeated failures.
+                consecutive_status_failures += 1;
+                error!(
+                    failures = consecutive_status_failures,
+                    limit = status_fail_limit,
+                    "LDK watchdog: node status check failed"
+                );
+                if consecutive_status_failures > status_fail_limit {
+                    error!("LDK watchdog: status check failed too many times; shutting down");
+                    cancel.cancel();
+                    return Err(e);
+                }
+                continue;
             }
         };
 
@@ -253,105 +241,79 @@ pub async fn ldk_watchdog(
             return Ok(());
         }
 
-        // Node is running; if it is failing to sync, we should restart.
+        let tip = status.current_best_block.block_hash;
+        let height = status.current_best_block.height;
         let now = Utc::now();
-        let elapsed = now - start;
-        if let Some(name) = stale_sync(&status, &thresholds, now.timestamp(), elapsed.num_seconds())
-        {
+
+        let (elapsed, stale) = match monitor.as_mut() {
+            Some(m) => m.observe(tip, now),
+            None => {
+                monitor = Some(BestBlockMonitor::new(tip, now, bestblock_stale_secs));
+                (0, false)
+            }
+        };
+
+        if stale {
             error!(
-                sync = name,
-                "LDK watchdog: chain sync stale, shutting down collector"
+                height,
+                elapsed, "LDK watchdog: best block stale, shutting down collector"
             );
             cancel.cancel();
-            bail!("LDK chain sync '{name}' is stale");
+            bail!("LDK best block stale ({elapsed}s at height {height})");
         }
+
+        info!(height, elapsed, "LDK watchdog: best block check passed");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::Network;
-    use lightning::chain::BestBlock;
+    use bitcoin::hashes::Hash;
 
-    // fail_limit 3 applied to the default sync intervals (80 / 30 / 600).
-    const THRESHOLDS: [(&str, i64); 3] = [("onchain", 240), ("lightning", 90), ("fee_rate", 1800)];
-    const NOW: i64 = 110_000;
+    const STALE_SECS: u64 = 7200;
 
-    fn make_offsets(base_time: i64, offsets: &[i64]) -> Vec<u64> {
-        offsets.iter().map(|o| (base_time + o) as u64).collect()
+    fn ts(secs: u64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs as i64, 0).expect("valid timestamp")
     }
 
-    fn make_status(
-        onchain: Option<u64>,
-        lightning: Option<u64>,
-        fee_rate: Option<u64>,
-    ) -> NodeStatus {
-        NodeStatus {
-            is_running: true,
-            current_best_block: BestBlock::from_network(Network::Bitcoin),
-            latest_lightning_wallet_sync_timestamp: lightning,
-            latest_onchain_wallet_sync_timestamp: onchain,
-            latest_fee_rate_cache_update_timestamp: fee_rate,
-            latest_rgs_snapshot_timestamp: None,
-            latest_pathfinding_scores_sync_timestamp: None,
-            latest_node_announcement_broadcast_timestamp: None,
-            latest_channel_monitor_archival_height: None,
-        }
-    }
-
-    fn status_from_offsets(base_time: i64, offsets: &[i64]) -> NodeStatus {
-        let offsets = make_offsets(base_time, offsets);
-        make_status(Some(offsets[0]), Some(offsets[1]), Some(offsets[2]))
+    fn hash(n: u8) -> BlockHash {
+        BlockHash::from_byte_array([n; 32])
     }
 
     #[test]
-    fn fresh_syncs_are_healthy() {
-        let offsets = [-10, -5, -100];
-        let status = status_from_offsets(NOW, &offsets);
-        assert_eq!(stale_sync(&status, &THRESHOLDS, NOW, 100_000), None);
+    fn advancing_tip_is_healthy() {
+        // The tip advances on every check, well within the deadline, across a long
+        // span (longer than the deadline itself) -> never stale.
+        let mut monitor = BestBlockMonitor::new(hash(1), ts(0), STALE_SECS);
+        assert_eq!(monitor.observe(hash(2), ts(1_000)), (0, false));
+        assert_eq!(monitor.observe(hash(3), ts(10_000)), (0, false));
+        assert_eq!(monitor.observe(hash(4), ts(20_000)), (0, false));
     }
 
     #[test]
-    fn stale_onchain_trips() {
-        // onchain age 1000 > 240, others fresh.
-        let offsets = [-1000, -5, -100];
-        let status = status_from_offsets(NOW, &offsets);
+    fn stalled_tip_trips_after_deadline() {
+        // The tip never advances. Exactly at the deadline is not yet stale; one
+        // second past it trips.
+        let mut monitor = BestBlockMonitor::new(hash(1), ts(0), STALE_SECS);
         assert_eq!(
-            stale_sync(&status, &THRESHOLDS, NOW, 100_000),
-            Some("onchain")
+            monitor.observe(hash(1), ts(STALE_SECS)),
+            (STALE_SECS as i64, false)
+        );
+        assert_eq!(
+            monitor.observe(hash(1), ts(STALE_SECS + 1)),
+            ((STALE_SECS + 1) as i64, true)
         );
     }
 
     #[test]
-    fn stale_lightning_trips_when_onchain_fresh() {
-        // onchain fresh, lightning age 1000 > 90.
-        let offsets = [-10, -1000, -100];
-        let status = status_from_offsets(NOW, &offsets);
-        assert_eq!(
-            stale_sync(&status, &THRESHOLDS, NOW, 100_000),
-            Some("lightning")
-        );
-    }
-
-    #[test]
-    fn old_timestamps_within_grace_are_ignored() {
-        // uptime below the smallest threshold (90) -> nothing is judged yet,
-        // even with no successful syncs (the boot-with-persisted-timestamps case).
-        let status = make_status(None, None, None);
-        assert_eq!(stale_sync(&status, &THRESHOLDS, NOW, 50), None);
-
-        let offsets = [-1000, -1000, -1000];
-        let status = status_from_offsets(NOW, &offsets);
-        assert_eq!(stale_sync(&status, &THRESHOLDS, NOW, 50), None);
-    }
-
-    #[test]
-    fn never_synced_trips_after_grace() {
-        let status = make_status(None, None, None);
-        assert_eq!(
-            stale_sync(&status, &THRESHOLDS, NOW, 100_000),
-            Some("onchain")
-        );
+    fn tip_change_resets_timer() {
+        // Nearly stale, then the tip advances -> the timer resets and staleness is
+        // measured from the new change time.
+        let mut monitor = BestBlockMonitor::new(hash(1), ts(0), STALE_SECS);
+        assert_eq!(monitor.observe(hash(1), ts(7_000)), (7_000, false));
+        assert_eq!(monitor.observe(hash(2), ts(7_100)), (0, false));
+        assert_eq!(monitor.observe(hash(2), ts(14_000)), (6_900, false));
+        assert_eq!(monitor.observe(hash(2), ts(14_301)), (7_201, true));
     }
 }
