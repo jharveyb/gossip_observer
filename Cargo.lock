@@ -2378,7 +2378,7 @@ dependencies = [
 [[package]]
 name = "ldk-node"
 version = "0.7.0"
-source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-v0.7.0#8e175ac1709183bfd0c9177be329e4b0373f3496"
+source = "git+https://github.com/jharveyb/ldk-node?branch=gossip_observer-v0.7.0#8a935580c74383cfb0ee7f9087d7b513e2385a36"
 dependencies = [
  "base64 0.22.1",
  "bdk_chain",

@@ -3,13 +3,88 @@ use observer_common::logging::ConsoleConfig;
 use serde::Deserialize;
 use std::env;
 use std::fmt;
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ChainSourceError {
+    #[error("bitcoind REST needs both rest_host and rest_port, or neither")]
+    PartialRestConfig,
+}
+
+/// Bitcoin Core connection details. REST is optional; when set, chain data is
+/// synced over REST, and the RPC credentials are still used for transaction
+/// broadcast and fee estimation.
+#[derive(Deserialize, Clone)]
+pub struct BitcoindRpc {
+    pub rpc_host: String,
+    pub rpc_port: u16,
+    pub rpc_user: String,
+    pub rpc_password: String,
+    pub rest_host: Option<String>,
+    pub rest_port: Option<u16>,
+}
+
+/// Hand-written so the RPC password is never printed. `CollectorConfig`'s
+/// `Display` is a `Debug` passthrough over the whole config, so a derived
+/// `Debug` here would leak the password the first time the config is logged.
+impl fmt::Debug for BitcoindRpc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BitcoindRpc")
+            .field("rpc_host", &self.rpc_host)
+            .field("rpc_port", &self.rpc_port)
+            .field("rpc_user", &self.rpc_user)
+            .field("rpc_password", &"<redacted>")
+            .field("rest_host", &self.rest_host)
+            .field("rest_port", &self.rest_port)
+            .finish()
+    }
+}
+
+impl BitcoindRpc {
+    /// The REST endpoint to sync chain data from, if one is configured. A
+    /// half-set pair is a typo rather than a valid state, so it errors.
+    pub fn rest_endpoint(&self) -> Result<Option<(String, u16)>, ChainSourceError> {
+        match (self.rest_host.as_ref(), self.rest_port) {
+            (Some(host), Some(port)) => Ok(Some((host.clone(), port))),
+            (None, None) => Ok(None),
+            _ => Err(ChainSourceError::PartialRestConfig),
+        }
+    }
+}
+
+/// The chain backend for the embedded LDK node. Exactly one, by construction.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChainSource {
+    Esplora { url: String },
+    Electrum { url: String },
+    Bitcoind(BitcoindRpc),
+}
+
+/// Safe to log: the bitcoind RPC credentials are never included.
+impl fmt::Display for ChainSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Esplora { url } => write!(f, "esplora({url})"),
+            Self::Electrum { url } => write!(f, "electrum({url})"),
+            Self::Bitcoind(rpc) => {
+                write!(f, "bitcoind(rpc {}:{}", rpc.rpc_host, rpc.rpc_port)?;
+                if let (Some(host), Some(port)) = (rpc.rest_host.as_ref(), rpc.rest_port) {
+                    write!(f, ", rest {host}:{port}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
 
 // Params to pass to embedded LDK node.
 #[derive(Debug, Deserialize)]
 pub struct Ldk {
     pub network: String,
-    pub esplora: Option<String>,
-    pub electrum: Option<String>,
+    pub chain_source: ChainSource,
+    // Only used by the Esplora and Electrum chain sources; bitcoind polls on a
+    // fixed interval of its own.
     pub onchain_sync_interval: Option<u64>,
     pub lightning_sync_interval: Option<u64>,
     pub feerate_sync_interval: Option<u64>,
@@ -156,7 +231,15 @@ impl CollectorConfig {
             // Check that the LDK node is still running on this interval.
             .set_default("collector.ldk_health_check_interval_secs", 60)?
             .add_source(File::with_name(&cfg_path).required(false))
-            .add_source(Environment::with_prefix("COLLECTOR"))
+            // The separator lets nested keys be set from the environment, so
+            // secrets like ldk.chain_source.rpc_password can stay out of the
+            // config file: COLLECTOR_LDK__CHAIN_SOURCE__RPC_PASSWORD.
+            // https://docs.rs/config/latest/config/struct.Environment.html#method.separator
+            .add_source(
+                Environment::with_prefix("COLLECTOR")
+                    .prefix_separator("_")
+                    .separator("__"),
+            )
             .build()?;
 
         cfg.try_deserialize().map_err(anyhow::Error::new)
@@ -166,5 +249,155 @@ impl CollectorConfig {
 impl fmt::Display for CollectorConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::FileFormat;
+
+    /// Deserialize just the chain source, the way `CollectorConfig::new` would
+    /// read it out of a `config.toml`.
+    fn parse(toml: &str) -> Result<ChainSource, config::ConfigError> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            chain_source: ChainSource,
+        }
+
+        Config::builder()
+            .add_source(File::from_str(toml, FileFormat::Toml))
+            .build()?
+            .try_deserialize::<Wrapper>()
+            .map(|w| w.chain_source)
+    }
+
+    #[test]
+    fn parses_electrum() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "electrum"
+            url = "ssl://electrum.example:50002"
+            "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(src, ChainSource::Electrum { url } if url == "ssl://electrum.example:50002")
+        );
+    }
+
+    #[test]
+    fn parses_esplora() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "esplora"
+            url = "https://blockstream.info/api"
+            "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(src, ChainSource::Esplora { url } if url == "https://blockstream.info/api")
+        );
+    }
+
+    #[test]
+    fn parses_bitcoind_rpc_without_rest() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "bitcoind"
+            rpc_host = "127.0.0.1"
+            rpc_port = 8332
+            rpc_user = "observer"
+            rpc_password = "hunter2"
+            "#,
+        )
+        .unwrap();
+        let ChainSource::Bitcoind(rpc) = src else {
+            panic!("expected bitcoind, got {src}");
+        };
+        assert_eq!(rpc.rpc_host, "127.0.0.1");
+        assert_eq!(rpc.rpc_port, 8332);
+        assert_eq!(rpc.rest_endpoint(), Ok(None));
+    }
+
+    #[test]
+    fn parses_bitcoind_with_rest() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "bitcoind"
+            rpc_host = "127.0.0.1"
+            rpc_port = 8332
+            rpc_user = "observer"
+            rpc_password = "hunter2"
+            rest_host = "127.0.0.1"
+            rest_port = 8332
+            "#,
+        )
+        .unwrap();
+        let ChainSource::Bitcoind(rpc) = src else {
+            panic!("expected bitcoind, got {src}");
+        };
+        assert_eq!(
+            rpc.rest_endpoint(),
+            Ok(Some(("127.0.0.1".to_string(), 8332)))
+        );
+    }
+
+    #[test]
+    fn half_set_rest_config_is_rejected() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "bitcoind"
+            rpc_host = "127.0.0.1"
+            rpc_port = 8332
+            rpc_user = "observer"
+            rpc_password = "hunter2"
+            rest_host = "127.0.0.1"
+            "#,
+        )
+        .unwrap();
+        let ChainSource::Bitcoind(rpc) = src else {
+            panic!("expected bitcoind, got {src}");
+        };
+        assert_eq!(
+            rpc.rest_endpoint(),
+            Err(ChainSourceError::PartialRestConfig)
+        );
+    }
+
+    #[test]
+    fn unknown_chain_source_is_rejected() {
+        assert!(
+            parse(
+                r#"
+                [chain_source]
+                kind = "bitcoin_core"
+                url = "http://127.0.0.1:8332"
+                "#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn display_redacts_bitcoind_credentials() {
+        let src = parse(
+            r#"
+            [chain_source]
+            kind = "bitcoind"
+            rpc_host = "127.0.0.1"
+            rpc_port = 8332
+            rpc_user = "observer"
+            rpc_password = "hunter2"
+            "#,
+        )
+        .unwrap();
+        let rendered = format!("{src} {src:?}");
+        assert!(!rendered.contains("hunter2"), "leaked password: {rendered}");
     }
 }

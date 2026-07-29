@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering::SeqCst};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use bitcoin::Network;
 use croner::Cron;
 use ldk_node::config::{BackgroundSyncConfig, ElectrumSyncConfig, EsploraSyncConfig};
@@ -28,7 +28,7 @@ mod grpc_server;
 mod logger;
 mod node_manager;
 mod peer_conn_manager;
-use crate::config::CollectorConfig;
+use crate::config::{ChainSource, CollectorConfig};
 use crate::exporter::NATSExporter;
 use crate::node_manager::{
     balances, connected_peer_count, ldk_watchdog, next_address, stop_node,
@@ -100,23 +100,49 @@ async fn async_main(
         sync_cfg.fee_rate_cache_update_interval_secs = feerate_interval;
     }
 
-    match (cfg.ldk.esplora, cfg.ldk.electrum) {
-        (None, None) | (Some(_), Some(_)) => {
-            bail!("Exactly one chain source must be specified")
-        }
-        (None, Some(server_url)) => {
-            let cfg = ElectrumSyncConfig {
+    info!(chain_source = %cfg.ldk.chain_source, "LDK chain source");
+
+    match cfg.ldk.chain_source {
+        ChainSource::Electrum { url } => {
+            let sync = ElectrumSyncConfig {
                 background_sync_config: Some(sync_cfg),
             };
-            // builder.set_chain_source_electrum(server_url, Some(cfg));
-            // Use default cfg, now that we're using a private endpoint
-            builder.set_chain_source_electrum(server_url, Some(cfg));
+            builder.set_chain_source_electrum(url, Some(sync));
         }
-        (Some(server_url), None) => {
-            let cfg = EsploraSyncConfig {
+        ChainSource::Esplora { url } => {
+            let sync = EsploraSyncConfig {
                 background_sync_config: Some(sync_cfg),
             };
-            builder.set_chain_source_esplora(server_url, Some(cfg));
+            builder.set_chain_source_esplora(url, Some(sync));
+        }
+        ChainSource::Bitcoind(ref bitcoind) => {
+            // Bitcoind polls the chain on a fixed interval of its own, so the
+            // sync intervals we accept for the other sources do nothing here.
+            if cfg.ldk.onchain_sync_interval.is_some()
+                || cfg.ldk.lightning_sync_interval.is_some()
+                || cfg.ldk.feerate_sync_interval.is_some()
+            {
+                warn!("Sync intervals are ignored by the bitcoind chain source");
+            }
+
+            // REST is only used for chain data; broadcast and fee estimation
+            // still go over RPC, so the credentials are needed either way.
+            match bitcoind.rest_endpoint()? {
+                Some((rest_host, rest_port)) => builder.set_chain_source_bitcoind_rest(
+                    rest_host,
+                    rest_port,
+                    bitcoind.rpc_host.clone(),
+                    bitcoind.rpc_port,
+                    bitcoind.rpc_user.clone(),
+                    bitcoind.rpc_password.clone(),
+                ),
+                None => builder.set_chain_source_bitcoind_rpc(
+                    bitcoind.rpc_host.clone(),
+                    bitcoind.rpc_port,
+                    bitcoind.rpc_user.clone(),
+                    bitcoind.rpc_password.clone(),
+                ),
+            };
         }
     }
 
