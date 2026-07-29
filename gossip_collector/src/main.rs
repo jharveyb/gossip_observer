@@ -30,7 +30,9 @@ mod node_manager;
 mod peer_conn_manager;
 use crate::config::CollectorConfig;
 use crate::exporter::NATSExporter;
-use crate::node_manager::{balances, connected_peer_count, ldk_watchdog, next_address, stop_node};
+use crate::node_manager::{
+    balances, connected_peer_count, ldk_watchdog, next_address, stop_node,
+};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
 fn main() -> anyhow::Result<()> {
@@ -271,8 +273,7 @@ async fn async_main(
             cfg.collector.ldk_health_check_interval_secs.into(),
         )),
         ldk_watchdog_stop_signal,
-        sync_cfg,
-        cfg.collector.ldk_health_check_interval_secs,
+        cfg.ldk.bestblock_stale_secs,
         cfg.ldk.watchdog_fail_limit,
     ));
 

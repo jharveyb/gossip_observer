@@ -13,6 +13,10 @@ pub struct Ldk {
     pub onchain_sync_interval: Option<u64>,
     pub lightning_sync_interval: Option<u64>,
     pub feerate_sync_interval: Option<u64>,
+    // Seconds the chain tip may go without advancing before the watchdog
+    // restarts us. Tracks block arrival, so this has to tolerate a long gap
+    // between blocks. Applies to every chain source.
+    pub bestblock_stale_secs: u64,
     pub storage_dir: String,
     pub log_level: String,
     pub listen_addr: String,
@@ -121,6 +125,9 @@ impl CollectorConfig {
             .set_default("ldk.tor_proxy_port", 9050)?
             .set_default("ldk.enable_tor", false)?
             .set_default("ldk.watchdog_fail_limit", 3)?
+            // Blocks are ~10 minutes apart on average, but the tail is long, so
+            // give the chain tip a generous window to advance before restarting.
+            .set_default("ldk.bestblock_stale_secs", 7200)?
             .set_default("apiserver.hostname", "127.0.0.1")?
             .set_default("apiserver.grpc_port", 50051)?
             .set_default("nats.server_addr", "localhost:4222")?
