@@ -4,14 +4,49 @@ ldk_runtime_worker_threads = {{ item.ldk_runtime_worker_threads | default(2) }}
 graph_upload_cron = "{{ collector_graph_cron }}"
 
 [ldk]
-electrum = "{{ electrum_url }}"
 storage_dir = "/var/lib/gossip_collector/{{ item.uuid }}/ldk"
 listen_addr = "0.0.0.0"
 listen_port = {{ item.ldk_port | default(9735) }}
 tor_proxy_addr = "{{ item.tor_proxy_addr | default('127.0.0.1') }}"
 tor_proxy_port = {{ item.tor_proxy_port | default(9050) }}
 enable_tor = {{ item.enable_tor | default('true') }}
-watchdog_fail_limit = {{ watchdog_fail_limit }} 
+watchdog_fail_limit = {{ watchdog_fail_limit }}
+
+{# Legacy flat chain-source key, emitted in ADDITION to [ldk.chain_source] so a
+   collector still on the OLD binary can read this config during a rolling
+   upgrade: it looks for ldk.electrum / ldk.esplora and ignores the sub-table,
+   while new binaries do the reverse and ignore this line. Only the tx-based
+   sources have a legacy spelling; a bitcoind config can only be read by the new
+   binary. This must sit under [ldk] and BEFORE the [ldk.chain_source] header,
+   since a sub-table header ends the parent table. Drop this block once the
+   whole fleet is on the new binary. #}
+{% set cs = item.chain_source | default(collector_chain_source) %}
+{% if cs.kind == 'electrum' %}
+electrum = {{ cs.url | to_json }}
+{% elif cs.kind == 'esplora' %}
+esplora = {{ cs.url | to_json }}
+{% endif %}
+
+{# No '-' whitespace modifiers below: Ansible renders with trim_blocks=True, so
+   the newline closing a block or comment tag is already dropped and a tag on a
+   line of its own disappears cleanly. Adding '-' on top of that eats the real
+   line breaks and collapses this whole table onto one line. #}
+{# 'cs' (the resolved chain source) was set above with the legacy line.
+   This sub-table has to stay last in [ldk]: in TOML, a sub-table header ends
+   the parent table, so any bare [ldk] key placed after it would land here. #}
+[ldk.chain_source]
+{# 'kind' is the serde tag on the ChainSource enum and selects the variant.
+   It is always a bare string, so it is emitted explicitly. #}
+kind = "{{ cs.kind }}"
+{# The rest of the keys are emitted verbatim, so adding a field to a variant
+   (say bitcoind's optional rest_host/rest_port) needs no template edit. The
+   tradeoff is that a typo'd key reaches the config file and only fails when
+   the collector deserializes it, so check the rendered diff.
+   to_json gives TOML-valid scalars: strings quoted, ints/bools bare. An
+   unquoted 127.0.0.1 would otherwise parse as an invalid float. #}
+{% for k, v in cs.items() if k != 'kind' %}
+{{ k }} = {{ v | to_json }}
+{% endfor %}
 
 [apiserver]
 hostname = "{{ tailscale_ip }}"

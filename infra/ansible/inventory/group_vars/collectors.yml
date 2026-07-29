@@ -12,8 +12,36 @@ watchdog_fail_limit: 7
 # Each collector instance has a unique UUID and specifies which host to deploy to
 # For multiple collectors per machine, use unique gRPC port and LDK P2P port
 
-# Add this to your Ansible vault
+# Chain backend for every collector's embedded LDK node. Exactly one source,
+# selected by 'kind'; the remaining keys are passed through to the config file
+# as-is, so they must match the fields of that ChainSource variant.
+#
+#   kind: electrum   -> url
+#   kind: esplora    -> url
+#   kind: bitcoind   -> rpc_host, rpc_port, rpc_user, rpc_password,
+#                       and optionally rest_host + rest_port (both or neither)
+#
+# REST makes the bitcoind backend much more performant; skip JSON marshalling
+# and just send info as binary.
+#
+# Put this in your Ansible vault, since the bitcoind variant holds credentials:
+# collector_chain_source:
+#   kind: bitcoind
+#   rpc_host: "127.0.0.1"
+#   rpc_port: 8332
+#   rpc_user: "observer"
+#   rpc_password: "$YOUR_RPC_PASSWORD"
+#   rest_host: "127.0.0.1"
+#   rest_port: 8332
+#
+# A single collector can override the group default with its own
+# 'chain_source:' key in the gossip_collectors entry below.
+
+# Add this to your Ansible vault (legacy)
 # electrum_url: $YOUR_PRIVATE_ENDPOINT
+collector_chain_source:
+  kind: electrum
+  url: "{{ electrum_url }}"
 
 # TODO: autogenerate this from our collector mapping somehow
 gossip_collectors:

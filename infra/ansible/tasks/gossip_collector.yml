@@ -55,14 +55,16 @@
   loop: "{{ host_collectors }}"
   no_log: true
 
+# Config can hold bitcoind RPC credentials, so it is not world-readable.
 - name: Deploy collector config files
   ansible.builtin.template:
     src: collector_config.toml.j2
     dest: "/etc/gossip_collector/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: '0640'
   loop: "{{ host_collectors }}"
+  no_log: true
   notify: Restart all gossip collectors
 
 - name: Deploy gossip collector binary
