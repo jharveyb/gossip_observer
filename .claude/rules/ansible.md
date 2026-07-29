@@ -39,6 +39,8 @@ Handler names can't contain loop vars — the handler loops internally. Real han
 ## TOML templates
 Quote strings (IPs/URLs/paths); leave ints/bools unquoted. Unquoted `127.0.0.1` parses as an invalid float. Text files that Rust `.trim()`s want a trailing `\n` (`content: "{{ x }}\n"`).
 
+**Don't add `-` whitespace modifiers — Ansible renders with `trim_blocks=True`.** The newline closing a block/comment tag is already dropped, so a `{% %}` or `{# #}` tag alone on a line disappears cleanly. Writing `{%- ... -%}` or `{#- ... -#}` on top of that eats the *real* line breaks and collapses the output onto one line (`[ldk.chain_source]kind = "electrum"url = ...`). Two corollaries: never write a literal `#}` inside comment prose (it closes the comment early, dumping the rest into the file), and when test-rendering a template with plain Jinja, construct the env as `Environment(trim_blocks=True, lstrip_blocks=False, keep_trailing_newline=True)` — Jinja's own defaults differ from Ansible's and will hide both bugs.
+
 ## UFW
 Allow rules before deny; the collector P2P allow uses `insert: 1`; per-interface rules key on `public_interface`; `Deny-public` last. Verify with `sudo ufw status numbered`.
 
@@ -46,7 +48,7 @@ Allow rules before deny; the collector P2P allow uses `insert: 1`; per-interface
 Per-instance file paths in group_vars; **separate copy task per file** (clear errors); reference in config templates via `| basename` so the deployed filename is correct regardless of source path. Example: `observer_controller.yml` deploys `node_clusterings_file`/`node_communities_file`/`collector_mapping_file` into `/var/lib/observer_controller/{uuid}/`.
 
 ## Vault (`vault.yml`, keyed by instance UUID)
-Holds: collector `gossip_collector_mnemonics`; archiver `archiver_db_url`(s) and `archiver_verify_s3_keys` (read-only Garage creds for the retention verify pass); Garage `garage_rpc_secret` / `garage_admin_token` / `garage_metrics_token`. Controllers need no secrets (public network data + internal gRPC only). `ansible-vault encrypt/edit`; run with `--ask-vault-pass`.
+Holds: collector `gossip_collector_mnemonics` and `collector_chain_source` (the LDK chain backend; the `kind: bitcoind` variant carries RPC credentials, which is why `config.toml` is deployed `0640` + `no_log`); archiver `archiver_db_url`(s) and `archiver_verify_s3_keys` (read-only Garage creds for the retention verify pass); Garage `garage_rpc_secret` / `garage_admin_token` / `garage_metrics_token`. Controllers need no secrets (public network data + internal gRPC only). `ansible-vault encrypt/edit`; run with `--ask-vault-pass`.
 
 ## Data sharing stack (Garage + Caddy + Cloudflare Tunnel)
 Deployment/onboarding: `infra/ansible/DATA_SHARING.md`. Chain: Cloudflare Tunnel → Caddy (loopback + tailscale) → Garage S3. Hard-won gotchas:
