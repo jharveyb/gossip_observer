@@ -6,7 +6,7 @@ paths:
 
 # Gossip data semantics
 
-What the collected `timings` data actually means — required for correct analysis and for reasoning about the exporter.
+What the collected `timings` data actually means — required for correct analysis and for reasoning about the exporter. For the raw per-message capture format the collector ingests (the 10-field `now,recv_peer,msg_type,msg_dir,…` line the fork emits), see `.claude/rules/forks.md`.
 
 ## `dir=2` = gossip we *serve* to peers (not relay, not origination)
 Each `dir=2` row is one point-to-point send via the fork's `PeerManager::enqueue_message` (rust-lightning `gossip_observer-v0.2`), dominated by **initial-sync serving** (a peer requests full sync → the node walks the graph and enqueues each message to that one peer). So:

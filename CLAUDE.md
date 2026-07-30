@@ -26,6 +26,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 - **TimescaleDB / migrations / retention** → `.claude/rules/database.md`
 - **DuckDB/Parquet query correctness + viz** → `.claude/rules/analysis.md`
 - **What the gossip data means** (`dir=1`/`dir=2`, fanout) → `.claude/rules/gossip-semantics.md`
+- **Patched LDK forks** (why the fork, `MessageExporter` capture, export schema, Tor) → `.claude/rules/forks.md`
 
 ## Verify before finishing Rust changes
 Run `cargo clippy --workspace` and `cargo test --workspace`; if SQL changed, `just gen-sql`.
