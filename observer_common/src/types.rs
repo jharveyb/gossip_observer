@@ -383,6 +383,11 @@ pub struct NodeAnnouncementInfo {
     pub alias: String,
     #[serde_as(as = "Vec<DisplayFromStr>")]
     pub addresses: Vec<SocketAddress>,
+    /// Raw feature bits in little-endian byte order, as broadcast in
+    /// node_announcement (BOLT 7 / BOLT 9). Empty when unavailable.
+    /// Stored as LE so it can be round-tripped via
+    /// `NodeFeatures::from_le_bytes` / `NodeFeatures::le_flags()`.
+    pub node_features: Vec<u8>,
 }
 
 impl NodeAnnouncementInfo {
@@ -398,6 +403,7 @@ impl From<&LdkNodeAnnouncementInfo> for NodeAnnouncementInfo {
             last_update: info.last_update(),
             alias: info.alias().to_string(),
             addresses: info.addresses().to_vec(),
+            node_features: info.features().le_flags().to_vec(),
         }
     }
 }
@@ -409,6 +415,7 @@ impl From<NodeAnnouncementInfo> for common::NodeAnnouncementInfo {
             last_update: info.last_update,
             alias: info.alias,
             addresses: util::try_convert_vec_permissive(info.addresses),
+            node_features: info.node_features,
         }
     }
 }
@@ -419,6 +426,7 @@ impl From<common::NodeAnnouncementInfo> for NodeAnnouncementInfo {
             last_update: info.last_update,
             alias: info.alias,
             addresses: util::try_convert_vec_permissive(info.addresses),
+            node_features: info.node_features,
         }
     }
 }
@@ -451,6 +459,7 @@ impl TryFrom<(NodeId, Option<LdkNodeAnnouncementInfo>)> for GossipNodeInfo {
                 .unique()
                 .cloned()
                 .collect::<Vec<_>>(),
+            node_features: info.features().le_flags().to_vec(),
         });
         Ok(GossipNodeInfo { pubkey, info })
     }
