@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -14,9 +15,10 @@ use std::sync::mpsc;
 use anyhow::Context;
 use bitcoin::Txid;
 use bitcoincore_rpc::{Auth, Client as BitcoindClient, RpcApi};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use electrum_client::Client;
 use electrum_client::ElectrumApi;
+use electrum_client::EstimationMode;
 
 use electrum_client::Param;
 
@@ -31,6 +33,32 @@ struct Cli {
         required = true
     )]
     server: String,
+}
+
+#[derive(Debug, Args, Clone, Copy)]
+struct TxIndex {
+    block_index: u32,
+    tx_index: u32,
+}
+
+impl FromStr for TxIndex {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split(',');
+        let block_index = u32::from_str(parts.next().ok_or(u32::from_str("").unwrap_err())?)?;
+        let tx_index = u32::from_str(parts.next().ok_or(u32::from_str("").unwrap_err())?)?;
+        Ok(TxIndex {
+            block_index,
+            tx_index,
+        })
+    }
+}
+
+impl TxIndex {
+    fn unroll(&self) -> (usize, usize) {
+        (self.block_index as usize, self.tx_index as usize)
+    }
 }
 
 #[derive(Subcommand)]
@@ -57,6 +85,10 @@ enum Commands {
     GetTxidFromPosRaw {
         block_index: u32,
         tx_index: u32,
+    },
+    GetTxidFromPosBatch {
+        #[arg(value_delimiter(';'), num_args(0..))]
+        indexes: Vec<TxIndex>,
     },
     // Wrapper cmds not part of the electrum spec.
     /// Get transaction at block height and tx index
@@ -128,15 +160,6 @@ fn txid_from_pos(client: &Client, block_index: u32, tx_index: u32) -> anyhow::Re
     Ok(Txid::from_str(txid)?)
 }
 
-/// Server-side (protocol) errors mean the looked-up item doesn't exist;
-/// anything else (transport, parsing) is a real failure.
-fn is_protocol_error(e: &anyhow::Error) -> bool {
-    matches!(
-        e.downcast_ref::<electrum_client::Error>(),
-        Some(electrum_client::Error::Protocol(_))
-    )
-}
-
 /// Outcome of the on-chain check for one channel's funding output.
 enum UtxoCheck {
     /// Confirmed unspent; holds the output value in sats.
@@ -153,11 +176,7 @@ enum UtxoCheck {
 fn check_channel(client: &Client, scid: u64) -> anyhow::Result<UtxoCheck> {
     let (block, tx_pos, vout) = decode_scid(scid);
 
-    let txid = match txid_from_pos(client, block as u32, tx_pos as u32) {
-        Ok(txid) => txid,
-        Err(e) if is_protocol_error(&e) => return Ok(UtxoCheck::Missing),
-        Err(e) => return Err(e.context(format!("looking up txid for scid {scid}"))),
-    };
+    let txid = client.txid_from_pos(block as usize, tx_pos as usize)?;
     let tx = match client.transaction_get(&txid) {
         Ok(tx) => tx,
         Err(electrum_client::Error::Protocol(_)) => return Ok(UtxoCheck::Missing),
@@ -176,7 +195,7 @@ fn check_channel(client: &Client, scid: u64) -> anyhow::Result<UtxoCheck> {
         .with_context(|| format!("listing unspent outputs for scid {scid}"))?;
     let is_unspent = unspent
         .iter()
-        .any(|u| u.tx_hash == txid && u.tx_pos == vout as usize);
+        .any(|u| u.height == block as usize && u.tx_hash == txid && u.tx_pos == vout as usize);
     if is_unspent {
         Ok(UtxoCheck::Unspent(txout.value.to_sat()))
     } else {
@@ -612,10 +631,23 @@ fn main() -> anyhow::Result<()> {
             block_index,
             tx_index,
         } => {
-            // serde of reply fails here if server is electrs
-            let txid =
-                client.txid_from_pos_with_merkle(*block_index as usize, *tx_index as usize)?;
-            println!("{:#?}", txid.tx_hash);
+            let txid = client.txid_from_pos(*block_index as usize, *tx_index as usize)?;
+            println!("{:#?}", txid);
+        }
+        Commands::GetTxidFromPosBatch { indexes } => {
+            let indexes = indexes.iter().map(|ind| ind.unroll()).collect::<Vec<_>>();
+            let batches = indexes.chunks(50);
+            let mut output = Vec::with_capacity(indexes.len());
+            for batch in batches {
+                let txids = client.batch_txid_from_pos(batch)?;
+                let results = batch
+                    .iter()
+                    .zip(txids)
+                    .map(|(b, t)| (b.0, b.1, t))
+                    .collect::<Vec<_>>();
+                output.push(results);
+            }
+            println!("{:#?}", output);
         }
         Commands::GetTxFromPos {
             block_index,
@@ -640,7 +672,7 @@ fn main() -> anyhow::Result<()> {
             println!("{:#?}", res);
         }
         Commands::GetFeeEstimate { target } => {
-            let res = client.estimate_fee(*target as usize);
+            let res = client.estimate_fee(*target as usize, Some(EstimationMode::Conservative));
             println!("{:#?}", res);
         }
         // Handled before the Electrum client is created.
