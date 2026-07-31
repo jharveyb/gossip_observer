@@ -13,6 +13,7 @@ use ldk_node::logger::LogLevel;
 use lightning::ln::msgs::SocketAddress;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::{self, JoinSet};
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info, warn};
@@ -361,13 +362,23 @@ async fn async_main(
     let ctrl_handler_stop_recv = stop_signal.child_token();
     let ctrl_handle_stop_send = stop_signal.clone();
     let shutdown_timeout = Duration::from_secs(cfg.collector.shutdown_timeout_secs.into());
+    // SIGINT covers terminal Ctrl-C; SIGTERM covers systemd stop/restart.
+    // SIGQUIT is deliberately left unhandled so `kill -QUIT` still produces a
+    // core dump for diagnosing a wedged process.
+    let mut sigint =
+        signal(SignalKind::interrupt()).context("Failed to register SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("Failed to register SIGTERM handler")?;
     main_tasks.spawn(async move {
         tokio::select! {
             _ = ctrl_handler_stop_recv.cancelled() => {
                 info!("Signal handler: received shutdown signal");
             },
-            _ = tokio::signal::ctrl_c() => {
-                info!("Signal handler: Ctrl-C received, shutting down");
+            _ = sigint.recv() => {
+                info!("Signal handler: SIGINT received, shutting down");
+            },
+            _ = sigterm.recv() => {
+                info!("Signal handler: SIGTERM received, shutting down");
             },
         }
 
