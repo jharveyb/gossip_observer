@@ -99,8 +99,7 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
         &self,
         _req: Request<BalancesRequest>,
     ) -> Result<Response<BalancesResponse>, Status> {
-        let node_copy = self.node.clone();
-        let balance: Balances = tokio::task::spawn_blocking(move || balances(node_copy))
+        let balance: Balances = balances(self.node.clone())
             .await
             .map_err(|e| Status::internal(format!("Balances: {}", e)))?
             .into();
@@ -165,8 +164,8 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
         &self,
         _req: Request<ShutdownRequest>,
     ) -> Result<Response<ShutdownResponse>, Status> {
-        // Let the main task shut down the LDK node.
-        // Possible weird behavior since the gRPC server is using the same token?
+        // Cancel the shared root token: the signal-handler task stops the LDK
+        // node and the gRPC server (on its child token) drains and exits.
         self.stop_token.cancel();
         info!("Collector: grpc server: sent shutdown signal");
         Ok(Response::new(ShutdownResponse {}))

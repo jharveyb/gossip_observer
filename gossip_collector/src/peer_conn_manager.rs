@@ -157,7 +157,7 @@ async fn run_conn_manager(mut mgr: PeerConnManager) {
 // from multiple other tasks.
 #[derive(Clone)]
 pub struct PeerConnManagerHandle {
-    pub mailbox: mpsc::UnboundedSender<ConnManagerMsg>,
+    mailbox: mpsc::UnboundedSender<ConnManagerMsg>,
     pub pending_notifier: watch::Receiver<PendingConnFilter>,
 }
 
@@ -293,11 +293,11 @@ pub async fn peer_count_monitor(
     cancel: CancellationToken,
     peer_target: SharedUsize,
 ) -> anyhow::Result<()> {
-    let count_below_target = async || -> bool {
-        let peer_count = connected_peer_count(node_handle.clone()).await;
+    let count_below_target = async || -> anyhow::Result<bool> {
+        let peer_count = connected_peer_count(node_handle.clone()).await?;
         let target = peer_target.load(SeqCst);
         debug!(peer_count, target, "Peer count check");
-        peer_count < target
+        Ok(peer_count < target)
     };
 
     // TODO: configurable? May need to slow down for a smaller machine
@@ -321,7 +321,7 @@ pub async fn peer_count_monitor(
                     break;
                 }
                 _ = waiter.tick() => {
-                    below_target = count_below_target().await;
+                    below_target = count_below_target().await?;
                     debug!(below_target, "Peer conn manager: monitor tick");
                 }
         }
@@ -357,7 +357,7 @@ pub async fn peer_count_monitor(
                 break;
             }
 
-            below_target = count_below_target().await;
+            below_target = count_below_target().await?;
             info!(below_target, "Peer conn manager status");
         }
 

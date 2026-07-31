@@ -15,6 +15,39 @@ use tracing::info;
 use observer_common::types::OpenChannelCommand;
 use observer_common::types::PeerSpecifier;
 
+/// Run a (potentially) blocking LDK node call off the async runtime, with an
+/// optional timeout. Note that a timeout only abandons the join handle; the
+/// blocking thread itself keeps running until the call returns.
+async fn node_call<T, F>(op: &'static str, timeout: Option<Duration>, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> Result<T, NodeError> + Send + 'static,
+    T: Send + 'static,
+{
+    let call = spawn_blocking(f);
+    let joined = match timeout {
+        Some(t) => match tokio::time::timeout(t, call).await {
+            Ok(joined) => joined,
+            Err(e) => {
+                error!(
+                    op,
+                    timeout_secs = t.as_secs(),
+                    "Collector: LDK: call timed out"
+                );
+                return Err(e.into());
+            }
+        },
+        None => call.await,
+    };
+    match joined {
+        Ok(Ok(val)) => Ok(val),
+        Ok(Err(e)) => Err(e.into()),
+        Err(e) => {
+            error!(op, error = ?e, "Tokio: LDK call join error");
+            Err(e.into())
+        }
+    }
+}
+
 pub async fn node_peer_connect(
     node_copy: Arc<ldk_node::Node>,
     peer: &PeerSpecifier,
@@ -25,81 +58,70 @@ pub async fn node_peer_connect(
     // Default 10 second timeout, deep in rust-lightning
     // lightning-net-tokio::lib::connect_outbound()
     // for ldk-node, this is async on the inside
-    // Never persist peers, we'll maange that outside of LDK
-    match spawn_blocking(move || node_copy.connect(pubkey, addr, false)).await {
-        Ok(Ok(_)) => {
+    // Never persist peers, we'll manage that outside of LDK
+    match node_call("connect", None, move || {
+        node_copy.connect(pubkey, addr, false)
+    })
+    .await
+    {
+        Ok(_) => {
             info!(peer = %peer_fmt, "LDK: node connected");
             Ok(())
         }
-        Ok(Err(e)) => match e {
-            NodeError::ConnectionFailed => {
-                let err_str = format!("Collector: LDK: connection failed: {}", peer_fmt);
-                anyhow::bail!("{}", err_str);
-            }
-            _ => {
-                error!(error = ?e, peer = %peer_fmt, "LDK: Unexpected error");
-                Err(e.into())
-            }
-        },
+        // Connection failures are routine (offline peers); don't log them as
+        // unexpected, just report to the caller.
+        Err(e)
+            if matches!(
+                e.downcast_ref::<NodeError>(),
+                Some(NodeError::ConnectionFailed)
+            ) =>
+        {
+            anyhow::bail!("Collector: LDK: connection failed: {}", peer_fmt);
+        }
         Err(e) => {
-            error!(error = ?e, "Tokio: node_peer_connect error");
-            Err(e.into())
+            error!(error = %e, peer = %peer_fmt, "LDK: Unexpected error");
+            Err(e)
         }
     }
 }
 
 pub async fn current_peers(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Vec<PeerDetails>> {
-    spawn_blocking(move || node_copy.list_peers())
-        .await
-        .map_err(anyhow::Error::msg)
+    node_call("list_peers", None, move || {
+        Ok::<_, NodeError>(node_copy.list_peers())
+    })
+    .await
 }
 
-pub async fn connected_peer_count(node_copy: Arc<ldk_node::Node>) -> usize {
-    let peer_list = current_peers(node_copy).await.unwrap_or_default();
-    peer_list
-        .iter()
-        .fold(0, |acc, i| if i.is_connected { acc + 1 } else { acc })
+pub async fn connected_peer_count(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<usize> {
+    let peer_list = current_peers(node_copy).await?;
+    Ok(peer_list.iter().filter(|p| p.is_connected).count())
 }
 
 pub async fn status(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<NodeStatus> {
     // This shouldn't time out, even if the node is stopped.
     let default_status_wait = Duration::from_secs(10);
-    let base_check = spawn_blocking(move || node_copy.status());
-    match tokio::time::timeout(default_status_wait, base_check).await {
-        Err(e) => {
-            error!(error = ?e, "Collector: LDK: status call failed");
-            Err(e.into())
-        }
-        Ok(Err(e)) => {
-            error!(error = ?e, "Tokio: status error");
-            Err(e.into())
-        }
-        Ok(Ok(status)) => Ok(status),
-    }
+    node_call("status", Some(default_status_wait), move || {
+        Ok::<_, NodeError>(node_copy.status())
+    })
+    .await
 }
 
 pub async fn stop_node(node_copy: Arc<ldk_node::Node>, timeout: Duration) -> anyhow::Result<()> {
-    let base_stop = spawn_blocking(move || node_copy.stop());
-    match tokio::time::timeout(timeout, base_stop).await {
-        Err(e) => {
-            error!(error = ?e, "Collector: LDK: stop call failed");
-            Err(e.into())
-        }
-        Ok(Err(e)) => {
-            error!(error = ?e, "Tokio: stop error");
-            Err(e.into())
-        }
-        Ok(Ok(stop)) => Ok(stop?),
-    }
+    node_call("stop", Some(timeout), move || node_copy.stop()).await
 }
 
-pub fn next_address(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Address> {
-    let addr = node_copy.onchain_payment().next_address()?;
-    Ok(addr)
+pub async fn next_address(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<Address> {
+    node_call("next_address", None, move || {
+        node_copy.onchain_payment().next_address()
+    })
+    .await
 }
 
-pub fn balances(node_copy: Arc<ldk_node::Node>) -> BalanceDetails {
-    node_copy.list_balances()
+pub async fn balances(node_copy: Arc<ldk_node::Node>) -> anyhow::Result<BalanceDetails> {
+    node_call("list_balances", None, move || {
+        Ok::<_, NodeError>(node_copy.list_balances())
+    })
+    .await
 }
 
 pub async fn open_channel(
@@ -109,7 +131,8 @@ pub async fn open_channel(
 ) -> anyhow::Result<UserChannelId> {
     let pubkey = cmd.peer.pubkey;
     let addr = cmd.peer.addrs.pop().ok_or(anyhow!("Missing peer addr"))?;
-    match spawn_blocking(move || {
+    let capacity_sats = cmd.capacity_sats;
+    node_call("open_announced_channel", None, move || {
         node_copy.open_announced_channel(
             pubkey,
             addr,
@@ -119,17 +142,9 @@ pub async fn open_channel(
         )
     })
     .await
-    {
-        Ok(Ok(id)) => Ok(id),
-        Ok(Err(e)) => {
-            error!(error = ?e, peer = ?pubkey, amount = %cmd.capacity_sats, "Collector: LDK: Unexpected error");
-            Err(e.into())
-        }
-        Err(e) => {
-            error!(error = ?e, "Tokio: open_channel error");
-            Err(e.into())
-        }
-    }
+    .inspect_err(
+        |e| error!(error = %e, peer = ?pubkey, amount = %capacity_sats, "LDK: channel open failed"),
+    )
 }
 
 pub fn random_channel_cfg() -> ChannelConfig {

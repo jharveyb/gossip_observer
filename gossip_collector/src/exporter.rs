@@ -16,14 +16,14 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-static INTER_MSG_DELIM: &str = ";";
-static INTRA_MSG_DELIM: &str = ",";
-pub(crate) static STATS_INTERVAL: Duration = Duration::from_secs(600);
+const INTER_MSG_DELIM: &str = ";";
+const INTRA_MSG_DELIM: &str = ",";
+pub(crate) const STATS_INTERVAL: Duration = Duration::from_secs(600);
 
 // NATS publishes fail while JetStream is full (e.g. err 10023 "insufficient
 // resources" during an archiver outage); retry briefly, then shut down cleanly
 // so systemd restarts us once the stream drains.
-static PUBLISH_RETRY_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_RETRY_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_ATTEMPTS: u32 = 5;
 
 // NATS subject name: observer.gossip.$NODEKEY
@@ -31,8 +31,6 @@ const PUBLISH_MAX_ATTEMPTS: u32 = 5;
 // Second subject for telemetry(?): observer.telemetry.$NODEKEY
 
 pub trait Exporter: Send + Sync {
-    // TODO: this should probably return a Result, though we should handle
-    // errors here not in ldk-node
     fn export(&self, msg: String);
 }
 
@@ -122,24 +120,12 @@ impl NATSExporter {
     ) -> anyhow::Result<JoinSet<anyhow::Result<()>>> {
         info!("Starting NATS exporter");
 
-        let export_rx = self.export_rx.take().unwrap();
+        let export_rx = self
+            .export_rx
+            .take()
+            .expect("NATSExporter::start called more than once");
         let nats_client = async_nats::connect(self.cfg.server_addr.clone()).await?;
         let stream_ctx = jetstream::new(nats_client);
-        // Allow longer timeout in case we get stalled. Also support reconnects.
-        /*
-        let nats_client_options = ConnectOptions::new()
-            .connection_timeout(Duration::from_secs(120))
-            .max_reconnects(None);
-
-        let nats_client =
-            async_nats::connect_with_options(self.cfg.server_addr.clone(), nats_client_options)
-                .await?;
-        // Extend the timeouts here as well.
-        let stream_ctx = ContextBuilder::new()
-            .timeout(Duration::from_secs(120))
-            .ack_timeout(Duration::from_secs(60))
-            .build(nats_client);
-        */
 
         let (nats_tx, nats_rx) = tokio::sync::mpsc::channel(self.cfg.batch_size as usize);
         {
@@ -241,6 +227,12 @@ impl NATSExporter {
                 }
                 None => {
                     error!("Internal: queue_exported_msg: rx chan closed");
+
+                    // On shutdown the sender side may drop before we observe
+                    // the cancellation; that is a normal exit, not an error.
+                    if stop_signal.is_cancelled() {
+                        break;
+                    }
                     bail!("Internal: queue_exported_msg: rx chan closed");
                 }
             };
@@ -322,6 +314,12 @@ impl NATSExporter {
                         },
                         None => {
                             error!("Internal: publish_msgs: rx stream closed");
+
+                            // On shutdown the queue task drops its sender before
+                            // we observe the cancellation; that is a normal exit.
+                            if stop_signal.is_cancelled() {
+                                break;
+                            }
                             bail!("Internal: publish_msgs: rx stream closed");
                         }
                     }
@@ -346,6 +344,8 @@ impl NATSExporter {
                 // std intersperse is nightly-only for now: https://github.com/rust-lang/rust/issues/79524
                 let batch_output =
                     itertools::Itertools::join(&mut msg_batch.iter(), INTER_MSG_DELIM);
+                // Bytes clones are refcount bumps, so retries don't copy the batch.
+                let payload = bytes::Bytes::from(batch_output);
                 msg_send_time = std::time::Instant::now();
 
                 let mut attempts: u32 = 0;
@@ -354,7 +354,7 @@ impl NATSExporter {
                     // Publish and wait for the explicit ACK from JetStream.
                     let publish_and_ack = async {
                         let ack = ctx
-                            .publish(nats_subject.clone(), batch_output.clone().into())
+                            .publish(nats_subject.clone(), payload.clone())
                             .await?
                             .await?;
                         anyhow::Ok(ack)

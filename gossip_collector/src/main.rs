@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize, atomic::Ordering::SeqCst};
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow, bail};
 use bitcoin::Network;
 use croner::Cron;
 use ldk_node::config::{BackgroundSyncConfig, ElectrumSyncConfig, EsploraSyncConfig};
@@ -30,10 +30,12 @@ mod node_manager;
 mod peer_conn_manager;
 use crate::config::{ChainSource, CollectorConfig};
 use crate::exporter::NATSExporter;
-use crate::node_manager::{
-    balances, connected_peer_count, ldk_watchdog, next_address, stop_node,
-};
+use crate::node_manager::{balances, connected_peer_count, ldk_watchdog, next_address, stop_node};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
+
+// Extra time past the graceful-shutdown timeout before the deadman thread
+// force-exits the process.
+const DEADMAN_GRACE: Duration = Duration::from_secs(30);
 
 fn main() -> anyhow::Result<()> {
     // Load .env file if present (optional for production with systemd)
@@ -160,7 +162,7 @@ async fn async_main(
     let ldk_listen_addrs = vec![SocketAddress::from_str(&ldk_listen_addr)?];
     builder.set_listening_addresses(ldk_listen_addrs.clone())?;
 
-    // Use the first few chars of our UUID for our node alias, for now.
+    // Use the (reversed) last 32 chars of our UUID for our node alias, for now.
     let ldk_raw_alias = cfg.uuid.chars().rev().take(32).collect::<String>();
     builder.set_node_alias(ldk_raw_alias.clone())?;
 
@@ -190,7 +192,7 @@ async fn async_main(
         "debug" => LogLevel::Debug,
         "trace" => LogLevel::Trace,
         "gossip" => LogLevel::Gossip,
-        _ => LogLevel::Error,
+        other => bail!("Unknown ldk.log_level: {other}"),
     };
     let mut log_filters = HashSet::new();
     // A warning from a new P2P connection peer that there is no UTXO matching a channel.
@@ -202,8 +204,7 @@ async fn async_main(
     log_filters.insert(rust_lightning_chan_announcement_warning.to_owned());
     log_filters.insert(rust_lightning_node_announcement_no_channels.to_owned());
     log_filters.insert(rust_lightning_query_channel_range.to_owned());
-    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level, log_filters)
-        .map_err(|_| anyhow!("Failed to create FS wrier"))?;
+    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level, log_filters)?;
 
     // Upper bound on number of seconds after the specified hour, that the
     // upload will start.
@@ -324,12 +325,12 @@ async fn async_main(
             .add_service(grpc_reflect_compat)
             .serve_with_shutdown(grpc_addr, grpc_stop_signal.cancelled())
             .await
-            .map_err(anyhow::Error::msg)
+            .context("gRPC server failed")
     });
 
     // Start task to send register and send heartbeat messages to the controller.
-    let initial_onchain_address = next_address(node.clone())?;
-    let initial_balance = balances(node.clone()).into();
+    let initial_onchain_address = next_address(node.clone()).await?;
+    let initial_balance = balances(node.clone()).await?.into();
     let info_template = observer_common::types::CollectorInfo {
         uuid: cfg.uuid.clone(),
         pubkey: node.node_id(),
@@ -388,7 +389,7 @@ async fn async_main(
         // node.stop() stuck in ldk-node), which would leave a zombie process
         // that systemd considers healthy. If the process is still alive once
         // the grace period expires, force an exit so systemd restarts us.
-        let deadman_delay = shutdown_timeout + Duration::from_secs(30);
+        let deadman_delay = shutdown_timeout + DEADMAN_GRACE;
         std::thread::spawn(move || {
             std::thread::sleep(deadman_delay);
             error!(
@@ -471,11 +472,11 @@ pub async fn ping_controller(
             }
         }
 
-        info.peer_count = connected_peer_count(node.clone()).await as u32;
+        info.peer_count = connected_peer_count(node.clone()).await? as u32;
         info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await?;
         info.target_count = peer_target.load(SeqCst) as u32;
-        info.onchain_addr = next_address(node.clone())?;
-        info.balances = balances(node.clone()).into();
+        info.onchain_addr = next_address(node.clone()).await?;
+        info.balances = balances(node.clone()).await?.into();
 
         // If we fail to connect to the controller, retry indefinitely. The collector
         // can't do anything without its peer list.
