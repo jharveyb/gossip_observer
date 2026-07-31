@@ -53,6 +53,7 @@ bash_config:
   - { line: "shopt -s cmdhist" }
 
 nats_version: "2.12.2"
+nats_file_store: 17179869184
 
 nats_instances:
   - name: staging
@@ -77,4 +78,4 @@ timescaledb_staging_database_name: "gossip_observer_staging"
 
 # Binary staging directory for deployments
 binary_staging_dir: "{{ playbook_dir }}/binaries"
-service_startup_wait: 60
+service_startup_wait: 45
