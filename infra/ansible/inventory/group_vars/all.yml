@@ -52,7 +52,7 @@ bash_config:
   - { line: "HISTFILESIZE=200000", regexp: "^HISTFILESIZE=" }
   - { line: "shopt -s cmdhist" }
 
-nats_version: "2.12.2"
+nats_version: "2.12.14"
 nats_file_store: 17179869184
 
 nats_instances:

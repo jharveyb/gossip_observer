@@ -17,7 +17,6 @@ trace: false
 
 jetstream {
 	store_dir: /var/lib/nats_{{ item.name }}
-	# 750 MB, 8 GB
 	# max_memory_store: 786432000
 	max_file_store: {{ nats_file_store }}
 }
