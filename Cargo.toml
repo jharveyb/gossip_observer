@@ -6,6 +6,7 @@ members = [
         "observer_common",
         "observer_controller",
         "electrum-cli",
+        "integration_tests",
 ]
 resolver = "3"
 

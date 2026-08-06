@@ -1,0 +1,20 @@
+[package]
+edition = "2024"
+name    = "integration_tests"
+version = "0.1.0"
+publish = false
+
+# No workspace lints: test code uses unwrap/expect freely.
+
+[dependencies]
+
+[dev-dependencies]
+anyhow = "1.0"
+bitcoin = "0.32.4"
+# No download feature: bitcoind is resolved from BITCOIND_EXE or PATH.
+# The version feature only selects the RPC client surface (local: v29.0).
+corepc-node = { version = "0.10", default-features = false, features = ["29_0"] }
+nix = { version = "0.29", features = ["signal"] }
+observer_common = { path = "../observer_common" }
+tempfile = "3"
+tokio = { version = "1.47", features = ["full"] }

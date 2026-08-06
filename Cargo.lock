@@ -1012,6 +1012,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "corepc-client"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7755b8b9219b23d166a5897b5e2d8266cbdd0de5861d351b96f6db26bcf415f3"
+dependencies = [
+ "bitcoin",
+ "corepc-types",
+ "jsonrpc",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "corepc-node"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "768391062ec3812e223bb3031c5b2fcdd6e0e60b816157f21df82fd3e6617dc0"
+dependencies = [
+ "anyhow",
+ "corepc-client",
+ "log",
+ "serde_json",
+ "tempfile",
+ "which 3.1.1",
+]
+
+[[package]]
+name = "corepc-types"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c22db78b0223b66f82f92b14345f06307078f76d94b18280431ea9bc6cd9cbb6"
+dependencies = [
+ "bitcoin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2295,6 +2334,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "integration_tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "corepc-node",
+ "nix",
+ "observer_common",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2839,6 +2891,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nkeys"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2992,6 +3056,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitcoin",
+ "bytes",
  "chrono",
  "console-subscriber",
  "itertools 0.14.0",
@@ -3023,10 +3088,12 @@ dependencies = [
  "croner",
  "csv",
  "dotenvy",
+ "lightning",
  "observer_common",
  "rand 0.9.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "toml",
@@ -3389,7 +3456,7 @@ dependencies = [
  "regex",
  "syn 1.0.109",
  "tempfile",
- "which",
+ "which 4.4.2",
 ]
 
 [[package]]
@@ -5546,6 +5613,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2878ef029c47c6e8cf779119f20fcf52bde7ad42a731b2a304bc221df17571e"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d011071ae14a2f6671d0b74080ae0cd8ebf3a6f8c9589a2cd45f23126fe29724"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

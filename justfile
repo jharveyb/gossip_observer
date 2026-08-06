@@ -15,6 +15,12 @@ clean-archiver-state:
     rm ./data/mainnet/gossip_archive.duckdb
     rm ./data/mainnet/gossip_archive.duckdb.wal
 
+# End-to-end controller<->collector test. Needs `bitcoind` (BITCOIND_EXE or
+# PATH) and `nats-server` (NATS_SERVER_EXE or PATH).
+integration-test:
+    cargo build -p gossip_collector -p observer_controller
+    cargo test -p integration_tests -- --ignored --nocapture
+
 gen-sql $SQLX_OFFLINE="false":
     cargo sqlx prepare --workspace
 
