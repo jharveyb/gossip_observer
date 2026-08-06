@@ -39,10 +39,18 @@ Handler names can't contain loop vars — the handler loops internally. Real han
 ## TOML templates
 Quote strings (IPs/URLs/paths); leave ints/bools unquoted. Unquoted `127.0.0.1` parses as an invalid float. Text files that Rust `.trim()`s want a trailing `\n` (`content: "{{ x }}\n"`).
 
+**Never use bash array-length syntax (dollar-brace-hash-name) in an `ansible.builtin.shell`
+block.** That opening sequence starts a Jinja comment which is never closed, and the task
+dies at parse time with "failed at splitting arguments, either an unbalanced jinja2 block
+or quotes" — pointing at the task, not the offending line. Same family as the literal
+close-comment trap below. Count with `find … | wc -l` instead (see `tasks/pcap_stop.yml`).
+
 **Don't add `-` whitespace modifiers — Ansible renders with `trim_blocks=True`.** The newline closing a block/comment tag is already dropped, so a `{% %}` or `{# #}` tag alone on a line disappears cleanly. Writing `{%- ... -%}` or `{#- ... -#}` on top of that eats the *real* line breaks and collapses the output onto one line (`[ldk.chain_source]kind = "electrum"url = ...`). Two corollaries: never write a literal `#}` inside comment prose (it closes the comment early, dumping the rest into the file), and when test-rendering a template with plain Jinja, construct the env as `Environment(trim_blocks=True, lstrip_blocks=False, keep_trailing_newline=True)` — Jinja's own defaults differ from Ansible's and will hide both bugs.
 
 ## UFW
 Allow rules before deny; the collector P2P allow uses `insert: 1`; per-interface rules key on `public_interface`; `Deny-public` last. Verify with `sudo ufw status numbered`.
+
+**`public_interface` must come from `ipaddr('public')`** (`tasks/find_public_interface.yml`) — never a "not RFC1918" test, never `ansible_facts.default_ipv4.interface`. Tailscale is CGNAT (100.64.0.0/10), so its address is `is_private=False` **and** `is_global=False`; a private-address check selects `tailscale0`, and `Deny-public` + the SSH `limit` rule land on the interface we administer these hosts through. This is the repo's only `ansible.utils` use — it emits deprecation warnings under core 2.20 that are cosmetic; upgrade the collection rather than rewriting the check.
 
 ## Deploying data files with services
 Per-instance file paths in group_vars; **separate copy task per file** (clear errors); reference in config templates via `| basename` so the deployed filename is correct regardless of source path. Example: `observer_controller.yml` deploys `node_clusterings_file`/`node_communities_file`/`collector_mapping_file` into `/var/lib/observer_controller/{uuid}/`.
