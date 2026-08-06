@@ -95,3 +95,7 @@ ansible-playbook collector_deploy.yml --ask-vault-pass --limit collectors-2
 ## Sharing collected data
 
 Check out `DATA_SHARING.md` for more info.
+
+## Capturing raw LN connection network traffic
+
+Check out `PACKET_CAPTURE.md` for instructions.
