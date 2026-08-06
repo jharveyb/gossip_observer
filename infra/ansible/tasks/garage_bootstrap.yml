@@ -32,10 +32,6 @@
   ansible.builtin.set_fact:
     garage_node_id: "{{ garage_node_id_result.stdout.split('@')[0] }}"
 
-- name: Get Tailscale IP address
-  ansible.builtin.set_fact:
-    tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
-
 - name: Bootstrap Garage cluster (layout + buckets + write keys)
   run_once: true
   delegate_to: "{{ groups['garage'][0] }}"

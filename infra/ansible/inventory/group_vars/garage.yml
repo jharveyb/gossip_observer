@@ -72,6 +72,10 @@ garage_buckets:
   - name: "gossip-observer-data-staging"
     write_key: "archiver-staging-sync"
     verify_key: "archiver-staging-verify"
+  - name: "gossip-collector-packet-captures"
+    write_key: "packet-capture-sync"
+  - name: "gossip-graph-dumps"
+    write_key: "graph-dump-sync"
 
 # Public/prod bucket that per-researcher reader keys are granted read access on.
 garage_public_bucket: "{{ garage_buckets[0].name }}"
