@@ -37,3 +37,7 @@ infra/ansible/vault.yml
 .ansible
 infra/ansible/inventory/hosts.ini*
 infra/ansible/binaries/
+
+# Packet captures fetched by scripts/pull_pcaps.sh -- large, and they contain
+# peer IP addresses.
+/pcaps/

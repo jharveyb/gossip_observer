@@ -1,0 +1,29 @@
+[Unit]
+Description=Gossip packet capture socket map %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goss
+Group=goss
+# All collectors run as goss, so `ss -p` resolves their PIDs without root.
+# CAP_NET_ADMIN is granted anyway so the sampler keeps working if a collector
+# is ever moved to a different user.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+EnvironmentFile={{ pcap_conf_dir }}/%i.env
+ExecStart=/usr/local/bin/gossip_pcap_sockmap.sh
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Nothing label-specific may appear in this file -- it is a template unit
+# shared by every capture label. ProtectSystem=full, not strict: strict
+# remounts /run read-only and `systemctl show` can no longer connect.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

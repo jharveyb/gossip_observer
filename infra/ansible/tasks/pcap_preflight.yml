@@ -1,0 +1,190 @@
+# Preflight for packet captures: capture tooling, disk headroom, Tor exclusion.
+#
+# Requires: host_collectors, public_interface, public_ip
+# Sets facts: pcap_tor_hosts, pcap_fs_mount, pcap_fs_avail
+#
+# Package state already differs between the collector hosts, so everything here
+# is checked live. Read-only probes carry check_mode: false so a --check run
+# reports real numbers instead of skipping and reading back zero.
+#
+# Deliberately NOT preseeding wireshark-common/install-setuid: apt already runs
+# noninteractive so there is no prompt to suppress, and the setuid bit is
+# irrelevant to us either way -- the unit sets NoNewPrivileges=yes, which strips
+# setuid at exec, and privilege comes from its ambient CAP_NET_RAW. Flipping
+# that debconf answer would only mutate state on hosts where tshark was already
+# installed by hand.
+
+# We install tshark for dumpcap (+ capinfos/editcap/mergecap for verification).
+- name: Install capture tooling
+  ansible.builtin.apt:
+    name:
+      - tshark
+      - tcpdump
+      - zstd
+    state: present
+    cache_valid_time: "{{ apt_cache_stale }}"
+
+- name: Check dumpcap is present
+  ansible.builtin.stat:
+    path: "{{ pcap_dumpcap_bin }}"
+  register: pcap_dumpcap_stat
+
+- name: Fail if dumpcap is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ pcap_dumpcap_bin }} not found after installing tshark. Check where the
+      package put it (dpkg -L wireshark-common | grep dumpcap) and override
+      with -e pcap_dumpcap_bin=<path>.
+  when:
+    - not ansible_check_mode
+    - not pcap_dumpcap_stat.stat.exists
+
+# Debian ships dumpcap either as root:root 0755 (setuid answer "no") or
+# root:wireshark 4750 (answer "yes"). In the second case goss cannot even exec
+# it without being in that group. Read the group off the binary rather than
+# assuming it is called "wireshark".
+- name: Add goss to dumpcap's group where it restricts execution
+  ansible.builtin.user:
+    name: "{{ nonroot_username }}"
+    groups: "{{ pcap_dumpcap_stat.stat.gr_name }}"
+    append: true
+  when:
+    - pcap_dumpcap_stat.stat.exists | default(false)
+    - not (pcap_dumpcap_stat.stat.xoth | default(true))
+    - pcap_dumpcap_stat.stat.xgrp | default(false)
+    - pcap_dumpcap_stat.stat.gr_name | default('root') != 'root'
+
+- name: Warn if dumpcap is executable by neither others nor its group
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ pcap_dumpcap_bin }} is mode {{ pcap_dumpcap_stat.stat.mode }}
+      {{ pcap_dumpcap_stat.stat.pw_name }}:{{ pcap_dumpcap_stat.stat.gr_name }} --
+      {{ nonroot_username }} cannot execute it and the capture will fail to start.
+  when:
+    - pcap_dumpcap_stat.stat.exists | default(false)
+    - not (pcap_dumpcap_stat.stat.xoth | default(true))
+    - not (pcap_dumpcap_stat.stat.xgrp | default(false))
+
+# --- Disk headroom -----------------------------------------------------------
+#
+# From gathered facts, not `df`: ansible.builtin.shell is skipped under --check,
+# which made the assert read an empty stdout as 0 GB and fail every dry run.
+
+- name: Fail if mount facts are unavailable
+  ansible.builtin.fail:
+    msg: >-
+      ansible_facts.mounts is missing, so free space cannot be checked. Run with
+      the default fact gathering (this playbook needs the 'hardware' subset).
+  when: ansible_facts.mounts is not defined
+
+# Ascending sort means the deepest matching mount is assigned last, so this
+# resolves to the longest prefix (/ then /var then /var/lib ...).
+- name: Select the filesystem holding the capture directory
+  ansible.builtin.set_fact:
+    pcap_fs_mount: "{{ item.mount }}"
+    pcap_fs_avail: "{{ item.size_available }}"
+  loop: "{{ ansible_facts.mounts | sort(attribute='mount') }}"
+  loop_control:
+    label: "{{ item.mount }}"
+  when: >-
+    item.mount == '/'
+    or pcap_dir_root == item.mount
+    or pcap_dir_root.startswith(item.mount ~ '/')
+
+- name: Assert enough free space for the capture budget
+  ansible.builtin.assert:
+    that:
+      - pcap_fs_avail is defined
+      - (pcap_fs_avail | int) > (pcap_min_free_gb | int) * 1000000000
+    fail_msg: >-
+      Not enough free space on {{ inventory_hostname }}:
+      {{ ((pcap_fs_avail | default(0) | int) / 1000000000) | round(1) }} GB available
+      on {{ pcap_fs_mount | default('?') }},
+      {{ pcap_min_free_gb }} GB needed for {{ pcap_files }} x {{ pcap_filesize_kb }} kB
+      plus headroom. Lower -e pcap_filesize_kb / -e pcap_files, or free space.
+    success_msg: >-
+      {{ ((pcap_fs_avail | int) / 1000000000) | round(1) }} GB available on
+      {{ pcap_fs_mount }}, need {{ pcap_min_free_gb }} GB.
+
+# --- Tor exclusion (best effort, volume only) --------------------------------
+#
+# Snapshotting Tor's current guards and excluding them by host trims the bulk of
+# its traffic, because guard connections are long-lived and carry most of the
+# bytes. It is NOT a complete exclusion: a BPF filter is compiled once at
+# dumpcap start, so any guard rotation or directory fetch during the capture is
+# recorded. That is fine -- attribution downstream is an allow-list over
+# collector-owned sockets (see files/gossip_pcap_sockmap.sh), so non-collector
+# flows never reach a per-instance capture no matter which addresses they use.
+# split_pcap_by_collector.py reports what leaked in, and --merged writes a
+# collectors-only file. The collector->SOCKS hop is on loopback, off-capture.
+- name: Snapshot Tor's current remote endpoints
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -tnpH state established 2>/dev/null \
+      | grep -F '"tor"' \
+      | awk '{ sub(/:[0-9]+$/, "", $4); print $4 }' \
+      | sort -u
+  args:
+    executable: /bin/bash
+  register: pcap_tor_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Record Tor hosts to exclude
+  ansible.builtin.set_fact:
+    pcap_tor_hosts: "{{ pcap_tor_probe.stdout_lines | default([]) | reject('equalto', '') | list }}"
+
+- name: Warn if Tor holds an unexpected number of connections
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ pcap_tor_hosts | length }} distinct Tor remote hosts. That is more
+      than expected for a client-only Tor and will make the exclusion filter large.
+      Review before capturing.
+  when: pcap_tor_hosts | length > 25
+
+# Excluding Tor's ports also excludes any Lightning peer listening on them --
+# 443 in particular is a deliberate choice for nodes behind restrictive
+# firewalls. Measure the cost against the live peer set instead of guessing.
+- name: Count current peers on the excluded ports
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -tnpH state established "src {{ public_ip }}" 2>/dev/null \
+      | grep -F 'gossip_collecto' \
+      | awk '{ n = split($4, a, ":"); print a[n] }' \
+      | grep -Ex '{{ pcap_tor_ports | join("|") }}' \
+      | sort -n | uniq -c | awk '{ print $2 " " $1 }'
+  args:
+    executable: /bin/bash
+  register: pcap_peer_port_clash
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Warn about peers that the port exclusion will drop
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ pcap_peer_port_clash.stdout_lines | length }} excluded port(s) currently
+      carry Lightning peer connections on {{ inventory_hostname }}
+      ({{ pcap_peer_port_clash.stdout_lines | join('; ') | replace(' ', ' x ') }} peer(s)).
+      Those peers will be missing from this capture. Drop the port from
+      -e pcap_tor_ports to keep them.
+  when: pcap_peer_port_clash.stdout_lines | default([]) | length > 0
+
+- name: Confirm no peers are affected by the port exclusion
+  ansible.builtin.debug:
+    msg: >-
+      No current peers on {{ pcap_tor_ports | join(', ') }} -- excluding those ports
+      costs no Lightning traffic right now.
+  when: pcap_peer_port_clash.stdout_lines | default([]) | length == 0
+
+- name: Preflight summary
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ host_collectors | length }} collector(s),
+      capture on {{ pcap_iface }} ({{ public_ip }}) as {{ pcap_format }},
+      budget {{ pcap_files }} x {{ pcap_filesize_kb }} kB
+      (~{{ ((pcap_filesize_kb | int) * (pcap_files | int) / 1000000) | round(1) }} GB)
+      against {{ ((pcap_fs_avail | default(0) | int) / 1000000000) | round(1) }} GB free
+      on {{ pcap_fs_mount | default('?') }},
+      excluding {{ pcap_tor_hosts | length }} Tor host(s).

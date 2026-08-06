@@ -1,0 +1,39 @@
+[Unit]
+Description=Gossip packet capture %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goss
+Group=goss
+# dumpcap, not tshark: `tshark -w` forks dumpcap to do the capture anyway, but
+# tshark itself registers the full dissector table (~150 MB RSS). With one
+# capture per instance on a host with limited free RAM, that difference is the
+# whole budget.
+#
+# Ambient CAP_NET_RAW replaces the setuid-dumpcap install, so there is no
+# setuid binary on the box and the output files stay goss-owned (they rsync
+# back without sudo).
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+EnvironmentFile={{ pcap_conf_dir }}/%i.env
+# ${PCAP_FILTER} is braced so the whole BPF expression arrives as ONE argv
+# element; $PCAP_ARGS is deliberately unbraced so systemd word-splits it into
+# separate flags. Swapping the two breaks the capture -- braced splitting is
+# the difference between `-f "tcp and not port 22"` and `-f tcp`.
+ExecStart={{ pcap_dumpcap_bin }} -i ${PCAP_IFACE} -f ${PCAP_FILTER} $PCAP_ARGS -w ${PCAP_OUT}
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Nothing label-specific may appear in this file -- it is a template unit
+# shared by every capture label, rendered once. ProtectSystem=full (not
+# strict) on purpose: strict remounts /run read-only, which breaks the
+# systemctl calls the sidecar makes.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

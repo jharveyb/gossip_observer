@@ -1,0 +1,58 @@
+# Remove a capture's on-host files and env files.
+#
+# Requires: pcap_label, pcap_dir
+#
+# Deletes data that may not have been fetched yet, so it refuses to run without
+# an explicit confirmation flag.
+
+- name: Require explicit confirmation before deleting captures
+  ansible.builtin.assert:
+    that:
+      - pcap_confirm_clean | default('') | string == 'yes'
+    fail_msg: >-
+      Refusing to delete {{ pcap_dir }} on {{ inventory_hostname }} without
+      confirmation. Re-run with -e pcap_confirm_clean=yes once you have fetched
+      the capture (scripts/pull_pcaps.sh {{ pcap_label }}).
+
+- name: Check units are stopped
+  ansible.builtin.shell: |
+    set -o pipefail
+    systemctl list-units --plain --no-legend --state=active \
+      'gossip-pcap@{{ pcap_label }}.service' \
+      'gossip-pcap@{{ pcap_label }}.*.service' \
+      'gossip-pcap-sockmap@{{ pcap_label }}.service' 2>/dev/null | awk '{ print $1 }'
+  args:
+    executable: /bin/bash
+  register: pcap_clean_active
+  changed_when: false
+  check_mode: false # read-only guard; must still run under --check
+
+- name: Fail if the capture is still running
+  ansible.builtin.fail:
+    msg: >-
+      Still active on {{ inventory_hostname }}: {{ pcap_clean_active.stdout_lines | join(', ') }}.
+      Run --tags stop first.
+  when: pcap_clean_active.stdout_lines | length > 0
+
+- name: Remove capture directory
+  ansible.builtin.file:
+    path: "{{ pcap_dir }}"
+    state: absent
+
+- name: Find this label's env files
+  ansible.builtin.find:
+    paths: "{{ pcap_conf_dir }}"
+    patterns: "{{ pcap_label }}.env,{{ pcap_label }}.*.env"
+  register: pcap_clean_envs
+
+- name: Remove env files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ pcap_clean_envs.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Cleaned
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: removed {{ pcap_dir }} and {{ pcap_clean_envs.files | length }} env file(s)"

@@ -1,0 +1,67 @@
+# Stop a capture and compress the results.
+#
+# Requires: pcap_label, pcap_dir
+#
+# SIGTERM (the unit's KillSignal) lets dumpcap flush and close the file
+# cleanly; killing it harder truncates the last block.
+
+- name: Stop capture and sidecar units
+  ansible.builtin.shell: |
+    set -o pipefail
+    units=$(systemctl list-units --plain --no-legend --all \
+      'gossip-pcap@{{ pcap_label }}.service' \
+      'gossip-pcap@{{ pcap_label }}.*.service' \
+      'gossip-pcap-sockmap@{{ pcap_label }}.service' 2>/dev/null | awk '{ print $1 }')
+    if [ -z "$units" ]; then
+      echo "no units for label {{ pcap_label }}"
+      exit 0
+    fi
+    # shellcheck disable=SC2086
+    systemctl stop $units
+    echo "stopped:"
+    echo "$units" | sed 's/^/  /'
+  args:
+    executable: /bin/bash
+  register: pcap_stop_result
+  changed_when: "'stopped:' in pcap_stop_result.stdout"
+
+- name: Show stopped units
+  ansible.builtin.debug:
+    msg: "{{ pcap_stop_result.stdout_lines }}"
+
+# --rm so peak disk stays near the raw budget instead of briefly doubling it.
+# pcaps of encrypted LN traffic still compress usefully on headers alone.
+#
+# NB: counted with `wc -l`, not bash array-length syntax. Dollar-brace-hash
+# opens a Jinja comment that is never closed, so a shell block using it fails
+# to parse. (Mirror of the literal close-comment gotcha in
+# .claude/rules/ansible.md.)
+- name: Compress capture files
+  ansible.builtin.shell: |
+    set -o pipefail
+    cd '{{ pcap_dir }}' 2>/dev/null || { echo "no capture directory"; exit 0; }
+    find . -maxdepth 1 -type f \
+      \( -name '*.pcap' -o -name '*.pcapng' -o -name 'sockmap.tsv' \) > /tmp/.pcap_to_zstd
+    count=$(wc -l < /tmp/.pcap_to_zstd)
+    if [ "$count" -eq 0 ]; then
+      rm -f /tmp/.pcap_to_zstd
+      echo "nothing to compress"
+      exit 0
+    fi
+    xargs -a /tmp/.pcap_to_zstd -r -d '\n' zstd -q -T0 --rm --
+    rm -f /tmp/.pcap_to_zstd
+    echo "compressed $count file(s)"
+    ls -lh . | tail -n +2
+  args:
+    executable: /bin/bash
+  register: pcap_compress_result
+  changed_when: "'compressed' in pcap_compress_result.stdout"
+
+- name: Show compression result
+  ansible.builtin.debug:
+    msg: "{{ pcap_compress_result.stdout_lines }}"
+
+- name: Next step
+  ansible.builtin.debug:
+    msg: >-
+      Fetch with: scripts/pull_pcaps.sh {{ pcap_label }}

@@ -1,0 +1,190 @@
+# Packet captures on the collector hosts, for sharing with researchers.
+#
+#   ansible-playbook pcap_capture.yml --tags preflight --check --diff
+#   ansible-playbook pcap_capture.yml --tags preflight,start -e pcap_label=20260803T1600Z
+#   ansible-playbook pcap_capture.yml --tags status -e pcap_label=20260803T1600Z
+#   ansible-playbook pcap_capture.yml --tags stop   -e pcap_label=20260803T1600Z
+#   scripts/pull_pcaps.sh 20260803T1600Z
+#   scripts/split_pcap_by_collector.py pcaps/20260803T1600Z/
+#
+# Scope to one host with --limit collectors-2. No vault secrets are needed, so
+# no --ask-vault-pass.
+#
+# Why not a filter on the LDK listen ports: every collector P2P connection is
+# an *outbound* dial with an ephemeral local port, so 9735-9746 matches almost
+# nothing. Attribution comes from the kernel socket table instead -- see
+# files/gossip_pcap_sockmap.sh.
+
+- name: Manage packet captures on collectors
+  hosts: collectors
+  become: true
+
+  vars:
+    # --- what to capture ---
+    pcap_mode: per_host # or per_instance
+    pcap_iface: "{{ public_interface }}"
+    pcap_filter_extra: ""
+
+    # Ports excluded to keep Tor out of the capture. Tor's ORPort/DirPort
+    # conventions are 9001/9030; 443 and 80 are what it uses to look like web
+    # traffic (and drop apt along the way). Electrum is over Tailscale, so it is
+    # not on this interface and not at risk.
+    #
+    # CAUTION on 443 (and to a lesser degree 80): some Lightning nodes listen
+    # there on purpose to get through restrictive firewalls. Excluding it drops
+    # those peers from the capture. Preflight counts how many current peers this
+    # would cost, and the splitter reports any sockmap connection on an excluded
+    # port so the loss is never silent. Drop 443 from this list to keep them.
+    pcap_tor_ports: [80, 443, 9001, 9030]
+
+    # --- how much ---
+    # The researcher's suggested -a filesize:1548576 (~1.5 GB) is a per-collector
+    # budget. A per_host capture funnels every instance into one file, so the
+    # default budget scales by this host's instance count.
+    pcap_per_collector_kb: 1548576
+    pcap_filesize_kb: "{{ 2000000 if pcap_mode == 'per_host' else pcap_per_collector_kb }}"
+    pcap_files: >-
+      {{ [1, (((pcap_per_collector_kb | int) * (host_collectors | length)
+               / (pcap_filesize_kb | int)) | round(0, 'ceil') | int)] | max
+         if pcap_mode == 'per_host' else 1 }}
+    # Rotation caps total bytes the same way a single -a filesize: would, but
+    # keeps individual files rsync-friendly and compressible while the capture
+    # continues. pcap_files=1 gives the literal single-file behaviour.
+    #
+    # Output is pcapng -- dumpcap's native format, which keeps the interface
+    # description, capture filter and timestamp resolution in the file itself.
+    # Set -e pcap_format=pcap to force classic pcap instead; the splitter reads
+    # either.
+    pcap_format: pcapng
+    pcap_args: >-
+      {{ '-P ' if pcap_format == 'pcap' else ''
+      }}{{ ('-b filesize:' ~ pcap_filesize_kb ~ ' -a files:' ~ pcap_files)
+         if (pcap_files | int) > 1
+         else ('-a filesize:' ~ pcap_filesize_kb) }}{{
+         (' -a duration:' ~ pcap_duration) if pcap_duration is defined else '' }}
+    pcap_min_free_gb: >-
+      {{ (((pcap_filesize_kb | int) * (pcap_files | int) / 1000000) * 1.2)
+         | round(0, 'ceil') | int }}
+
+    # --- where ---
+    pcap_dir_root: /var/lib/gossip_pcap
+    pcap_conf_dir: /etc/gossip_pcap
+    pcap_dir: "{{ pcap_dir_root }}/{{ pcap_label }}"
+    pcap_dumpcap_bin: /usr/bin/dumpcap
+
+    sockmap_interval: 15
+
+  tasks:
+    - name: Filter collectors for this host
+      ansible.builtin.set_fact:
+        host_collectors: "{{ gossip_collectors | selectattr('host', 'equalto', inventory_hostname) | list }}"
+      tags: always
+
+    - name: Skip host if no collectors assigned
+      ansible.builtin.meta: end_host
+      when: host_collectors | length == 0
+      tags: always
+
+    # A new run mints a label; run_once so every host in the play shares one,
+    # otherwise each would stamp its own timestamp and the captures would not
+    # line up for cross-collector analysis.
+    - name: Generate a label for a new capture
+      ansible.builtin.set_fact:
+        pcap_label: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+      run_once: true
+      when:
+        - pcap_label is not defined
+        - "'start' in ansible_run_tags"
+      tags: always
+
+    # status/stop act on a capture that already exists. Minting a fresh
+    # timestamp here would just point at a directory that was never created, so
+    # discover the label instead: prefer a running capture, else the newest one
+    # on disk. Per-host, not run_once -- each host reports its own reality.
+    - name: Discover the capture label on this host
+      ansible.builtin.shell: |
+        set -o pipefail
+        active=$(systemctl list-units --plain --no-legend --state=active \
+                   'gossip-pcap@*.service' 2>/dev/null \
+                 | awk '{ print $1 }' \
+                 | sed -e 's/^gossip-pcap@//' -e 's/\.service$//' \
+                       -e 's/\.[0-9a-f]\{8\}$//' \
+                 | sort -u | head -1)
+        if [ -n "$active" ]; then printf '%s running\n' "$active"; exit 0; fi
+        newest=$(ls -1dt {{ pcap_dir_root }}/*/ 2>/dev/null | head -1 | xargs -r basename)
+        if [ -n "$newest" ]; then printf '%s most-recent\n' "$newest"; fi
+      args:
+        executable: /bin/bash
+      register: pcap_label_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - pcap_label is not defined
+        - ansible_run_tags | intersect(['status', 'stop']) | length > 0
+      tags: always
+
+    - name: Use the discovered capture label
+      ansible.builtin.set_fact:
+        pcap_label: "{{ (pcap_label_probe.stdout | trim).split()[0] }}"
+        pcap_label_source: "{{ (pcap_label_probe.stdout | trim).split()[1] }}"
+      when:
+        - pcap_label is not defined
+        - (pcap_label_probe.stdout | default('') | trim).split() | length == 2
+      tags: always
+
+    - name: Report the discovered label
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: no -e pcap_label given, using
+          '{{ pcap_label }}' ({{ pcap_label_source }} capture)
+      when: pcap_label_source is defined
+      tags: always
+
+    - name: Report when no capture exists on this host
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: no captures found under {{ pcap_dir_root }}
+          and none running -- nothing to report on.
+      when:
+        - pcap_label is not defined
+        - pcap_label_probe.stdout is defined
+      tags: always
+
+    # clean deletes data, so it never guesses.
+    - name: Require an explicit label for clean
+      ansible.builtin.fail:
+        msg: >-
+          --tags clean needs an explicit -e pcap_label=<label>. It deletes captures,
+          so it will not guess which one you meant. List them with:
+          ansible {{ inventory_hostname }} -m command -a 'ls -1 {{ pcap_dir_root }}'
+      when:
+        - pcap_label is not defined
+        - "'clean' in ansible_run_tags"
+      tags: always
+
+    - name: Find interface with public IP
+      ansible.builtin.import_tasks: tasks/find_public_interface.yml
+      tags: always
+
+    - name: Preflight checks
+      ansible.builtin.import_tasks: tasks/pcap_preflight.yml
+      tags: [preflight, never]
+
+    - name: Start capture
+      ansible.builtin.import_tasks: tasks/pcap_start.yml
+      tags: [start, never]
+
+    - name: Capture status
+      ansible.builtin.import_tasks: tasks/pcap_status.yml
+      when: pcap_label is defined
+      tags: [status, never]
+
+    - name: Stop capture
+      ansible.builtin.import_tasks: tasks/pcap_stop.yml
+      when: pcap_label is defined
+      tags: [stop, never]
+
+    - name: Clean capture files
+      ansible.builtin.import_tasks: tasks/pcap_clean.yml
+      tags: [clean, never]
