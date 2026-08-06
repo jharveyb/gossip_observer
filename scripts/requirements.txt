@@ -1,0 +1,9 @@
+# Python deps for scripts/ (the rest of this directory is shell).
+#
+# split_pcap_by_collector.py reads and writes pcapng/pcap. dpkt was picked over
+# scapy after benchmarking both on a 500k-packet file: scapy's RawPcapNgWriter
+# is broken in 2.7 (needs a monkey-patch to run, then emits files capinfos
+# rejects) and its dissecting writer manages ~24k pkt/s, which is ~40 minutes
+# for one host's capture. dpkt does ~290k pkt/s and round-trips payloads
+# byte-identically with no timestamp loss.
+dpkt>=1.9.8
