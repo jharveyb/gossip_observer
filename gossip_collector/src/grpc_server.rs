@@ -125,7 +125,7 @@ impl collectorrpc::collector_service_server::CollectorService for CollectorServi
 
         // UserChannelId is u128, convert to bytes
         Ok(Response::new(OpenChannelResponse {
-            local_channel_id: channel_id.0.to_le_bytes().to_vec(),
+            local_channel_id: channel_id.0.to_le_bytes().to_vec().into(),
         }))
     }
 

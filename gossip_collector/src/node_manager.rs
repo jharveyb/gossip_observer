@@ -68,12 +68,13 @@ pub async fn node_peer_connect(
             info!(peer = %peer_fmt, "LDK: node connected");
             Ok(())
         }
-        // Connection failures are routine (offline peers); don't log them as
-        // unexpected, just report to the caller.
+        // Connection failures are routine (offline peers), and NotRunning
+        // means the node is being stopped under us (shutdown); don't log
+        // either as unexpected, just report to the caller.
         Err(e)
             if matches!(
                 e.downcast_ref::<NodeError>(),
-                Some(NodeError::ConnectionFailed)
+                Some(NodeError::ConnectionFailed | NodeError::NotRunning)
             ) =>
         {
             anyhow::bail!("Collector: LDK: connection failed: {}", peer_fmt);
@@ -251,6 +252,16 @@ pub async fn ldk_watchdog(
 
         // Node object / handle is live, but the actual node may be stopped.
         if !status.is_running {
+            // During shutdown the signal handler stops the node deliberately,
+            // then cancels; give that cancellation a moment to propagate so we
+            // don't report an intentional stop as a watchdog failure.
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("LDK health watchdog: shutting down");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
             error!("LDK watchdog: node status is stopped; shutting down collector");
             cancel.cancel();
             return Ok(());

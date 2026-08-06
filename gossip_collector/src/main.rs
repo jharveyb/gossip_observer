@@ -349,6 +349,7 @@ async fn async_main(
         peer_conn_manager.clone(),
         target_peer_count.clone(),
         cfg.collector.controller_addr.clone(),
+        Duration::from_secs(cfg.collector.heartbeat_interval_secs.into()),
         stop_signal.child_token(),
         info_template,
     ));
@@ -464,11 +465,15 @@ pub async fn ping_controller(
     peer_conn_manager: PeerConnManagerHandle,
     peer_target: observer_common::types::SharedUsize,
     controller_addr: String,
+    heartbeat_interval: Duration,
     cancel: CancellationToken,
     initial_info: observer_common::types::CollectorInfo,
 ) -> anyhow::Result<()> {
     let mut state = CollectorState::Running;
     let mut info = initial_info;
+    // Reuse one connection across ticks; tonic channels multiplex and
+    // reconnect internally. Dropped on RPC failure so the next tick redials.
+    let mut cached_client: Option<ControllerClient> = None;
 
     // Within this task, we expect all other subsystems of the controller to be running
     // (LDK node, peer connection manager). We also assume that the controller address
@@ -479,24 +484,41 @@ pub async fn ping_controller(
                 info!("Collector: controller ping task: shutting down");
                 break;
             }
-            _ = sleep(Duration::from_secs(90)) => {
+            _ = sleep(heartbeat_interval) => {
             }
         }
 
-        info.peer_count = connected_peer_count(node.clone()).await? as u32;
-        info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await?;
-        info.target_count = peer_target.load(SeqCst) as u32;
-        info.onchain_addr = next_address(node.clone()).await?;
-        info.balances = balances(node.clone()).await?.into();
+        let update_info = async {
+            info.peer_count = connected_peer_count(node.clone()).await? as u32;
+            info.eligible_peers = peer_conn_manager.get_eligible_peer_count().await?;
+            info.target_count = peer_target.load(SeqCst) as u32;
+            info.onchain_addr = next_address(node.clone()).await?;
+            info.balances = balances(node.clone()).await?.into();
+            anyhow::Ok(())
+        };
+        if let Err(e) = update_info.await {
+            // Shutdown stops the LDK node and the conn manager while we may
+            // be mid-update; that is a normal exit, not an error.
+            if cancel.is_cancelled() {
+                break;
+            }
+            return Err(e);
+        }
 
         // If we fail to connect to the controller, retry indefinitely. The collector
         // can't do anything without its peer list.
-        let mut client = match ControllerClient::connect(&controller_addr).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = ?e, endpoint = %controller_addr, state = ?state, "Failed to connect to controller");
-                continue;
-            }
+        let mut client = match cached_client.clone() {
+            Some(c) => c,
+            None => match ControllerClient::connect(&controller_addr).await {
+                Ok(c) => {
+                    cached_client = Some(c.clone());
+                    c
+                }
+                Err(e) => {
+                    error!(error = ?e, endpoint = %controller_addr, state = ?state, "Failed to connect to controller");
+                    continue;
+                }
+            },
         };
 
         // For each state, we'll progress as we make peer connections. Otherwise, we should
@@ -517,6 +539,7 @@ pub async fn ping_controller(
                         }
                         Err(e) => {
                             error!(error = ?e, "Collector: controller ping task: failed to register with controller");
+                            cached_client = None;
                         }
                     }
                     continue;
@@ -555,6 +578,7 @@ pub async fn ping_controller(
             }
             Err(e) => {
                 error!(error = ?e, state = ?state, "Collector: controller ping task: failed to send heartbeat");
+                cached_client = None;
             }
         }
     }
@@ -581,6 +605,8 @@ pub async fn upload_gossip_graph(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     info!(schedule = %cfg.cron, "Collector: gossip graph uploader: starting");
+    // Reuse one connection across uploads; dropped on RPC failure.
+    let mut cached_client: Option<ControllerClient> = None;
 
     loop {
         let wait_time = time_until_next(&cfg.cron)?;
@@ -638,12 +664,18 @@ pub async fn upload_gossip_graph(
             "Collector: gossip graph pusher: collected graph data"
         );
 
-        let mut client = match ControllerClient::connect(&cfg.controller_addr).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = ?e, "Collector: gossip graph pusher: failed to connect to controller");
-                continue;
-            }
+        let mut client = match cached_client.clone() {
+            Some(c) => c,
+            None => match ControllerClient::connect(&cfg.controller_addr).await {
+                Ok(c) => {
+                    cached_client = Some(c.clone());
+                    c
+                }
+                Err(e) => {
+                    error!(error = ?e, "Collector: gossip graph pusher: failed to connect to controller");
+                    continue;
+                }
+            },
         };
 
         match client.send_gossip_graph(&cfg.uuid, nodes, channels).await {
@@ -652,6 +684,7 @@ pub async fn upload_gossip_graph(
             }
             Err(e) => {
                 error!(error = ?e, "Collector: gossip graph push task: failed to send graph");
+                cached_client = None;
             }
         }
     }

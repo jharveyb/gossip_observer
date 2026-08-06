@@ -231,7 +231,14 @@ pub async fn pending_conn_sweeper(
         tokio::select! {
                 _ = waiter.tick() => {
                     debug!("Peer conn manager: sweeper: expiring pending connections");
-                    handle.sweep_pending_conns(startup_delay)?;
+                    if let Err(e) = handle.sweep_pending_conns(startup_delay) {
+                        // The actor exits on cancellation; during shutdown a
+                        // closed mailbox is a normal exit, not an error.
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        return Err(e.into());
+                    }
                 }
                 _ = cancel.cancelled() => {
                     info!("Peer conn manager: sweeper: shutting down");
@@ -321,7 +328,12 @@ pub async fn peer_count_monitor(
                     break;
                 }
                 _ = waiter.tick() => {
-                    below_target = count_below_target().await?;
+                    below_target = match count_below_target().await {
+                        Ok(below) => below,
+                        // Closed mailbox during shutdown is a normal exit.
+                        Err(_) if cancel.is_cancelled() => break,
+                        Err(e) => return Err(e),
+                    };
                     debug!(below_target, "Peer conn manager: monitor tick");
                 }
         }
@@ -334,7 +346,13 @@ pub async fn peer_count_monitor(
             let _permit = connect_rate_limiter.acquire().await;
             // TOOD: filter out peers we're already connected to, so we don't
             // re-add them to our filter list
-            if let Some(new_peer) = conn_mgr_handle.next_eligible_peer().await? {
+            let next_peer = match conn_mgr_handle.next_eligible_peer().await {
+                Ok(peer) => peer,
+                // Closed mailbox during shutdown is a normal exit.
+                Err(_) if cancel.is_cancelled() => break,
+                Err(e) => return Err(e.into()),
+            };
+            if let Some(new_peer) = next_peer {
                 let cm = conn_mgr_handle.clone();
                 let nh = node_handle.clone();
                 tokio::spawn(async move {
@@ -357,7 +375,12 @@ pub async fn peer_count_monitor(
                 break;
             }
 
-            below_target = count_below_target().await?;
+            below_target = match count_below_target().await {
+                Ok(below) => below,
+                // Closed mailbox during shutdown is a normal exit.
+                Err(_) if cancel.is_cancelled() => return Ok(()),
+                Err(e) => return Err(e),
+            };
             info!(below_target, "Peer conn manager status");
         }
 

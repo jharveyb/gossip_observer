@@ -132,6 +132,9 @@ pub struct Collector {
     // Seconds between our node checking that it has the target amount of peers.
     pub peer_monitor_interval: u32,
 
+    // Seconds between heartbeats to the controller.
+    pub heartbeat_interval_secs: u32,
+
     // minimum # of peers the collector will try to maintain
     pub target_peer_count: u32,
 
@@ -216,6 +219,7 @@ impl CollectorConfig {
             // Wait 10 minutes pefore exporting peer messages.
             .set_default("collector.pending_connection_delay", 10 * 60)?
             .set_default("collector.peer_monitor_interval", 60)?
+            .set_default("collector.heartbeat_interval_secs", 90)?
             // Aim for a 'normal' amount of peers, compared to the implementation defaults of 5-10.
             // .set_default("collector.target_peer_count", 10)?
             .set_default("collector.target_peer_count", 0)?
