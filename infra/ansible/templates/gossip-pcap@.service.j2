@@ -8,9 +8,8 @@ Type=simple
 User=goss
 Group=goss
 # dumpcap, not tshark: `tshark -w` forks dumpcap to do the capture anyway, but
-# tshark itself registers the full dissector table (~150 MB RSS). With one
-# capture per instance on a host with limited free RAM, that difference is the
-# whole budget.
+# tshark itself registers the full dissector table (~150 MB RSS) it would never
+# use here, on hosts with limited free RAM.
 #
 # Ambient CAP_NET_RAW replaces the setuid-dumpcap install, so there is no
 # setuid binary on the box and the output files stay goss-owned (they rsync

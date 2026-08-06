@@ -87,14 +87,13 @@ sample() {
     }' >> "$OUT"
 }
 
-# The capture units self-terminate when they hit their size or duration bound.
-# Rather than binding to a specific unit name -- which differs between per_host
-# and per_instance mode -- watch for any capture unit under this label and exit
-# once they have all gone away. The glob matches both `gossip-pcap@<label>` and
-# the per-instance `gossip-pcap@<label>.<uuid8>` form.
+# The capture self-terminates when it hits its size or duration bound. Watch for
+# it and exit once it is gone, rather than declaring BindsTo= in the unit: this
+# also covers the capture dying unexpectedly, and keeps the sidecar's lifetime
+# defined by one mechanism instead of two.
 captures_active() {
   systemctl list-units --plain --no-legend --state=active \
-    "gossip-pcap@${PCAP_LABEL}.service" "gossip-pcap@${PCAP_LABEL}.*.service" 2>/dev/null | grep -q .
+    "gossip-pcap@${PCAP_LABEL}.service" 2>/dev/null | grep -q .
 }
 
 echo "sockmap: label=$PCAP_LABEL dir=$PCAP_DIR pub_ip=$PUB_IP" \

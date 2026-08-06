@@ -2,13 +2,13 @@
 #
 # Requires: host_collectors, public_interface, public_ip, pcap_* vars
 #
-# per_host    (default): one capture for the whole host; attribution to
-#                        instances happens offline from sockmap.tsv.
-# per_instance:          one capture per collector, filtered to the ports that
-#                        instance holds *right now*. A BPF filter cannot be
-#                        changed on a live socket, so connections established
-#                        after this moment are not captured -- that is the
-#                        trade for capture-time separation.
+# One capture per host. Splitting into per-collector files happens offline from
+# sockmap.tsv (scripts/split_pcap_by_collector.py), NOT at capture time: a BPF
+# filter is compiled once when dumpcap starts and cannot be changed on a live
+# socket, so a per-instance filter built from the ports an instance holds right
+# now silently misses every connection established afterwards -- including the
+# initial gossip sync burst, which is the interesting part. The offline split
+# produces the same per-collector files with no such gap.
 
 - name: Create capture directories
   ansible.builtin.file:
@@ -62,7 +62,7 @@
   ansible.builtin.debug:
     msg: "{{ inventory_hostname }} base filter: {{ pcap_base_filter }}"
 
-# --- Sockmap env (also serves the per_host capture) ---
+# --- Environment file, shared by the capture and the sockmap sidecar ---
 
 - name: Write the capture environment file
   ansible.builtin.template:
@@ -86,7 +86,6 @@
     pcap_meta:
       label: "{{ pcap_label }}"
       host: "{{ inventory_hostname }}"
-      mode: "{{ pcap_mode }}"
       format: "{{ pcap_format }}"
       interface: "{{ pcap_iface }}"
       public_ip: "{{ public_ip }}"
@@ -103,82 +102,14 @@
     name: "gossip-pcap-sockmap@{{ pcap_label }}"
     state: started
 
-# --- per_host: a single capture ---
-
 - name: Start the host capture
   ansible.builtin.systemd:
     name: "gossip-pcap@{{ pcap_label }}"
     state: started
-  when: pcap_mode == 'per_host'
-
-# --- per_instance: one capture per collector, filtered on its live sockets ---
-
-- name: Snapshot each collector's current local ports
-  ansible.builtin.shell: |
-    set -o pipefail
-    pid=$(systemctl show "gossip-collector@{{ item.uuid }}" -p MainPID --value 2>/dev/null)
-    if [ -z "$pid" ] || [ "$pid" = "0" ]; then exit 0; fi
-    ss -tnpH state established "src {{ public_ip }}" 2>/dev/null \
-      | grep -F "pid=${pid}," \
-      | awk '{ n = split($3, a, ":"); print a[n] }' \
-      | sort -un
-  args:
-    executable: /bin/bash
-  loop: "{{ host_collectors }}"
-  loop_control:
-    label: "{{ item.uuid }}"
-  register: pcap_instance_ports
-  changed_when: false
-  check_mode: false # read-only; a --check run must see real ports, not skip
-  when: pcap_mode == 'per_instance'
-
-- name: Report collectors with no live connections
-  ansible.builtin.debug:
-    msg: >-
-      {{ probe.item.uuid }} holds no established connections on {{ public_ip }} --
-      skipping (it would produce an empty pcap). Check the instance is healthy.
-  loop: "{{ pcap_instance_ports.results | default([]) }}"
-  loop_control:
-    loop_var: probe
-    label: "{{ probe.item.uuid }}"
-  when:
-    - pcap_mode == 'per_instance'
-    - probe.stdout_lines | default([]) | length == 0
-
-- name: Write per-instance capture environment files
-  ansible.builtin.template:
-    src: pcap_capture.env.j2
-    dest: "{{ pcap_conf_dir }}/{{ pcap_label }}.{{ probe.item.uuid[:8] }}.env"
-    owner: root
-    group: root
-    mode: "0644"
-  vars:
-    pcap_env_filter: "{{ pcap_base_filter }} and (port {{ probe.stdout_lines | join(' or port ') }})"
-    pcap_env_out: >-
-      {{ pcap_dir }}/{{ inventory_hostname }}-{{ pcap_label }}-{{ probe.item.uuid[:8] }}.{{ pcap_format }}
-  loop: "{{ pcap_instance_ports.results | default([]) }}"
-  loop_control:
-    loop_var: probe
-    label: "{{ probe.item.uuid }}"
-  when:
-    - pcap_mode == 'per_instance'
-    - probe.stdout_lines | default([]) | length > 0
-
-- name: Start per-instance captures
-  ansible.builtin.systemd:
-    name: "gossip-pcap@{{ pcap_label }}.{{ probe.item.uuid[:8] }}"
-    state: started
-  loop: "{{ pcap_instance_ports.results | default([]) }}"
-  loop_control:
-    loop_var: probe
-    label: "{{ probe.item.uuid }}"
-  when:
-    - pcap_mode == 'per_instance'
-    - probe.stdout_lines | default([]) | length > 0
 
 - name: Capture started
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}: capture '{{ pcap_label }}' running ({{ pcap_mode }}),
+      {{ inventory_hostname }}: capture '{{ pcap_label }}' running,
       output in {{ pcap_dir }}. Check with:
       ansible-playbook pcap_capture.yml --tags status -e pcap_label={{ pcap_label }}

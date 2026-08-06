@@ -8,7 +8,6 @@
     echo "== units =="
     systemctl list-units --plain --no-legend --all \
       'gossip-pcap@{{ pcap_label }}.service' \
-      'gossip-pcap@{{ pcap_label }}.*.service' \
       'gossip-pcap-sockmap@{{ pcap_label }}.service' 2>/dev/null \
       | awk '{ printf "%-52s %s/%s\n", $1, $3, $4 }' || true
     echo

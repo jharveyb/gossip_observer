@@ -37,7 +37,9 @@ synchronized. Capture can be limited by duration, e.x. `-e pcap_duration=21600`.
 `--tags stop` is for aborting early and for the zstd compression pass, which is the one
 step that does not happen automatically.
 
-Captures are **pcapng**. The splitter reads pcapng or classic pcap and writes whichever it read; `-e pcap_format=pcap` forces the classic format. It needs `dpkt` (`pip install -r scripts/requirements.txt`).
+Captures are **pcapng**. The splitter reads pcapng or classic pcap and writes whichever
+it read; `-e pcap_format=pcap` forces the classic format. It needs `dpkt` 
+(`pip install -r scripts/requirements.txt`).
 
 The captures are tied to outbound connections only, since our nodes shouldn't have any
 inbound connections (not announcing an IPv4, IPv6, or onion address). Outbound connections
@@ -46,9 +48,20 @@ throughout the capture, and `split_pcap_by_collector.py` replays that against th
 
 Tracked connections are clearnet-only right now; proxied Tor connections are TODO.
 
-Default sizing gives each instance roughly a 1.5 GB share, so a `per_host` capture budgets
-`1.5 GB x <instances on that host>` (~20 GB on collectors-2) as rotating 2 GB files.
-Override with `-e pcap_filesize_kb=... -e pcap_files=...`, bound by wall-clock instead with
-`-e pcap_duration=3600`, or capture straight to per-instance files with
-`-e pcap_mode=per_instance` — that last one freezes each filter at start time, so
-connections opened later are missed.
+There is one capture per host; the per-collector files are produced offline by the splitter.
+
+Default sizing gives each instance roughly a 1.5 GB share, so a host budgets
+`1.5 GB x <instances on that host>` (~20 GB on collectors-2, ~14 GB on collectors-3-big) as
+rotating 2 GB files. Override with `-e pcap_filesize_kb=... -e pcap_files=...`.
+
+**Prefer `-e pcap_duration=<seconds>` for anything comparing collectors across hosts.** The
+size budget differs per host and the hosts run at different packet rates, so a size-bounded
+run ends at different wall-clock times on each.
+
+## Appendix
+
+Capturing packets was originally explored as per-collector-instance, not per-host. That was
+dropped, since the BPF / connection filters are loaded as immutable once at dump start. So
+as connections are added / removed, they wouldn't get captured. Maybe eBPF / fancier capture
+tools don't have this issue, but just capturing the collector->connection mapping and then
+postprocessing the capture seems more robust for now.

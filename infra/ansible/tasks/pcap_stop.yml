@@ -10,7 +10,6 @@
     set -o pipefail
     units=$(systemctl list-units --plain --no-legend --all \
       'gossip-pcap@{{ pcap_label }}.service' \
-      'gossip-pcap@{{ pcap_label }}.*.service' \
       'gossip-pcap-sockmap@{{ pcap_label }}.service' 2>/dev/null | awk '{ print $1 }')
     if [ -z "$units" ]; then
       echo "no units for label {{ pcap_label }}"

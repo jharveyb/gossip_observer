@@ -21,7 +21,6 @@
 
   vars:
     # --- what to capture ---
-    pcap_mode: per_host # or per_instance
     pcap_iface: "{{ public_interface }}"
     pcap_filter_extra: ""
 
@@ -39,14 +38,18 @@
 
     # --- how much ---
     # The researcher's suggested -a filesize:1548576 (~1.5 GB) is a per-collector
-    # budget. A per_host capture funnels every instance into one file, so the
-    # default budget scales by this host's instance count.
+    # budget. One capture holds every instance on the host, so the default scales
+    # that budget by this host's instance count.
+    #
+    # NB: the budget therefore differs per host (12 instances vs 9), and the two
+    # hosts also run at different packet rates, so a size-bounded run finishes at
+    # different wall-clock times on each. Set pcap_duration when the analysis
+    # needs both hosts covering the same window.
     pcap_per_collector_kb: 1548576
-    pcap_filesize_kb: "{{ 2000000 if pcap_mode == 'per_host' else pcap_per_collector_kb }}"
+    pcap_filesize_kb: 2000000
     pcap_files: >-
       {{ [1, (((pcap_per_collector_kb | int) * (host_collectors | length)
-               / (pcap_filesize_kb | int)) | round(0, 'ceil') | int)] | max
-         if pcap_mode == 'per_host' else 1 }}
+               / (pcap_filesize_kb | int)) | round(0, 'ceil') | int)] | max }}
     # Rotation caps total bytes the same way a single -a filesize: would, but
     # keeps individual files rsync-friendly and compressible while the capture
     # continues. pcap_files=1 gives the literal single-file behaviour.
@@ -108,7 +111,6 @@
                    'gossip-pcap@*.service' 2>/dev/null \
                  | awk '{ print $1 }' \
                  | sed -e 's/^gossip-pcap@//' -e 's/\.service$//' \
-                       -e 's/\.[0-9a-f]\{8\}$//' \
                  | sort -u | head -1)
         if [ -n "$active" ]; then printf '%s running\n' "$active"; exit 0; fi
         newest=$(ls -1dt {{ pcap_dir_root }}/*/ 2>/dev/null | head -1 | xargs -r basename)

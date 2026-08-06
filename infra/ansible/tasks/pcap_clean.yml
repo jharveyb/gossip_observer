@@ -19,7 +19,6 @@
     set -o pipefail
     systemctl list-units --plain --no-legend --state=active \
       'gossip-pcap@{{ pcap_label }}.service' \
-      'gossip-pcap@{{ pcap_label }}.*.service' \
       'gossip-pcap-sockmap@{{ pcap_label }}.service' 2>/dev/null | awk '{ print $1 }'
   args:
     executable: /bin/bash
