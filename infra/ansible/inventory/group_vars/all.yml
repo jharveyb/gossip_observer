@@ -24,6 +24,7 @@ base_pkgs:
   - rsync
   - tmux
   - git
+  - python3-debian
 
 baremetal_pkgs:
   - fwupd
@@ -36,7 +37,6 @@ baremetal_pkgs:
   - cmake
   - libtool
   - cpuinfo
-  - python3-debian
   - g++
 
 locale: "en_US.UTF-8"

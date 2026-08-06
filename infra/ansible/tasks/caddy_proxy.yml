@@ -20,17 +20,44 @@
     group: root
     mode: "0644"
 
-- name: Install Caddy apt repo
-  ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/etc/apt/keyrings/caddy-stable.asc] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main"
-    filename: caddy-stable
+# deb822_repository parses and emits .sources files with python-debian, which
+# isn't installed on a minimal Debian image. The module can install it itself
+# (install_python_debian), but that option only exists in ansible-core >= 2.20.
+- name: Install python-debian (required by deb822_repository)
+  ansible.builtin.apt:
+    name: python3-debian
     state: present
     update_cache: true
+    cache_valid_time: "{{ apt_cache_stale }}"
 
+# We used to write this repo with apt_repository (deprecated; removed in
+# ansible-core 2.25), which produced the one-line
+# /etc/apt/sources.list.d/caddy-stable.list. deb822_repository writes
+# caddy-stable.sources instead, so drop the old file — otherwise apt sees the
+# same repo configured twice on already-provisioned hosts.
+- name: Remove legacy one-line Caddy apt repo
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/caddy-stable.list
+    state: absent
+
+- name: Install Caddy apt repo
+  ansible.builtin.deb822_repository:
+    name: caddy-stable
+    types: deb
+    uris: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+    suites: any-version
+    components: main
+    signed_by: /etc/apt/keyrings/caddy-stable.asc
+    state: present
+  register: caddy_repo
+
+# Unlike apt_repository, deb822_repository never refreshes the apt cache —
+# the caller has to do it based on the module's changed state.
 - name: Install Caddy
   ansible.builtin.apt:
     name: caddy
     state: present
+    update_cache: "{{ caddy_repo is changed }}"
 
 - name: Deploy Caddyfile
   ansible.builtin.template:
