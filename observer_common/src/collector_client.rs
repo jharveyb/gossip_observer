@@ -1,5 +1,4 @@
 use ldk_node::PeerDetails;
-use tonic::Request;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 use tracing::debug;
@@ -18,13 +17,11 @@ pub struct CollectorClient {
 }
 
 impl CollectorClient {
-    // TODO: should we enable lazy connection, keepalives, etc.?
-    // Or just recreate clients for each call
     pub async fn connect(endpoint: &str) -> Result<Self, tonic::transport::Error> {
         debug!(endpoint, "Connecting to collector");
-        let initial_client = CollectorServiceClient::connect(endpoint.to_string()).await?;
+        let channel = crate::connect_channel(endpoint).await?;
         debug!(endpoint, "Connected to collector");
-        let client = initial_client
+        let client = CollectorServiceClient::new(channel)
             .send_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Zstd)
             .max_decoding_message_size(crate::MAX_RECV_MSG_SIZE);
@@ -40,50 +37,46 @@ impl CollectorClient {
 
     pub async fn send_eligible_peers(
         &mut self,
-        peers: &[observer_types::PeerConnectionInfo],
+        peers: Vec<observer_types::PeerConnectionInfo>,
     ) -> anyhow::Result<()> {
-        let peers = peers
-            .iter()
-            .map(|p| common::PeerConnectionInfo::from(p.clone()))
-            .collect::<Vec<_>>();
+        const CHUNK_SIZE: usize = 256;
 
-        let chunk_size = 256;
-        let mut current_msg = Vec::with_capacity(chunk_size);
-        for (idx, peer) in peers.into_iter().enumerate() {
-            current_msg.push(peer);
-            if idx % chunk_size == 0 {
-                let req = Request::new(collectorrpc::EligiblePeersRequest { peers: current_msg });
-                self.client.post_eligible_peers(req).await?;
-                current_msg = Vec::with_capacity(chunk_size);
+        let mut peers = peers.into_iter();
+        loop {
+            let batch: Vec<common::PeerConnectionInfo> =
+                peers.by_ref().take(CHUNK_SIZE).map(Into::into).collect();
+            if batch.is_empty() {
+                break;
             }
+            self.client
+                .post_eligible_peers(collectorrpc::EligiblePeersRequest { peers: batch })
+                .await?;
         }
-
-        let req = Request::new(collectorrpc::EligiblePeersRequest { peers: current_msg });
-        self.client.post_eligible_peers(req).await?;
         Ok(())
     }
 
     pub async fn set_target_peer_count(&mut self, target: u32) -> anyhow::Result<()> {
-        let req = Request::new(collectorrpc::TargetPeerCountRequest { target });
-        self.client.post_target_peer_count(req).await?;
+        self.client
+            .post_target_peer_count(collectorrpc::TargetPeerCountRequest { target })
+            .await?;
         Ok(())
     }
 
     pub async fn get_current_peers(&mut self) -> anyhow::Result<Vec<PeerDetails>> {
-        let req = Request::new(collectorrpc::CurrentPeersRequest {});
-        let resp = self.client.get_current_peers(req).await?;
+        let resp = self
+            .client
+            .get_current_peers(collectorrpc::CurrentPeersRequest {})
+            .await?;
         util::try_convert_vec(resp.into_inner().peers)
     }
 
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        let req = Request::new(common::ShutdownRequest {});
-        self.client.shutdown(req).await?;
+        self.client.shutdown(common::ShutdownRequest {}).await?;
         Ok(())
     }
 
     pub async fn get_balances(&mut self) -> anyhow::Result<observer_types::Balances> {
-        let req = Request::new(common::BalancesRequest {});
-        let resp = self.client.balances(req).await?;
+        let resp = self.client.balances(common::BalancesRequest {}).await?;
         Ok(resp.into_inner().into())
     }
 
@@ -91,14 +84,18 @@ impl CollectorClient {
         &mut self,
         cmd: observer_types::OpenChannelCommand,
     ) -> anyhow::Result<Vec<u8>> {
-        let req = Request::new(cmd.into());
-        let resp = self.client.open_channel(req).await?;
-        Ok(resp.into_inner().local_channel_id)
+        let resp = self
+            .client
+            .open_channel(common::OpenChannelRequest::from(cmd))
+            .await?;
+        Ok(resp.into_inner().local_channel_id.to_vec())
     }
 
     pub async fn update_channel_cfgs(&mut self) -> anyhow::Result<Vec<u64>> {
-        let req = Request::new(common::UpdateChannelConfigRequest {});
-        let resp = self.client.update_channel_config(req).await?;
+        let resp = self
+            .client
+            .update_channel_config(common::UpdateChannelConfigRequest {})
+            .await?;
         Ok(resp.into_inner().scids)
     }
 }

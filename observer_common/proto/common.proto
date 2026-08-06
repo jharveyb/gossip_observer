@@ -2,8 +2,11 @@ syntax = "proto3";
 
 package common;
 
+// 33-byte compressed secp256k1 point, raw (not hex).
+// WIRE-BREAKING vs the old hex-string encoding: collectors and controller
+// must be deployed together across this change.
 message Pubkey {
-  string pubkey = 1;
+  bytes pubkey = 1;
 }
 
 message SocketAddress {

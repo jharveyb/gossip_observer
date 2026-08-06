@@ -1,3 +1,5 @@
+use std::time::Duration;
+use tonic::transport::{Channel, Endpoint};
 use tonic_reflection::server::{v1, v1alpha};
 
 pub mod logging;
@@ -25,10 +27,26 @@ pub const SERVER_FD_SET: &[u8] = include_bytes!("gen/file_descriptor_set.bin");
 // is already unbounded.
 pub const MAX_RECV_MSG_SIZE: usize = 1024 * 1024 * 32;
 
-// TODO: Default settings for our gRPC clients.
-pub const KEEPALIVE_INTERVAL: usize = 30;
-pub const REQUEST_TIMEOUT: usize = 15;
-pub const KEEPALIVE_RETRIES: usize = 3;
+// Default settings for our gRPC clients. REQUEST_TIMEOUT bounds every RPC —
+// generous enough for open_channel, which includes LDK's 10s peer-connect.
+// HTTP/2 keepalives detect dead peers (e.g. an expired Tailscale route)
+// instead of hanging on a black-holed TCP connection.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+pub const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect a tonic channel with the shared client settings applied.
+pub async fn connect_channel(endpoint: &str) -> Result<Channel, tonic::transport::Error> {
+    Endpoint::new(endpoint.to_string())?
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(KEEPALIVE_TIMEOUT)
+        .tcp_nodelay(true)
+        .connect()
+        .await
+}
 
 /// v1 reflection; stabilized, newer version
 pub fn reflection_service_v1()

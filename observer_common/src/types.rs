@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Address, Network};
+use bitcoin::Address;
 use chrono::{DateTime, Utc};
 use itertools::Itertools::{self};
 use ldk_node::{BalanceDetails, PeerDetails};
@@ -52,10 +52,7 @@ impl TryFrom<collectorrpc::NodeConfigResponse> for LdkNodeConfig {
         };
 
         let node_alias = util::convert_option(resp.node_alias)?;
-        let node_id = resp
-            .node_id
-            .ok_or_else(|| anyhow::anyhow!("node_id is required"))?
-            .try_into()?;
+        let node_id = util::convert_required_field(resp.node_id, "node_id")?;
 
         Ok(LdkNodeConfig {
             listening_addresses,
@@ -140,7 +137,7 @@ impl TryFrom<collectorrpc::EligiblePeersRequest> for Vec<PeerConnectionInfo> {
 impl From<NodeAlias> for common::NodeAlias {
     fn from(alias: NodeAlias) -> Self {
         common::NodeAlias {
-            alias: alias.0.to_vec(),
+            alias: alias.0.to_vec().into(),
         }
     }
 }
@@ -149,7 +146,7 @@ impl TryFrom<common::NodeAlias> for NodeAlias {
     type Error = anyhow::Error;
 
     fn try_from(alias: common::NodeAlias) -> Result<Self, Self::Error> {
-        let inner: [u8; 32] = alias.alias.as_slice().try_into()?;
+        let inner: [u8; 32] = alias.alias.as_ref().try_into()?;
         Ok(NodeAlias(inner))
     }
 }
@@ -166,7 +163,11 @@ impl TryFrom<common::OnchainAddress> for Address {
     type Error = anyhow::Error;
 
     fn try_from(addr: common::OnchainAddress) -> Result<Self, Self::Error> {
-        let address = Address::from_str(&addr.address)?.require_network(Network::Bitcoin)?;
+        // The wire format carries no network, and collectors + controller are
+        // always deployed on the same one (mainnet in prod, regtest in the
+        // integration test) — so accept whichever network the address itself
+        // encodes rather than hardcoding mainnet.
+        let address = Address::from_str(&addr.address)?.assume_checked();
         Ok(address)
     }
 }
@@ -251,25 +252,11 @@ impl From<BalanceDetails> for Balances {
     }
 }
 
-impl From<Balances> for common::BalancesResponse {
-    fn from(balances: Balances) -> Self {
-        common::BalancesResponse {
-            total_onchain: balances.total_onchain,
-            spendable_onchain: balances.spendable_onchain,
-            total_lightning_balance: balances.total_lightning_balance,
-        }
-    }
-}
-
-impl From<common::BalancesResponse> for Balances {
-    fn from(balances: common::BalancesResponse) -> Self {
-        Balances {
-            total_onchain: balances.total_onchain,
-            spendable_onchain: balances.spendable_onchain,
-            total_lightning_balance: balances.total_lightning_balance,
-        }
-    }
-}
+util::impl_mirror_conversion!(Balances, common::BalancesResponse, {
+    total_onchain,
+    spendable_onchain,
+    total_lightning_balance,
+});
 
 impl TryFrom<common::CollectorInfo> for CollectorInfo {
     type Error = anyhow::Error;

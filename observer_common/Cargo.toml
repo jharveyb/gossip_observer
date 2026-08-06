@@ -3,10 +3,14 @@ edition = "2024"
 name    = "observer_common"
 version = "0.1.0"
 
+[lints]
+workspace = true
+
 [dependencies]
 
 anyhow = "1.0"
 bitcoin = { version = "0.32.4", features = ["std", "secp-recovery", "serde"] }
+bytes = "1"
 chrono = { version = "0.4", default-features = false, features = [
         "clock",
         "serde",

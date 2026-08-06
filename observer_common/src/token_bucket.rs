@@ -52,12 +52,16 @@ impl TokenBucket {
     }
 
     pub async fn acquire(&self) -> SemaphorePermit<'_> {
-        // This can return an error if the semaphore is closed, but we
-        // never close it, so this error can never happen.
-        let token = self.bucket.acquire().await.unwrap();
+        // Acquire can only fail if the semaphore is closed, and we never
+        // close either semaphore.
+        let token = self.bucket.acquire().await.expect("semaphore never closed");
 
         // A 'classic' semaphore permit, to limit max concurrency / outstanding tokens.
-        let permit = self.classic_sem.acquire().await.unwrap();
+        let permit = self
+            .classic_sem
+            .acquire()
+            .await
+            .expect("semaphore never closed");
 
         // To avoid releasing the permit back to the semaphore, we use
         // the `SemaphorePermit::forget` method.
