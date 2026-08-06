@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, fs};
 
 use croner::Cron;
-use observer_common::collector_client::CollectorClient;
 use observer_controller::collector_manager::{
     CollectionConfig, CollectorManagerHandle, GossipDiffConfig, collector_gossip_differ,
     heartbeat_sweeper,
@@ -132,11 +132,16 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
 
     let collection_cfg = CollectionConfig {
         collector_mapping: assignments,
-        community_members: annotated_communities,
+        // Arc-wrapped: handed out per collector registration without copying.
+        community_members: annotated_communities
+            .into_iter()
+            .map(|(id, members)| (id, Arc::new(members)))
+            .collect(),
         community_stats: community_sampling_math,
     };
 
     let collector_manager = CollectorManagerHandle::new(stop_signal.child_token(), collection_cfg);
+    let collector_clients = grpc_server::CollectorClientCache::default();
 
     let sweep_run_interval = Duration::from_secs((cfg.controller.heartbeat_expiry / 2).into());
     let _heartbeat_gc = tokio::spawn(heartbeat_sweeper(
@@ -149,6 +154,7 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
     let chan_update_interval = Duration::from_secs(cfg.controller.chan_update_interval.into());
     let _chan_updater = tokio::spawn(chan_update_timer(
         collector_manager.clone(),
+        collector_clients.clone(),
         interval(chan_update_interval),
         stop_signal.child_token(),
     ));
@@ -176,7 +182,11 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
 
     // Start gRPC server
     let grpc_addr = format!("{}:{}", cfg.grpc.hostname, cfg.grpc.port).parse()?;
-    let grpc_service = grpc_server::create_service(collector_manager.clone(), stop_signal.clone());
+    let grpc_service = grpc_server::create_service(
+        collector_manager.clone(),
+        stop_signal.clone(),
+        collector_clients.clone(),
+    );
     let grpc_reflect_compat = observer_common::reflection_service_v1alpha()?;
     let grpc_reflect = observer_common::reflection_service_v1()?;
     let grpc_stop_signal = stop_signal.child_token();
@@ -204,7 +214,7 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
         info!("Signal handler: sent shutdown signal");
     });
 
-    let _grpc_res = grpc_server.await?.map_err(anyhow::Error::new)?;
+    grpc_server.await?.map_err(anyhow::Error::new)?;
 
     Ok(())
 }
@@ -225,6 +235,7 @@ pub fn load_collector_assignments(mapping: &str) -> anyhow::Result<HashMap<Strin
 // message.
 pub async fn chan_update_timer(
     handle: CollectorManagerHandle,
+    collector_clients: grpc_server::CollectorClientCache,
     mut waiter: Interval,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -254,17 +265,23 @@ pub async fn chan_update_timer(
         for collector in collectors_with_chans {
             let delay = rng.random_range(1..60);
             sleep(Duration::from_secs(delay)).await;
-            match CollectorClient::connect(&collector.info.grpc_socket).await {
+            match collector_clients
+                .get_or_connect(&collector.info.grpc_socket)
+                .await
+            {
                 Ok(mut client) => match client.update_channel_cfgs().await {
                     Ok(scids) => info!(
                         uuid = %collector.info.uuid,
                         scids = ?scids,
                         "Channel update timer: sent channel updates"
                     ),
-                    Err(e) => warn!(
-                        uuid = %collector.info.uuid,
-                        "Channel update timer: failed to send update_channel_cfgs {}",e
-                    ),
+                    Err(e) => {
+                        collector_clients.evict(client.endpoint());
+                        warn!(
+                            uuid = %collector.info.uuid,
+                            "Channel update timer: failed to send update_channel_cfgs {}", e
+                        )
+                    }
                 },
                 Err(e) => {
                     warn!(

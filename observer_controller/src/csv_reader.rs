@@ -1,5 +1,10 @@
+use anyhow::anyhow;
+use bitcoin::secp256k1::PublicKey;
+use lightning::ln::msgs::SocketAddress;
+use observer_common::types::PeerConnectionInfo;
 use serde::de::DeserializeOwned;
 use std::fs::File;
+use std::str::FromStr;
 use tracing::info;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -33,29 +38,28 @@ impl NodeAnnotatedRecord {
     }
 }
 
-impl TryFrom<NodeAnnotatedRecord> for observer_common::common::PeerConnectionInfo {
+// Convert straight to the validated domain type; the wire conversion happens
+// once, inside CollectorClient::send_eligible_peers. A record with a bad
+// pubkey or any unparseable address (e.g. OnionV2) errors as a whole, so
+// permissive callers skip the peer entirely.
+impl TryFrom<&NodeAnnotatedRecord> for PeerConnectionInfo {
     type Error = anyhow::Error;
 
-    fn try_from(record: NodeAnnotatedRecord) -> Result<Self, Self::Error> {
-        let sockets = match record.sockets {
+    fn try_from(record: &NodeAnnotatedRecord) -> Result<Self, Self::Error> {
+        let pubkey = PublicKey::from_str(&record.pubkey)
+            .map_err(|e| anyhow!("Bad pubkey {}: {e}", record.pubkey))?;
+        let sockets = match &record.sockets {
             // Remove any quotes left from CSV ingestion. They would be present if
             // we have multiple socket addresses.
-            Some(addrs) => addrs.trim_matches('"').to_owned(),
+            Some(addrs) => addrs.trim_matches('"'),
             None => anyhow::bail!("No sockets for {}", record.pubkey),
         };
-        let sockets = sockets
+        let addrs = sockets
             .split(',')
-            .map(|s| observer_common::common::SocketAddress {
-                address: s.to_owned(),
-            })
-            .collect::<Vec<_>>();
-        let info = observer_common::common::PeerConnectionInfo {
-            pubkey: Some(observer_common::common::Pubkey {
-                pubkey: record.pubkey,
-            }),
-            socket_addrs: sockets,
-        };
-        Ok(info)
+            .map(SocketAddress::from_str)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("Bad socket address for {}: {e:?}", record.pubkey))?;
+        Ok(PeerConnectionInfo { pubkey, addrs })
     }
 }
 

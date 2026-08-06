@@ -1,9 +1,9 @@
 use croner::Cron;
-use rand::prelude::*;
 use std::{
     boxed::Box,
     collections::{HashMap, HashSet, hash_map::Entry},
     mem,
+    sync::Arc,
 };
 
 use chrono::{TimeDelta, Utc};
@@ -20,10 +20,13 @@ use tracing::{debug, info, warn};
 
 use crate::{CommunityStats, csv_reader::NodeAnnotatedRecord, json_writer};
 
-type CommunityMembers = HashMap<u32, Vec<NodeAnnotatedRecord>>;
+// Community member lists are startup-immutable and large (avg ~550 records);
+// hand out Arc clones instead of copying them per collector registration.
+type CommunityMembers = HashMap<u32, Arc<Vec<NodeAnnotatedRecord>>>;
 type CollectorCommunityMapping = HashMap<String, u32>;
 type CommunityStatistics = HashMap<u32, CommunityStats>;
-type RegisteredCollectors = HashMap<String, Vec<CollectorHeartbeat>>;
+// Only the latest heartbeat per collector is ever read.
+type RegisteredCollectors = HashMap<String, CollectorHeartbeat>;
 type ExpectedCollectors = HashSet<String>;
 type CollectorGossipGraphs = HashMap<String, CollectorGossipGraph>;
 
@@ -85,14 +88,36 @@ pub enum CollectorManagerMsg {
     // All latest heartbeats
     GetRegisteredCollectors(oneshot::Sender<Vec<CollectorHeartbeat>>),
     GetExpectedCollectors(oneshot::Sender<HashSet<String>>),
-    GetCollectorAssignment((String, oneshot::Sender<Option<u32>>)),
-    GetCollectorByUuid((String, oneshot::Sender<Option<CollectorHeartbeat>>)),
-    GetCommunityStats((u32, oneshot::Sender<Option<CommunityStats>>)),
+    GetCollectorAssignment(String, oneshot::Sender<Option<u32>>),
+    GetCollectorByUuid(String, oneshot::Sender<Option<CollectorHeartbeat>>),
+    GetCommunityStats(u32, oneshot::Sender<Option<CommunityStats>>),
     GetAllCommunityStats(oneshot::Sender<Vec<CommunityStats>>),
-    GetCommunityMembers((u32, oneshot::Sender<Option<Vec<NodeAnnotatedRecord>>>)),
-    PushGossipNodes((String, Vec<GossipNodeInfo>)),
-    PushGossipChannels((String, Vec<GossipChannelInfo>)),
+    GetCommunityMembers(u32, oneshot::Sender<Option<Arc<Vec<NodeAnnotatedRecord>>>>),
+    PushGossipNodes(String, Vec<GossipNodeInfo>),
+    PushGossipChannels(String, Vec<GossipChannelInfo>),
     DumpCollectorGraphs(oneshot::Sender<CollectorGossipGraphs>),
+}
+
+// The actor mailbox only closes when the manager task has exited (i.e. during
+// shutdown); callers must treat these as a signal to wind down, not panic.
+#[derive(Debug, thiserror::Error)]
+pub enum CollectorManagerError {
+    #[error("collector manager mailbox closed")]
+    MailboxClosed,
+    #[error("collector manager dropped the response channel")]
+    ResponseDropped,
+}
+
+impl From<mpsc::error::SendError<CollectorManagerMsg>> for CollectorManagerError {
+    fn from(_: mpsc::error::SendError<CollectorManagerMsg>) -> Self {
+        Self::MailboxClosed
+    }
+}
+
+impl From<oneshot::error::RecvError> for CollectorManagerError {
+    fn from(_: oneshot::error::RecvError) -> Self {
+        Self::ResponseDropped
+    }
 }
 
 // The state for our actor. Some of this is populated at controller startup, and
@@ -125,52 +150,43 @@ impl CollectorManager {
         match msg {
             CollectorManagerMsg::AddCollector(inner) => {
                 let (info, resp) = *inner;
-                let collector_id = info.uuid.clone();
-                match self.registered_collectors.entry(collector_id) {
-                    Entry::Occupied(heartbeats) => {
-                        heartbeats.into_mut().push(CollectorHeartbeat {
-                            info,
-                            timestamp: Utc::now(),
-                        });
-                        let _ = resp.send(CollectorState::Active);
+                let hb = CollectorHeartbeat {
+                    info,
+                    timestamp: Utc::now(),
+                };
+                let state = match self.registered_collectors.entry(hb.info.uuid.clone()) {
+                    Entry::Occupied(mut latest) => {
+                        latest.insert(hb);
+                        CollectorState::Active
                     }
                     Entry::Vacant(empty) => {
-                        let hb = CollectorHeartbeat {
-                            info,
-                            timestamp: Utc::now(),
-                        };
-                        empty.insert(Vec::from([hb]));
-                        let _ = resp.send(CollectorState::New);
+                        empty.insert(hb);
+                        CollectorState::New
                     }
-                }
+                };
+                let _ = resp.send(state);
             }
             CollectorManagerMsg::SweepHeartbeats(heartbeat_expiry) => {
                 let now = Utc::now();
-                for (_, heartbeats) in self.registered_collectors.iter_mut() {
-                    heartbeats.retain(|hb| now - hb.timestamp < heartbeat_expiry);
-                }
-                for (uuid, heartbeats) in self.registered_collectors.iter_mut() {
-                    if heartbeats.is_empty() {
-                        info!(collecter_uuid = %uuid, "Collector manager: heartbeat sweeper: collector is inactive");
-                        self.expected_collectors.remove(uuid);
+                // Note: expired collectors stay in expected_collectors (it is
+                // the static config set), so compute_status reports them as
+                // offline instead of forgetting them entirely.
+                self.registered_collectors.retain(|uuid, hb| {
+                    let live = now - hb.timestamp < heartbeat_expiry;
+                    if !live {
+                        info!(collector_uuid = %uuid, "Collector manager: heartbeat sweeper: collector is inactive");
                     }
-                }
-                self.registered_collectors
-                    .retain(|_, heartbeats| !heartbeats.is_empty());
+                    live
+                });
             }
             CollectorManagerMsg::GetRegisteredCollectors(resp) => {
-                let mut latest = Vec::new();
-                self.registered_collectors.values().for_each(|heartbeats| {
-                    if let Some(hb) = heartbeats.last() {
-                        latest.push(hb.clone())
-                    }
-                });
+                let latest = self.registered_collectors.values().cloned().collect();
                 let _ = resp.send(latest);
             }
             CollectorManagerMsg::GetExpectedCollectors(resp) => {
                 let _ = resp.send(self.expected_collectors.clone());
             }
-            CollectorManagerMsg::GetCollectorAssignment((collector_id, resp)) => {
+            CollectorManagerMsg::GetCollectorAssignment(collector_id, resp) => {
                 let assignment = self
                     .collection_cfg
                     .collector_mapping
@@ -178,14 +194,11 @@ impl CollectorManager {
                     .cloned();
                 let _ = resp.send(assignment);
             }
-            CollectorManagerMsg::GetCollectorByUuid((uuid, resp)) => {
-                let collector = self
-                    .registered_collectors
-                    .get(&uuid)
-                    .and_then(|heartbeats| heartbeats.last().cloned());
+            CollectorManagerMsg::GetCollectorByUuid(uuid, resp) => {
+                let collector = self.registered_collectors.get(&uuid).cloned();
                 let _ = resp.send(collector);
             }
-            CollectorManagerMsg::GetCommunityStats((community_id, resp)) => {
+            CollectorManagerMsg::GetCommunityStats(community_id, resp) => {
                 let stats = self
                     .collection_cfg
                     .community_stats
@@ -202,7 +215,7 @@ impl CollectorManager {
                     .collect();
                 let _ = resp.send(stats);
             }
-            CollectorManagerMsg::GetCommunityMembers((community_id, resp)) => {
+            CollectorManagerMsg::GetCommunityMembers(community_id, resp) => {
                 let members = self
                     .collection_cfg
                     .community_members
@@ -210,12 +223,12 @@ impl CollectorManager {
                     .cloned();
                 let _ = resp.send(members);
             }
-            CollectorManagerMsg::PushGossipNodes((uuid, nodes)) => {
-                let graph = self.gossip_graphs.entry(uuid.clone()).or_default();
+            CollectorManagerMsg::PushGossipNodes(uuid, nodes) => {
+                let graph = self.gossip_graphs.entry(uuid).or_default();
                 graph.nodes.extend(nodes);
             }
-            CollectorManagerMsg::PushGossipChannels((uuid, channels)) => {
-                let graph = self.gossip_graphs.entry(uuid.clone()).or_default();
+            CollectorManagerMsg::PushGossipChannels(uuid, channels) => {
+                let graph = self.gossip_graphs.entry(uuid).or_default();
                 graph.channels.extend(channels);
             }
             CollectorManagerMsg::DumpCollectorGraphs(resp) => {
@@ -245,89 +258,107 @@ impl CollectorManagerHandle {
         Self { mailbox: tx }
     }
 
-    pub async fn add_collector_info(&self, info: CollectorInfo) -> anyhow::Result<CollectorState> {
+    /// Round-trip request to the actor: `make` receives the response sender
+    /// and returns the message to deliver.
+    async fn request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> CollectorManagerMsg,
+    ) -> Result<T, CollectorManagerError> {
         let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::AddCollector(Box::new((info, tx)));
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+        self.mailbox.send(make(tx))?;
+        Ok(rx.await?)
     }
 
-    pub async fn get_registered_collectors(&self) -> anyhow::Result<Vec<CollectorHeartbeat>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetRegisteredCollectors(tx);
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    /// Fire-and-forget message to the actor.
+    fn cast(&self, msg: CollectorManagerMsg) -> Result<(), CollectorManagerError> {
+        Ok(self.mailbox.send(msg)?)
     }
 
-    pub async fn get_expected_collectors(&self) -> anyhow::Result<HashSet<String>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetExpectedCollectors(tx);
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    pub async fn add_collector_info(
+        &self,
+        info: CollectorInfo,
+    ) -> Result<CollectorState, CollectorManagerError> {
+        self.request(|tx| CollectorManagerMsg::AddCollector(Box::new((info, tx))))
+            .await
+    }
+
+    pub async fn get_registered_collectors(
+        &self,
+    ) -> Result<Vec<CollectorHeartbeat>, CollectorManagerError> {
+        self.request(CollectorManagerMsg::GetRegisteredCollectors)
+            .await
+    }
+
+    pub async fn get_expected_collectors(
+        &self,
+    ) -> Result<HashSet<String>, CollectorManagerError> {
+        self.request(CollectorManagerMsg::GetExpectedCollectors)
+            .await
     }
 
     pub async fn get_collector_assignment(
         &self,
         collector_id: &str,
-    ) -> anyhow::Result<Option<u32>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetCollectorAssignment((collector_id.to_string(), tx));
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    ) -> Result<Option<u32>, CollectorManagerError> {
+        let id = collector_id.to_string();
+        self.request(|tx| CollectorManagerMsg::GetCollectorAssignment(id, tx))
+            .await
     }
 
     pub async fn get_collector_by_uuid(
         &self,
         uuid: &str,
-    ) -> anyhow::Result<Option<CollectorHeartbeat>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetCollectorByUuid((uuid.to_string(), tx));
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    ) -> Result<Option<CollectorHeartbeat>, CollectorManagerError> {
+        let uuid = uuid.to_string();
+        self.request(|tx| CollectorManagerMsg::GetCollectorByUuid(uuid, tx))
+            .await
     }
 
     pub async fn get_community_stats(
         &self,
         community_id: u32,
-    ) -> anyhow::Result<Option<CommunityStats>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetCommunityStats((community_id, tx));
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    ) -> Result<Option<CommunityStats>, CollectorManagerError> {
+        self.request(|tx| CollectorManagerMsg::GetCommunityStats(community_id, tx))
+            .await
     }
 
-    pub async fn get_all_community_stats(&self) -> anyhow::Result<Vec<CommunityStats>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetAllCommunityStats(tx);
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    pub async fn get_all_community_stats(
+        &self,
+    ) -> Result<Vec<CommunityStats>, CollectorManagerError> {
+        self.request(CollectorManagerMsg::GetAllCommunityStats)
+            .await
     }
 
     pub async fn get_community_members(
         &self,
         community_id: u32,
-    ) -> anyhow::Result<Option<Vec<NodeAnnotatedRecord>>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::GetCommunityMembers((community_id, tx));
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    ) -> Result<Option<Arc<Vec<NodeAnnotatedRecord>>>, CollectorManagerError> {
+        self.request(|tx| CollectorManagerMsg::GetCommunityMembers(community_id, tx))
+            .await
     }
 
-    pub fn push_gossip_nodes(&self, uuid: String, nodes: Vec<GossipNodeInfo>) {
-        let msg = CollectorManagerMsg::PushGossipNodes((uuid, nodes));
-        self.mailbox.send(msg).unwrap();
+    pub fn push_gossip_nodes(
+        &self,
+        uuid: String,
+        nodes: Vec<GossipNodeInfo>,
+    ) -> Result<(), CollectorManagerError> {
+        self.cast(CollectorManagerMsg::PushGossipNodes(uuid, nodes))
     }
 
-    pub fn push_gossip_channels(&self, uuid: String, channels: Vec<GossipChannelInfo>) {
-        let msg = CollectorManagerMsg::PushGossipChannels((uuid, channels));
-        self.mailbox.send(msg).unwrap();
+    pub fn push_gossip_channels(
+        &self,
+        uuid: String,
+        channels: Vec<GossipChannelInfo>,
+    ) -> Result<(), CollectorManagerError> {
+        self.cast(CollectorManagerMsg::PushGossipChannels(uuid, channels))
     }
 
-    pub async fn get_gossip_graphs(&self) -> anyhow::Result<CollectorGossipGraphs> {
-        let (tx, rx) = oneshot::channel();
-        let msg = CollectorManagerMsg::DumpCollectorGraphs(tx);
-        self.mailbox.send(msg).unwrap();
-        rx.await.map_err(anyhow::Error::from)
+    pub fn sweep_heartbeats(&self, expiry: TimeDelta) -> Result<(), CollectorManagerError> {
+        self.cast(CollectorManagerMsg::SweepHeartbeats(expiry))
+    }
+
+    pub async fn get_gossip_graphs(&self) -> Result<CollectorGossipGraphs, CollectorManagerError> {
+        self.request(CollectorManagerMsg::DumpCollectorGraphs).await
     }
 }
 
@@ -336,7 +367,7 @@ pub async fn handle_collector_info(
     handle: &CollectorManagerHandle,
     info: CollectorInfo,
     provide_info: bool,
-) -> anyhow::Result<Option<(CommunityStats, Vec<NodeAnnotatedRecord>)>> {
+) -> anyhow::Result<Option<(CommunityStats, Arc<Vec<NodeAnnotatedRecord>>)>> {
     let collector_id = info.uuid.clone();
     let collector_state = handle.add_collector_info(info).await?;
     if collector_state == CollectorState::Active {
@@ -393,9 +424,7 @@ pub async fn handle_collector_info(
         community_stats.connection_count
     );
 
-    // Shuffle list order here so we don't sample in the same order between
-    // collector starts.
-    let mut community_members = match handle.get_community_members(assigned_community).await? {
+    let community_members = match handle.get_community_members(assigned_community).await? {
         Some(members) => members,
         None => {
             warn!(
@@ -412,7 +441,6 @@ pub async fn handle_collector_info(
         "Collector community members: {}",
         community_members.len()
     );
-    community_members.shuffle(&mut StdRng::from_os_rng());
 
     Ok(Some((community_stats, community_members)))
 }
@@ -449,18 +477,17 @@ pub async fn compute_status(handle: &CollectorManagerHandle) -> anyhow::Result<M
     Ok(status)
 }
 
-pub async fn compute_graph_differences(
-    handle: &CollectorManagerHandle,
-) -> anyhow::Result<FullGraphDiff> {
+// Pure CPU; the caller fetches the graphs from the actor and runs this via
+// spawn_blocking.
+pub fn compute_graph_differences(collector_graphs: CollectorGossipGraphs) -> FullGraphDiff {
     // TODO: diff against previous combined graph
-    let collector_graphs = handle.get_gossip_graphs().await?;
     info!(
         collector_count = collector_graphs.len(),
         "Combining collector graph views"
     );
     if collector_graphs.is_empty() {
         info!("Received no collector graphs");
-        return Ok(FullGraphDiff::default());
+        return FullGraphDiff::default();
     }
     let mut combined_nodes: HashMap<bitcoin::secp256k1::PublicKey, GossipNodeInfo> = HashMap::new();
     let mut combined_channels: HashMap<u64, GossipChannelInfo> = HashMap::new();
@@ -547,8 +574,8 @@ pub async fn compute_graph_differences(
         }
 
         // Now compare the channel states.
-        let collector_channels: HashMap<u64, GossipChannelInfo> =
-            HashMap::from_iter(graph.channels.iter().cloned().map(|c| (c.scid, c)));
+        let collector_channels: HashMap<u64, &GossipChannelInfo> =
+            HashMap::from_iter(graph.channels.iter().map(|c| (c.scid, c)));
         for (scid, combined_info) in combined_channels.iter() {
             let collector_info = collector_channels.get(scid);
             match collector_info {
@@ -602,13 +629,11 @@ pub async fn compute_graph_differences(
         nodes: combined_nodes.into_values().collect(),
         channels: combined_channels.into_values().collect(),
     };
-    let full_diff = FullGraphDiff {
+    FullGraphDiff {
         diffs: collector_diffs,
         graphs: collector_graphs,
         controller_graph: combined_graph,
-    };
-
-    Ok(full_diff)
+    }
 }
 
 pub struct GossipDiffConfig {
@@ -643,13 +668,10 @@ pub async fn collector_gossip_differ(
         }
 
         let now = chrono::Utc::now();
-        let diff_results = {
-            let local_handle = handle.clone();
-            let rt = tokio::runtime::Handle::current();
-            // Only fallible part here should be loading the received graphs.
-            task::spawn_blocking(move || rt.block_on(compute_graph_differences(&local_handle)))
-                .await??
-        };
+        // Fetch from the actor (async), then diff off-runtime (pure CPU).
+        let collector_graphs = handle.get_gossip_graphs().await?;
+        let diff_results =
+            task::spawn_blocking(move || compute_graph_differences(collector_graphs)).await?;
         // log all diffs
         let ts_suffix = now.format("%Y-%m-%d-%H-%M.zst");
         for diff in diff_results.diffs.iter() {
@@ -703,8 +725,11 @@ pub async fn heartbeat_sweeper(
         tokio::select! {
                 _ = waiter.tick() => {
                     info!("Collector manager: sweeper: expiring heartbeats");
-                    let msg = CollectorManagerMsg::SweepHeartbeats(heartbeat_expiry);
-                    handle.mailbox.send(msg).unwrap();
+                    if let Err(e) = handle.sweep_heartbeats(heartbeat_expiry) {
+                        // Manager gone means we are shutting down.
+                        warn!(error = %e, "Collector manager: sweeper: exiting");
+                        break;
+                    }
                 }
                 _ = cancel.cancelled() => {
                     info!("Collector manager: sweeper: shutting down");
