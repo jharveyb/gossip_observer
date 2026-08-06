@@ -1,0 +1,41 @@
+# Discover the interface holding this host's public IPv4 address.
+#
+# Sets facts: public_interface, public_ip
+#
+# Imported by tasks/firewall.yml (UFW per-interface rules) and by
+# pcap_capture.yml (capture interface). Never hardcode eth0 -- the DO droplets
+# happen to use it, but proxmox/baremetal hosts do not.
+#
+# DO NOT replace ipaddr('public') with a private-address check, and do not
+# swap it for ansible_facts.default_ipv4.interface. Tailscale addresses are
+# CGNAT (100.64.0.0/10): 100.76.19.97 is is_private=False but is_global=False.
+# Anything that tests "not RFC1918" therefore picks tailscale0 as the public
+# interface, and firewall.yml puts Deny-public plus the SSH limit rule on the
+# Tailscale interface -- locking us out over the transport we administer these
+# hosts with. ipaddr('public') tests global routability, which is the property
+# that actually matters here.
+#
+# This is the repo's only use of the ansible.utils collection. Loading it emits
+# deprecation warnings under ansible-core 2.20 (19 of the collection's plugin
+# files still import ansible.module_utils._text / _collections_compat, removed
+# in core 2.24). The warnings are cosmetic -- the task returns ok -- and core
+# ships no IP filter of its own, so the fix is upgrading ansible.utils, not
+# rewriting this.
+
+- name: Find interface with public IP
+  ansible.builtin.set_fact:
+    public_interface: "{{ item }}"
+    public_ip: "{{ ansible_facts[item].ipv4.address }}"
+  # The 'is truthy' condition converts the return value (an IP address) to a bool type
+  # while still allowing the ipaddr() function to short-circuit if False
+  when:
+    - ansible_facts[item].ipv4.address is defined
+    - ansible_facts[item].ipv4.address | ansible.utils.ipaddr('public') is truthy
+  loop: "{{ ansible_facts.interfaces }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Display selected public interface
+  ansible.builtin.debug:
+    msg: "Public interface: {{ public_interface }} with IP: {{ public_ip }}"
+  when: public_interface is defined

@@ -2,22 +2,7 @@
 
 # With tailscale set up, we should also reject public inbound traffic (except SSH).
 - name: Find interface with public IP
-  ansible.builtin.set_fact:
-    public_interface: "{{ item }}"
-    public_ip: "{{ ansible_facts[item].ipv4.address }}"
-  # The 'is truthy' condition converts the return value (an IP address) to a bool type
-  # while still allowing the ipaddr() function to short-circuit if False
-  when:
-    - ansible_facts[item].ipv4.address is defined
-    - ansible_facts[item].ipv4.address | ansible.utils.ipaddr('public') is truthy
-  loop: "{{ ansible_facts.interfaces }}"
-  loop_control:
-    label: "{{ item }}"
-
-- name: Display selected public interface
-  ansible.builtin.debug:
-    msg: "Public interface: {{ public_interface }} with IP: {{ public_ip }}"
-  when: public_interface is defined
+  ansible.builtin.import_tasks: find_public_interface.yml
 
 # We need our allow rule(s) before the deny (per interface, IIUC)
 - name: Firewall - allow public SSH
