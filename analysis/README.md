@@ -12,6 +12,8 @@ Requires uv (or you manually set up local dependencies).
 
 The data on disk should match the structure used in the S3 bucket where data is published:
 
+### Gossip data layout
+
 ```sh
 ls $DATADIR
 
@@ -28,7 +30,25 @@ tree $DATADIR/message_hashes/
 
 So, ./TABLE_NAME/YYYY/MM/DD/table_name_YYYY-MM-DD.parquet.
 
-### Fetching data
+### Packet capture data layout
+
+```sh
+tree $DATADIR
+├── 20260804T155011Z
+│   ├── collectors-2
+│   │   ├── capture_meta.json
+│   │   ├── collectors-2-20260804T155011Z_00001_20260804155028.pcapng
+│   │   ├── ...
+│   │   ├── sockmap.tsv
+│   │   └── split
+│   │       ├── 019c26b8-3125-798a-afbf-cf3f308089cd.pcapng
+│   │       ├── ...
+│   │       └── manifest.json
+│   └── collectors-3-big
+...
+```
+
+## Fetching data
 
 Use any S3-compatible tool for downloads. The endpoint is <https://observer-data.jharveyb.xyz/>. Ask me for read-only credentials.
 
