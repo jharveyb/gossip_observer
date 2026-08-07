@@ -285,7 +285,7 @@ mod tests {
             url = "ssl://electrum.example:50002"
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         assert!(
             matches!(src, ChainSource::Electrum { url } if url == "ssl://electrum.example:50002")
         );
@@ -300,7 +300,7 @@ mod tests {
             url = "https://blockstream.info/api"
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         assert!(
             matches!(src, ChainSource::Esplora { url } if url == "https://blockstream.info/api")
         );
@@ -318,7 +318,7 @@ mod tests {
             rpc_password = "hunter2"
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         let ChainSource::Bitcoind(rpc) = src else {
             panic!("expected bitcoind, got {src}");
         };
@@ -341,7 +341,7 @@ mod tests {
             rest_port = 8332
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         let ChainSource::Bitcoind(rpc) = src else {
             panic!("expected bitcoind, got {src}");
         };
@@ -364,7 +364,7 @@ mod tests {
             rest_host = "127.0.0.1"
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         let ChainSource::Bitcoind(rpc) = src else {
             panic!("expected bitcoind, got {src}");
         };
@@ -400,7 +400,7 @@ mod tests {
             rpc_password = "hunter2"
             "#,
         )
-        .unwrap();
+        .expect("bad config test input");
         let rendered = format!("{src} {src:?}");
         assert!(!rendered.contains("hunter2"), "leaked password: {rendered}");
     }

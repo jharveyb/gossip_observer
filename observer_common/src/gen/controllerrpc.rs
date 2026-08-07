@@ -6,14 +6,17 @@ pub struct RegisterCollectorResponse {}
 pub struct CollectorStatusResponse {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StatusRequest {}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CollectorHeartbeat {
-    #[prost(uint64, tag = "1")]
-    pub timestamp: u64,
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorHeartbeatDisplay {
+    /// Seconds relative to now: negative means the heartbeat was received
+    /// that many seconds ago.
+    #[prost(int32, tag = "1")]
+    pub heartbeat_age_secs: i32,
     #[prost(message, optional, tag = "2")]
-    pub info: ::core::option::Option<super::common::CollectorInfo>,
+    pub info: ::core::option::Option<super::common::CollectorInfoDisplay>,
 }
-/// list collectors, peer count, target count
+/// list collectors, peer count, target count. Operator-facing: uses the
+/// human-readable \*Display message variants.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StatusResponse {
     #[prost(uint32, tag = "1")]
@@ -27,7 +30,7 @@ pub struct StatusResponse {
     #[prost(string, repeated, tag = "5")]
     pub offline_collectors: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "6")]
-    pub statuses: ::prost::alloc::vec::Vec<CollectorHeartbeat>,
+    pub statuses: ::prost::alloc::vec::Vec<CollectorHeartbeatDisplay>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenCollectorChannelRequest {

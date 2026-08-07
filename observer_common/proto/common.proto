@@ -46,6 +46,32 @@ message BalancesResponse{
   uint64 total_lightning_balance = 3;
 }
 
+// *Display messages are human-readable variants for operator-facing RPCs
+// (grpcurl and similar tooling): pubkeys and addresses as strings rather than
+// bytes, and sat amounts as uint32 because 64-bit ints render as
+// (low, high, unsigned) triples in some clients. Display-only; not for
+// machine consumption.
+
+// Sat amounts saturate at u32::MAX (~42.9 BTC) — far above any collector
+// balance; a maxed value flags the overflow.
+message BalancesDisplay {
+  uint32 total_onchain = 1;
+  uint32 spendable_onchain = 2;
+  uint32 total_lightning_balance = 3;
+}
+
+message CollectorInfoDisplay {
+  string uuid = 1;
+  string pubkey = 2;
+  repeated string listen_addrs = 3;
+  string onchain_addr = 4;
+  BalancesDisplay balances = 5;
+  uint32 peer_count = 6;
+  uint32 target_count = 7;
+  uint32 eligible_peers = 8;
+  string grpc_socket = 9;
+}
+
 message OpenChannelRequest {
   PeerConnectionInfo peer = 1;
   uint64 capacity = 2;

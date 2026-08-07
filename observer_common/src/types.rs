@@ -2,8 +2,8 @@ use std::cmp::{self, Ordering};
 use std::str::FromStr;
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
+use bitcoin::secp256k1::PublicKey;
 use chrono::{DateTime, Utc};
 use itertools::Itertools::{self};
 use ldk_node::{BalanceDetails, PeerDetails};
@@ -285,11 +285,32 @@ pub struct CollectorHeartbeat {
     pub timestamp: DateTime<Utc>,
 }
 
-impl From<CollectorHeartbeat> for controllerrpc::CollectorHeartbeat {
-    fn from(hb: CollectorHeartbeat) -> Self {
-        controllerrpc::CollectorHeartbeat {
-            timestamp: hb.timestamp.timestamp() as u64,
-            info: Some(hb.info.into()),
+impl From<Balances> for common::BalancesDisplay {
+    fn from(balances: Balances) -> Self {
+        // Display-only; saturating keeps the message at uint32 (64-bit ints
+        // render as (low, high, unsigned) triples in some API tooling) and a
+        // maxed value flags the overflow.
+        let sat = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        common::BalancesDisplay {
+            total_onchain: sat(balances.total_onchain),
+            spendable_onchain: sat(balances.spendable_onchain),
+            total_lightning_balance: sat(balances.total_lightning_balance),
+        }
+    }
+}
+
+impl From<CollectorInfo> for common::CollectorInfoDisplay {
+    fn from(info: CollectorInfo) -> Self {
+        common::CollectorInfoDisplay {
+            uuid: info.uuid,
+            pubkey: info.pubkey.to_string(),
+            listen_addrs: info.listen_addrs.iter().map(|a| a.to_string()).collect(),
+            onchain_addr: info.onchain_addr.to_string(),
+            balances: Some(info.balances.into()),
+            peer_count: info.peer_count,
+            target_count: info.target_count,
+            eligible_peers: info.eligible_peers,
+            grpc_socket: info.grpc_socket,
         }
     }
 }
@@ -335,13 +356,23 @@ pub struct ManagerStatus {
 
 impl From<ManagerStatus> for controllerrpc::StatusResponse {
     fn from(status: ManagerStatus) -> Self {
+        let now = Utc::now();
+        let statuses = status
+            .statuses
+            .into_iter()
+            .map(|hb| controllerrpc::CollectorHeartbeatDisplay {
+                // Negative: that many seconds since the heartbeat arrived.
+                heartbeat_age_secs: (hb.timestamp - now).num_seconds() as i32,
+                info: Some(common::CollectorInfoDisplay::from(hb.info)),
+            })
+            .collect();
         controllerrpc::StatusResponse {
             total_target_peer_count: status.total_target_peer_count,
             current_peer_count: status.current_peer_count,
             online_collector_count: status.online_collector_count,
             offline_collector_count: status.offline_collector_count,
             offline_collectors: util::convert_vec(status.offline_collectors),
-            statuses: util::convert_vec(status.statuses),
+            statuses,
         }
     }
 }

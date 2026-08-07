@@ -23,19 +23,22 @@ message CollectorStatusResponse {}
 
 message StatusRequest {}
 
-message CollectorHeartbeat {
-        uint64 timestamp = 1;
-        common.CollectorInfo info = 2;
+message CollectorHeartbeatDisplay {
+        // Seconds relative to now: negative means the heartbeat was received
+        // that many seconds ago.
+        int32 heartbeat_age_secs = 1;
+        common.CollectorInfoDisplay info = 2;
 }
 
-// list collectors, peer count, target count
+// list collectors, peer count, target count. Operator-facing: uses the
+// human-readable *Display message variants.
 message StatusResponse {
         uint32 total_target_peer_count = 1;
         uint32 current_peer_count = 2;
         uint32 online_collector_count = 3;
         uint32 offline_collector_count = 4;
         repeated string offline_collectors = 5;
-        repeated CollectorHeartbeat statuses = 6;
+        repeated CollectorHeartbeatDisplay statuses = 6;
 }
 
 message OpenCollectorChannelRequest {

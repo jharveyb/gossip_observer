@@ -61,6 +61,38 @@ pub struct BalancesResponse {
     #[prost(uint64, tag = "3")]
     pub total_lightning_balance: u64,
 }
+/// Sat amounts saturate at u32::MAX (~42.9 BTC) — far above any collector
+/// balance; a maxed value flags the overflow.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BalancesDisplay {
+    #[prost(uint32, tag = "1")]
+    pub total_onchain: u32,
+    #[prost(uint32, tag = "2")]
+    pub spendable_onchain: u32,
+    #[prost(uint32, tag = "3")]
+    pub total_lightning_balance: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorInfoDisplay {
+    #[prost(string, tag = "1")]
+    pub uuid: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub pubkey: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "3")]
+    pub listen_addrs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "4")]
+    pub onchain_addr: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub balances: ::core::option::Option<BalancesDisplay>,
+    #[prost(uint32, tag = "6")]
+    pub peer_count: u32,
+    #[prost(uint32, tag = "7")]
+    pub target_count: u32,
+    #[prost(uint32, tag = "8")]
+    pub eligible_peers: u32,
+    #[prost(string, tag = "9")]
+    pub grpc_socket: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OpenChannelRequest {
     #[prost(message, optional, tag = "1")]
