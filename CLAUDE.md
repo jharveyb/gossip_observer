@@ -12,6 +12,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 ## Commands
 - Build: `just build` (debug) / `just build-prod` (release). Workspace builds are offline by default (`SQLX_OFFLINE=true`).
 - Test + lint: `cargo test --workspace`, `cargo clippy --workspace`.
+- Integration test (controller ⇄ collector pair, ~10s): `just integration-test` — needs `bitcoind` and `nats-server` on PATH (or `BITCOIND_EXE`/`NATS_SERVER_EXE`).
 - SQL offline cache: `just gen-sql` (= `cargo sqlx prepare --workspace`) after changing any SQL; `just check-sql` to verify. Needs a DB with the TimescaleDB extension applied.
 - Deploy: Ansible playbooks in `infra/ansible/` (`collector_init.yml`, `archiver_init.yml`, `controller_init.yml`, `data_sharing_init.yml`). Dry-run with `--check --diff`; scope with `--limit`. Vault-encrypted secrets → `--ask-vault-pass`.
 
@@ -23,13 +24,14 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 ## Topic rules (auto-loaded by path — see `.claude/rules/`)
 - **Ansible / infra / Garage data-sharing** → `.claude/rules/ansible.md`
 - **Rust patterns** (sqlx, async lifecycle, config, resilience) → `.claude/rules/rust.md`
+- **gRPC / protobuf** (wire contract + lockstep deploys, `*Display` messages, client/server conventions, integration test) → `.claude/rules/grpc.md`
 - **TimescaleDB / migrations / retention** → `.claude/rules/database.md`
 - **DuckDB/Parquet query correctness + viz** → `.claude/rules/analysis.md`
 - **What the gossip data means** (`dir=1`/`dir=2`, fanout) → `.claude/rules/gossip-semantics.md`
 - **Patched LDK forks** (why the fork, `MessageExporter` capture, export schema, Tor) → `.claude/rules/forks.md`
 
 ## Verify before finishing Rust changes
-Run `cargo clippy --workspace` and `cargo test --workspace`; if SQL changed, `just gen-sql`.
+Run `cargo clippy --workspace` and `cargo test --workspace`; if SQL changed, `just gen-sql`; if protos, gRPC clients/servers, or proto conversions changed, `just integration-test`.
 
 ## MCP: Bitcoin Knowledge Base (bkb)
 Lightning/Bitcoin spec lookups: `bkb_lookup_bolt` / `_bip` / `_blip` / `_lud` / `_nut`, and `bkb_search` (full-text). Use for BOLT/BIP questions instead of guessing.
