@@ -177,6 +177,16 @@ fn spawn_nats(port: u16, work_dir: &Path) -> Result<ChildGuard> {
     }
 }
 
+/// A throwaway regtest address to mine to — derived locally so the test never
+/// needs bitcoind's wallet (which may not even be compiled in).
+fn regtest_mining_address() -> bitcoin::Address {
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[0xAA; 32]).unwrap();
+    let pk = bitcoin::PublicKey::new(PublicKey::from_secret_key(&secp, &sk));
+    let compressed = bitcoin::CompressedPublicKey::try_from(pk).unwrap();
+    bitcoin::Address::p2wpkh(&compressed, bitcoin::Network::Regtest)
+}
+
 /// Deterministic valid pubkeys for the fixture peer records.
 fn fixture_pubkeys() -> Vec<String> {
     let secp = Secp256k1::new();
@@ -333,13 +343,22 @@ async fn wait_for_collector_online(controller_grpc_port: u16) -> Result<()> {
             match client.status(StatusRequest {}).await {
                 Ok(resp) => {
                     let status = resp.into_inner();
-                    if let Some(info) = status.statuses.first().and_then(|hb| hb.info.as_ref()) {
+                    if let Some(hb) = status.statuses.first() {
+                        let info = hb.info.as_ref().unwrap();
+                        // Display semantics: negative seconds since receipt,
+                        // and recent (the collector heartbeats every 2s).
+                        assert!(
+                            (-30..=0).contains(&hb.heartbeat_age_secs),
+                            "unexpected heartbeat age: {}",
+                            hb.heartbeat_age_secs
+                        );
                         last_state = format!(
-                            "online={} uuid={} eligible_peers={} target_count={}",
+                            "online={} uuid={} eligible_peers={} target_count={} hb_age={}",
                             status.online_collector_count,
                             info.uuid,
                             info.eligible_peers,
-                            info.target_count
+                            info.target_count,
+                            hb.heartbeat_age_secs,
                         );
                         if status.online_collector_count == 1
                             && info.uuid == TEST_UUID
@@ -375,14 +394,23 @@ async fn controller_collector_pair() -> Result<()> {
 
     // Regtest bitcoind (kill-on-drop, cookie auth); mine past genesis so the
     // collector's chain sync and fee estimation have something to look at.
+    // No node wallet involved anywhere: `wallet: None` plus a locally derived
+    // mining address keeps this working across Core versions and with
+    // wallet-less bitcoind builds (corepc's typed wallet RPCs would also lag
+    // new Core releases).
+    let mut conf = Conf::default();
+    conf.wallet = None;
     let bitcoind = Node::with_conf(
         corepc_node::exe_path().map_err(|e| {
             anyhow::anyhow!("bitcoind not found (set BITCOIND_EXE or add to PATH): {e}")
         })?,
-        &Conf::default(),
+        &conf,
     )?;
-    let mining_addr = bitcoind.client.new_address()?;
-    bitcoind.client.generate_to_address(101, &mining_addr)?;
+    let mining_addr = regtest_mining_address();
+    bitcoind.client.call::<serde_json::Value>(
+        "generatetoaddress",
+        &[101.into(), mining_addr.to_string().into()],
+    )?;
 
     let nats_port = free_port();
     let temp_root = TempDir::new()?;

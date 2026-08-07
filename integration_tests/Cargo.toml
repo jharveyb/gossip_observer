@@ -12,8 +12,11 @@ publish = false
 anyhow = "1.0"
 bitcoin = "0.32.4"
 # No download feature: bitcoind is resolved from BITCOIND_EXE or PATH.
-# The version feature only selects the RPC client surface (local: v29.0).
+# The version feature is only needed to compile the crate; the test avoids the
+# version-typed RPC wrappers entirely (raw `call()` only, plus `wallet: None`),
+# so newer Core releases (e.g. v31) work without a matching feature.
 corepc-node = { version = "0.10", default-features = false, features = ["29_0"] }
+serde_json = "1.0"
 nix = { version = "0.29", features = ["signal"] }
 observer_common = { path = "../observer_common" }
 tempfile = "3"
