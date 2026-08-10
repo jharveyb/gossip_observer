@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 
 anyhow = "1.0"
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 bitcoin = { version = "0.32.4", features = ["std", "secp-recovery", "serde"] }
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = [
@@ -21,6 +22,7 @@ prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_with = { version = "3.16.1", features = ["json", "hex"] }
 tokio = { version = "1.47", features = ["full", "tracing"] }
+tokio-util = "0.7"
 tonic = { version = "0.14", features = [
         "router",
         "transport",
@@ -40,6 +42,9 @@ tracing-subscriber = { version = "0.3", features = [
         "local-time",
 ] }
 itertools = "0.14.0"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

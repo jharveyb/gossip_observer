@@ -36,6 +36,7 @@ fn main() -> anyhow::Result<()> {
         &cfg.log_level,
         Path::new(&cfg.storage_dir),
         "archiver",
+        cfg.log_rotation.rotation,
         Some(cfg.console.clone()),
     )?;
 
@@ -125,6 +126,16 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
         }
     });
 
+    // Compress + expire rotated log files.
+    let janitor_handle = tokio::spawn(observer_common::logging::run_log_janitor(
+        vec![observer_common::logging::JanitorTarget::new(
+            &cfg.storage_dir,
+            "archiver",
+        )],
+        cfg.log_rotation.clone(),
+        root_cancel_token.child_token(),
+    ));
+
     // Use a child token for the exporter so that we don't crash the whole
     // archiver if export fails.
     let export_cancel_token = root_cancel_token.child_token();
@@ -136,15 +147,17 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
         db_handle,
         db_write_ticker_handle,
         export_handle,
+        janitor_handle,
     ) {
-        Ok((nats_res, decode_res, db_handle_res, db_write_res, export_res)) => {
-            info!(nats = ?nats_res, decode = ?decode_res, db_handle = ?db_handle_res, db_write = ?db_write_res, export = ?export_res, "Final task output");
+        Ok((nats_res, decode_res, db_handle_res, db_write_res, export_res, janitor_res)) => {
+            info!(nats = ?nats_res, decode = ?decode_res, db_handle = ?db_handle_res, db_write = ?db_write_res, export = ?export_res, janitor = ?janitor_res, "Final task output");
             let res = vec![
                 nats_res,
                 decode_res,
                 db_handle_res,
                 db_write_res,
                 export_res,
+                janitor_res,
             ];
             let mut final_err = false;
             for r in res {

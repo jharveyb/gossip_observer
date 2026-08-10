@@ -3056,6 +3056,7 @@ name = "observer_common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "bitcoin",
  "bytes",
  "chrono",
@@ -3066,7 +3067,9 @@ dependencies = [
  "prost 0.14.1",
  "serde",
  "serde_with",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

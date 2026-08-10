@@ -33,6 +33,7 @@ fn main() -> anyhow::Result<()> {
         &cfg.controller.log_level,
         Path::new(&cfg.controller.storage_dir),
         "controller",
+        cfg.log_rotation.rotation,
         Some(cfg.console.clone()),
     )?;
 
@@ -156,6 +157,16 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
         collector_manager.clone(),
         collector_clients.clone(),
         interval(chan_update_interval),
+        stop_signal.child_token(),
+    ));
+
+    // Compress + expire rotated log files.
+    let _log_janitor = tokio::spawn(observer_common::logging::run_log_janitor(
+        vec![observer_common::logging::JanitorTarget::new(
+            &cfg.controller.storage_dir,
+            "controller",
+        )],
+        cfg.log_rotation.clone(),
         stop_signal.child_token(),
     ));
 

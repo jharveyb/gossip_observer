@@ -203,7 +203,17 @@ struct ControllerFixture {
     grpc_port: u16,
 }
 
-fn setup_controller_dir() -> Result<ControllerFixture> {
+/// Extra TOML appended to both daemon configs by the janitor test: minutely
+/// rotation with second-scale compress/expire so a full cycle fits in minutes.
+const JANITOR_TEST_TOML: &str = r#"
+[log_rotation]
+rotation = "minutely"
+compress_after_secs = 60
+retention_secs = 120
+sweep_interval_secs = 5
+"#;
+
+fn setup_controller_dir(extra_toml: &str) -> Result<ControllerFixture> {
     let dir = TempDir::new()?;
     let root = dir.path();
     let storage = root.join("storage");
@@ -252,7 +262,7 @@ collector_mapping = "{mapping}"
         communities = root.join("communities.csv").display(),
         mapping = root.join("collector_mapping.toml").display(),
     );
-    fs::write(root.join("controller_config.toml"), config)?;
+    fs::write(root.join("controller_config.toml"), config + extra_toml)?;
 
     Ok(ControllerFixture { dir, grpc_port })
 }
@@ -266,6 +276,7 @@ fn setup_collector_dir(
     bitcoind: &Node,
     nats_port: u16,
     controller_grpc_port: u16,
+    extra_toml: &str,
 ) -> Result<CollectorFixture> {
     let dir = TempDir::new()?;
     let root = dir.path();
@@ -326,7 +337,7 @@ retention_secs = 30
         storage = storage.display(),
         console_port = free_port(),
     );
-    fs::write(root.join("collector_config.toml"), config)?;
+    fs::write(root.join("collector_config.toml"), config + extra_toml)?;
 
     Ok(CollectorFixture { dir, grpc_port })
 }
@@ -416,9 +427,9 @@ async fn controller_collector_pair() -> Result<()> {
     let temp_root = TempDir::new()?;
     let nats = spawn_nats(nats_port, temp_root.path())?;
 
-    let controller_fixture = setup_controller_dir()?;
+    let controller_fixture = setup_controller_dir("")?;
     let collector_fixture =
-        setup_collector_dir(&bitcoind, nats_port, controller_fixture.grpc_port)?;
+        setup_collector_dir(&bitcoind, nats_port, controller_fixture.grpc_port, "")?;
 
     let mut controller = ChildGuard::spawn(
         "observer_controller",
@@ -473,6 +484,239 @@ async fn controller_collector_pair() -> Result<()> {
         collector.log_tail()
     );
 
+    let controller_status = controller.signal_and_wait(Signal::SIGINT, Duration::from_secs(30));
+    assert!(
+        controller_status.success(),
+        "controller shutdown was unclean: {controller_status:?}\n{}",
+        controller.log_tail()
+    );
+
+    Ok(())
+}
+
+/// A non-log file seeded next to the logs; the janitor must never touch it.
+struct SeededFile {
+    path: PathBuf,
+    content: Vec<u8>,
+}
+
+impl SeededFile {
+    fn create(path: PathBuf, content: &str) -> Result<Self> {
+        fs::write(&path, content)?;
+        Ok(Self {
+            path,
+            content: content.as_bytes().to_vec(),
+        })
+    }
+
+    fn assert_untouched(&self) {
+        let on_disk = fs::read(&self.path)
+            .unwrap_or_else(|e| panic!("janitor removed/broke {}: {e}", self.path.display()));
+        assert_eq!(
+            on_disk,
+            self.content,
+            "janitor modified {}",
+            self.path.display()
+        );
+        for suffix in [".zst", ".zst.tmp"] {
+            let mut twin = self.path.as_os_str().to_owned();
+            twin.push(suffix);
+            assert!(
+                !Path::new(&twin).exists(),
+                "janitor compressed a non-log file: {}{suffix}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+/// Names in `dir` starting with `{prefix}.`, split into (plain, compressed).
+fn split_log_files(dir: &Path, prefix: &str) -> (Vec<String>, Vec<String>) {
+    let match_prefix = format!("{prefix}.");
+    let (mut plain, mut zst) = (Vec::new(), Vec::new());
+    for entry in fs::read_dir(dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&match_prefix) {
+            continue;
+        }
+        if name.ends_with(".zst") {
+            zst.push(name);
+        } else if !name.ends_with(".zst.tmp") {
+            plain.push(name);
+        }
+    }
+    plain.sort();
+    zst.sort();
+    (plain, zst)
+}
+
+/// Poll until `condition` returns true, re-asserting on every iteration that
+/// the seeded non-log files are untouched.
+fn wait_for(
+    what: &str,
+    deadline: Duration,
+    seeded: &[SeededFile],
+    mut condition: impl FnMut() -> bool,
+) {
+    let end = Instant::now() + deadline;
+    loop {
+        for file in seeded {
+            file.assert_untouched();
+        }
+        if condition() {
+            return;
+        }
+        assert!(Instant::now() < end, "timed out waiting for: {what}");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// End-to-end log janitor behavior against the real daemons: minutely
+/// rotation with compress-after 60s / retention 120s, so within ~4 minutes we
+/// observe closed files being zstd-compressed, the oldest archive being
+/// expired, and rotation continuing — while seeded non-log files sharing the
+/// directories are never modified.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns bitcoind/nats-server/workspace binaries and runs ~4 minutes; run via `just integration-test`"]
+async fn log_janitor_rotation() -> Result<()> {
+    let collector_bin = target_bin("gossip_collector");
+    let controller_bin = target_bin("observer_controller");
+
+    let mut conf = Conf::default();
+    conf.wallet = None;
+    let bitcoind = Node::with_conf(
+        corepc_node::exe_path().map_err(|e| {
+            anyhow::anyhow!("bitcoind not found (set BITCOIND_EXE or add to PATH): {e}")
+        })?,
+        &conf,
+    )?;
+    let mining_addr = regtest_mining_address();
+    bitcoind.client.call::<serde_json::Value>(
+        "generatetoaddress",
+        &[101.into(), mining_addr.to_string().into()],
+    )?;
+
+    let nats_port = free_port();
+    let temp_root = TempDir::new()?;
+    let nats = spawn_nats(nats_port, temp_root.path())?;
+
+    let controller_fixture = setup_controller_dir(JANITOR_TEST_TOML)?;
+    let collector_fixture = setup_collector_dir(
+        &bitcoind,
+        nats_port,
+        controller_fixture.grpc_port,
+        JANITOR_TEST_TOML,
+    )?;
+
+    let controller_storage = controller_fixture.dir.path().join("storage");
+    let collector_storage = collector_fixture.dir.path().join("storage");
+    let ldk_dir = collector_fixture.dir.path().join("ldk");
+
+    // Non-log files living in the janitored directories, including names that
+    // share the log prefixes but lack the strict `{prefix}.` dot. The real
+    // mnemonic is tracked too: the node reads it, nothing may rewrite it.
+    let seeded = vec![
+        SeededFile::create(
+            controller_storage.join("nodes_normalized_initial.csv"),
+            "pubkey,cluster\nabc,1\n",
+        )?,
+        SeededFile::create(
+            controller_storage.join("controller_graph-2020-01-01-00-00.zst"),
+            "not really zstd, must not be expired or recompressed",
+        )?,
+        SeededFile::create(
+            collector_storage.join("collector-backup.2020-01-01-00-00.zst"),
+            "prefix without the dot, must be ignored",
+        )?,
+        SeededFile::create(ldk_dir.join("ldk_node_backup.sqlite"), "fake sqlite")?,
+        SeededFile {
+            path: ldk_dir.join("mnemonic.txt"),
+            content: TEST_MNEMONIC.as_bytes().to_vec(),
+        },
+    ];
+
+    let mut controller = ChildGuard::spawn(
+        "observer_controller",
+        &controller_bin,
+        controller_fixture.dir.path(),
+        &[
+            ("CONTROLLER_MODE", "local"),
+            ("CONTROLLER_UUID", "integration-test-controller"),
+        ],
+    )?;
+    let mut collector = ChildGuard::spawn(
+        "gossip_collector",
+        &collector_bin,
+        collector_fixture.dir.path(),
+        &[("COLLECTOR_MODE", "local"), ("COLLECTOR_UUID", TEST_UUID)],
+    )?;
+
+    let mut dump = DumpLogsOnPanic {
+        guards: vec![&nats, &controller, &collector],
+        armed: true,
+    };
+
+    // Both daemons fully up and logging (heartbeats every 2s keep the
+    // collector's and controller's current log files busy).
+    wait_for_collector_online(controller_fixture.grpc_port).await?;
+
+    // Phase A: a closed minute gets compressed while the current minute's
+    // file stays plain. Files roll every minute and compress 60s after their
+    // minute starts, so the first archive lands ~2 minutes in.
+    wait_for(
+        "first compressed collector log + a live uncompressed one",
+        Duration::from_secs(180),
+        &seeded,
+        || {
+            let (plain, zst) = split_log_files(&collector_storage, "collector");
+            !zst.is_empty() && !plain.is_empty()
+        },
+    );
+    let first_zst = split_log_files(&collector_storage, "collector").1.remove(0);
+    println!("first compressed collector log: {first_zst}");
+
+    // The controller and the LDK node log their startup burst in their first
+    // minute, so each must eventually produce an archive of its own.
+    wait_for(
+        "compressed controller + ldk_node logs",
+        Duration::from_secs(180),
+        &seeded,
+        || {
+            !split_log_files(&controller_storage, "controller").1.is_empty()
+                && !split_log_files(&ldk_dir, "ldk_node").1.is_empty()
+        },
+    );
+
+    // Phase B: retention expires the oldest archive (120s after the minute it
+    // covers) while rotation keeps a live file going.
+    wait_for(
+        &format!("expiry of {first_zst}"),
+        Duration::from_secs(200),
+        &seeded,
+        || !collector_storage.join(&first_zst).exists(),
+    );
+    let (plain, _) = split_log_files(&collector_storage, "collector");
+    assert!(
+        !plain.is_empty(),
+        "rotation should still be producing a live collector log file"
+    );
+
+    // The node's own database next to the LDK logs must have been left alone.
+    assert!(ldk_dir.join("ldk_node_data.sqlite").exists());
+    assert!(!ldk_dir.join("ldk_node_data.sqlite.zst").exists());
+    for file in &seeded {
+        file.assert_untouched();
+    }
+
+    dump.armed = false;
+    drop(dump);
+
+    let collector_status = collector.signal_and_wait(Signal::SIGINT, Duration::from_secs(60));
+    assert!(
+        collector_status.success(),
+        "collector shutdown was unclean: {collector_status:?}\n{}",
+        collector.log_tail()
+    );
     let controller_status = controller.signal_and_wait(Signal::SIGINT, Duration::from_secs(30));
     assert!(
         controller_status.success(),

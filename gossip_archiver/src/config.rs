@@ -1,5 +1,5 @@
 use config::{Config, Environment, File};
-use observer_common::logging::ConsoleConfig;
+use observer_common::logging::{ConsoleConfig, LogRotationConfig};
 use serde::Deserialize;
 use std::env;
 
@@ -77,6 +77,7 @@ pub struct ArchiverConfig {
     pub database: Database,
     pub export: DataExport,
     pub console: ConsoleConfig,
+    pub log_rotation: LogRotationConfig,
     pub db_url: String,
     pub storage_dir: String,
     pub log_level: String,
@@ -123,6 +124,13 @@ impl ArchiverConfig {
             .set_default("console.listen_addr", "127.0.0.1")?
             .set_default("console.listen_port", 6670)?
             .set_default("console.retention_secs", 120)?
+            // Roll log files hourly; zstd-compress closed files after a day
+            // and delete them after 30 days, sweeping every 30 minutes. All
+            // handled by the in-process log janitor.
+            .set_default("log_rotation.rotation", "hourly")?
+            .set_default("log_rotation.compress_after_secs", 24 * 3600)?
+            .set_default("log_rotation.retention_secs", 30 * 24 * 3600)?
+            .set_default("log_rotation.sweep_interval_secs", 30 * 60)?
             .set_default("export.dir", export_dir)?
             // Our hypertables are compressed after 7 days, so this provides some buffer
             // before data export.

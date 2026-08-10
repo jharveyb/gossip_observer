@@ -41,3 +41,7 @@ infra/ansible/binaries/
 # Packet captures fetched by scripts/pull_pcaps.sh -- large, and they contain
 # peer IP addresses.
 /pcaps/
+
+# Pinned PGDG/TimescaleDB .debs staged for the timescaledb playbook (fetched
+# from do-medium; PGDG only serves the latest minor, so the pin lives here).
+infra/ansible/pgdg_cache/

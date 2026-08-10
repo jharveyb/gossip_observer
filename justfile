@@ -9,7 +9,7 @@ build-prod:
 
 clean-node-state:
     rm ./data/mainnet/ldk_node_data.sqlite
-    rm ./data/mainnet/ldk_node.log
+    rm -f ./data/mainnet/ldk_node.*
 
 clean-archiver-state:
     rm ./data/mainnet/gossip_archive.duckdb
@@ -19,7 +19,7 @@ clean-archiver-state:
 # PATH) and `nats-server` (NATS_SERVER_EXE or PATH).
 integration-test:
     cargo build -p gossip_collector -p observer_controller
-    cargo test -p integration_tests -- --ignored --nocapture
+    cargo test -p integration_tests -- --ignored --nocapture --test-threads 1
 
 gen-sql $SQLX_OFFLINE="false":
     cargo sqlx prepare --workspace

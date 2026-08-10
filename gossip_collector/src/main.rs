@@ -22,6 +22,7 @@ use tokio::time::{interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use observer_common::controller_client::ControllerClient;
+use observer_common::logging::JanitorTarget;
 
 mod config;
 mod exporter;
@@ -31,6 +32,7 @@ mod node_manager;
 mod peer_conn_manager;
 use crate::config::{ChainSource, CollectorConfig};
 use crate::exporter::NATSExporter;
+use crate::logger::LDK_LOG_PREFIX;
 use crate::node_manager::{balances, connected_peer_count, ldk_watchdog, next_address, stop_node};
 use crate::peer_conn_manager::{PeerConnManagerHandle, peer_count_monitor, pending_conn_sweeper};
 
@@ -48,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         &cfg.collector.log_level,
         Path::new(&cfg.collector.storage_dir),
         "collector",
+        cfg.log_rotation.rotation,
         Some(cfg.console.clone()),
     )?;
 
@@ -87,6 +90,17 @@ async fn async_main(
 
     let mut main_tasks = JoinSet::new();
     let stop_signal = CancellationToken::new();
+
+    // Compress + expire rotated log files: our own hourly JSON logs and the
+    // LDK node's hourly plain-text logs.
+    main_tasks.spawn(observer_common::logging::run_log_janitor(
+        vec![
+            JanitorTarget::new(&cfg.collector.storage_dir, "collector"),
+            JanitorTarget::new(&cfg.ldk.storage_dir, LDK_LOG_PREFIX),
+        ],
+        cfg.log_rotation.clone(),
+        stop_signal.child_token(),
+    ));
 
     let mut builder = ldk_node::Builder::new();
     builder.set_runtime(ldk_runtime.handle().clone());
@@ -181,11 +195,6 @@ async fn async_main(
 
     // Create an FS logger for normal node logs, and a separate handler for
     // gossip messages being exported by that node.
-    let log_file_path = format!(
-        "{}/{}",
-        &cfg.ldk.storage_dir,
-        ldk_node::config::DEFAULT_LOG_FILENAME
-    );
     let log_level = match cfg.ldk.log_level.to_lowercase().as_str() {
         "error" => LogLevel::Error,
         "warn" => LogLevel::Warn,
@@ -205,7 +214,12 @@ async fn async_main(
     log_filters.insert(rust_lightning_chan_announcement_warning.to_owned());
     log_filters.insert(rust_lightning_node_announcement_no_channels.to_owned());
     log_filters.insert(rust_lightning_query_channel_range.to_owned());
-    let fs_logger = crate::logger::Writer::new_fs_writer(log_file_path, log_level, log_filters)?;
+    let fs_logger = crate::logger::Writer::new_fs_writer(
+        &cfg.ldk.storage_dir,
+        cfg.log_rotation.rotation,
+        log_level,
+        log_filters,
+    )?;
 
     // Upper bound on number of seconds after the specified hour, that the
     // upload will start.
