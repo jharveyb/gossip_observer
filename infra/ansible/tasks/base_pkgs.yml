@@ -14,36 +14,35 @@
     state: present
   when: "'baremetal' in group_names"
 
-- name: Deploy gossip logrotate config
-  ansible.builtin.template:
-    src: gossip-logrotate.conf.j2
-    dest: /etc/logrotate.d/gossip
-    owner: root
-    group: root
-    mode: "0644"
+# Log rotation moved in-process (the daemons' log janitor compresses and
+# expires their own files), so the old logrotate config + timer are torn down.
+# The stock Debian logrotate.timer also processed /etc/logrotate.d/gossip, so
+# the config file removal is what actually stops external rotation.
+- name: Stop and disable gossip logrotate timer
+  ansible.builtin.systemd:
+    name: gossip-logrotate.timer
+    enabled: false
+    state: stopped
+  # Hosts provisioned after the removal never had the unit.
+  failed_when: false
 
-- name: Deploy gossip logrotate systemd units
-  ansible.builtin.template:
-    src: "{{ item }}"
-    dest: "/etc/systemd/system/{{ item | replace('.j2', '') }}"
-    owner: root
-    group: root
-    mode: "0644"
+- name: Remove gossip logrotate config and systemd units
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
   loop:
-    - gossip-logrotate.service.j2
-    - gossip-logrotate.timer.j2
-  register: logrotate_units
+    - /etc/logrotate.d/gossip
+    - /etc/systemd/system/gossip-logrotate.timer
+    - /etc/systemd/system/gossip-logrotate.service
+    # The enablement symlink, in case the stop/disable above was skipped
+    # by its failed_when guard.
+    - /etc/systemd/system/timers.target.wants/gossip-logrotate.timer
+  register: logrotate_removal
 
 - name: Reload systemd daemon
   ansible.builtin.systemd:
     daemon_reload: true
-  when: logrotate_units is changed
-
-- name: Enable gossip logrotate timer
-  ansible.builtin.systemd:
-    name: gossip-logrotate.timer
-    enabled: true
-    state: started
+  when: logrotate_removal is changed
 
 - name: Create journald drop-in directory
   ansible.builtin.file:

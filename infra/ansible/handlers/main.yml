@@ -29,9 +29,16 @@
     state: restarted
     daemon_reload: true
 
+# The D-Bus Reload() call has a ~25s timeout and can spuriously time out
+# while systemd is busy, even though the reload completes; retry instead of
+# failing the play.
 - name: Reload systemd config
   ansible.builtin.systemd:
     daemon_reload: true
+  register: systemd_reload
+  retries: 3
+  delay: 15
+  until: systemd_reload is success
 
 - name: Restart all gossip collectors
   ansible.builtin.systemd:
