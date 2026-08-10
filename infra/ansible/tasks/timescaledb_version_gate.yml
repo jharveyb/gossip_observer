@@ -1,0 +1,119 @@
+# Gate G2 — verify the pinned PostgreSQL/TimescaleDB stack (DB-migration
+# runbook). Every [timescale] host is asserted against the same pins from
+# group_vars/all.yml, so a passing run across all hosts proves they are
+# byte-identical where it matters: physical replication and file-level PGDATA
+# copies require the same server binaries and extension .so versions on both
+# ends, or the copied cluster will not start (or worse, will start and
+# misbehave).
+#
+# Run with:
+#   ansible-playbook -i inventory/hosts.ini timescaledb_init.yml --tags g2
+# No --limit: checking every timescale host against the pins is the point.
+# No vault needed: the g2 tag skips the vault-loading task.
+#
+# Hard asserts: package versions, pinned extension .so files, postgres binary
+# version, shared_preload_libraries. Informational only: apt-mark hold states
+# (do-medium historically holds a subset) and pg_isready (legitimately down
+# mid-migration).
+
+- name: "G2 | Read installed package versions"
+  ansible.builtin.command: dpkg-query -W -f='${Version}' {{ item.pkg }}
+  register: g2_pkg_versions
+  failed_when: false
+  changed_when: false
+  loop:
+    - { pkg: "postgresql-{{ postgresql_version }}", want: "{{ postgresql_package_version }}" }
+    - { pkg: "postgresql-client-{{ postgresql_version }}", want: "{{ postgresql_package_version }}" }
+    - { pkg: "postgresql-{{ postgresql_version }}-jit", want: "{{ postgresql_package_version }}" }
+    - { pkg: "timescaledb-2-postgresql-{{ postgresql_version }}", want: "{{ timescaledb_package_version }}" }
+    - { pkg: "timescaledb-2-loader-postgresql-{{ postgresql_version }}", want: "{{ timescaledb_package_version }}" }
+    - { pkg: "timescaledb-toolkit-postgresql-{{ postgresql_version }}", want: "{{ timescaledb_toolkit_package_version }}" }
+    - { pkg: "timescaledb-tools", want: "{{ timescaledb_tools_package_version }}" }
+  loop_control:
+    label: "{{ item.pkg }}"
+
+- name: "G2 | Assert package versions match the pins"
+  ansible.builtin.assert:
+    that:
+      - probe.rc == 0
+      - probe.stdout == probe.item.want
+    fail_msg: >-
+      {{ probe.item.pkg }}: installed
+      '{{ (probe.rc == 0) | ternary(probe.stdout, 'NOT INSTALLED') }}'
+      != pinned '{{ probe.item.want }}'
+    quiet: true
+  loop: "{{ g2_pkg_versions.results }}"
+  loop_control:
+    loop_var: probe
+    label: "{{ probe.item.pkg }}"
+
+# The versioned shared libraries are what the copied cluster will actually
+# dlopen — extversion in the DB must have a matching .so on disk. Filenames
+# carry the upstream version only (no Debian revision, no epoch).
+- name: "G2 | Stat pinned extension shared libraries"
+  ansible.builtin.stat:
+    path: "/usr/lib/postgresql/{{ postgresql_version }}/lib/{{ item }}"
+  register: g2_so_files
+  loop:
+    - "timescaledb-{{ timescaledb_package_version.split('~')[0] }}.so"
+    - "timescaledb-tsl-{{ timescaledb_package_version.split('~')[0] }}.so"
+    - "timescaledb_toolkit-{{ timescaledb_toolkit_package_version.split(':')[-1].split('~')[0] }}.so"
+
+- name: "G2 | Assert pinned extension shared libraries exist"
+  ansible.builtin.assert:
+    that: probe.stat.exists
+    fail_msg: "missing {{ probe.item }} in /usr/lib/postgresql/{{ postgresql_version }}/lib/"
+    quiet: true
+  loop: "{{ g2_so_files.results }}"
+  loop_control:
+    loop_var: probe
+    label: "{{ probe.item }}"
+
+- name: "G2 | Read postgres binary version"
+  ansible.builtin.command: /usr/lib/postgresql/{{ postgresql_version }}/bin/postgres --version
+  register: g2_pg_binary
+  changed_when: false
+
+- name: "G2 | Assert postgres binary matches the pin"
+  ansible.builtin.assert:
+    that: postgresql_package_version in g2_pg_binary.stdout
+    fail_msg: "postgres binary is '{{ g2_pg_binary.stdout }}', expected to contain '{{ postgresql_package_version }}'"
+    quiet: true
+
+- name: "G2 | Check shared_preload_libraries includes timescaledb"
+  ansible.builtin.command: >-
+    grep -E "^shared_preload_libraries.*timescaledb"
+    /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+  register: g2_preload
+  failed_when: false
+  changed_when: false
+
+- name: "G2 | Assert shared_preload_libraries includes timescaledb"
+  ansible.builtin.assert:
+    that: g2_preload.rc == 0
+    fail_msg: "shared_preload_libraries in postgresql.conf does not include timescaledb (timescaledb-tune never ran?)"
+    quiet: true
+
+# --- Informational (never fails the gate) ---
+
+- name: "G2 | Read apt-mark hold states"
+  ansible.builtin.command: dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' {{ item.pkg }}
+  register: g2_holds
+  failed_when: false
+  changed_when: false
+  loop: "{{ g2_pkg_versions.results | map(attribute='item') | list }}"
+  loop_control:
+    label: "{{ item.pkg }}"
+
+- name: "G2 | Check cluster responds (informational — down is expected mid-migration)"
+  ansible.builtin.command: pg_isready
+  register: g2_isready
+  failed_when: false
+  changed_when: false
+
+- name: "G2 | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "PASS: all pinned versions, extension .so files, binary, and preload config verified on {{ inventory_hostname }}"
+      - "hold states (want 'hi' on managed packages): {{ g2_holds.results | map(attribute='stdout') | map('trim') | list }}"
+      - "pg_isready: {{ (g2_isready.rc == 0) | ternary('accepting connections', 'not responding (expected if mid-migration)') }}"

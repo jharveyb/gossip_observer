@@ -74,20 +74,71 @@
   ansible.builtin.apt:
     update_cache: true
 
-- name: Install Postgres {{ postgresql_version }}
-  ansible.builtin.apt:
-    name:
-      - postgresql-{{ postgresql_version }}
-      - postgresql-client-{{ postgresql_version }}
-    state: present
+# Versions are pinned (group_vars/all.yml) and held below: replication and
+# file-level copies between timescale hosts require identical binaries.
+#
+# PGDG's main repo only serves the LATEST PG minor, so the pinned PostgreSQL
+# .debs are staged controller-side in {{ playbook_dir }}/pgdg_cache/
+# (gitignored; fetched from an existing timescale host's
+# /var/cache/apt/archives) and installed from file. Dependencies (libpq5 etc.)
+# still resolve from the repos.
+- name: Check installed PostgreSQL version
+  ansible.builtin.command: dpkg-query -W -f='${Version}' postgresql-{{ postgresql_version }}
+  register: pg_installed_version
+  failed_when: false
+  changed_when: false
 
+- name: Create staging directory for pinned packages
+  ansible.builtin.file:
+    path: /tmp/pgdg_cache
+    state: directory
+    mode: '0755'
+  when: pg_installed_version.stdout != postgresql_package_version
+
+- name: Stage pinned PostgreSQL packages
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/pgdg_cache/{{ item }}"
+    dest: "/tmp/pgdg_cache/{{ item }}"
+    mode: '0644'
+  loop:
+    - "postgresql-client-{{ postgresql_version }}_{{ postgresql_package_version }}_amd64.deb"
+    - "postgresql-{{ postgresql_version }}_{{ postgresql_package_version }}_amd64.deb"
+    - "postgresql-{{ postgresql_version }}-jit_{{ postgresql_package_version }}_amd64.deb"
+  when: pg_installed_version.stdout != postgresql_package_version
+
+- name: Install pinned PostgreSQL packages
+  ansible.builtin.apt:
+    deb: "/tmp/pgdg_cache/{{ item }}"
+  loop:
+    - "postgresql-client-{{ postgresql_version }}_{{ postgresql_package_version }}_amd64.deb"
+    - "postgresql-{{ postgresql_version }}_{{ postgresql_package_version }}_amd64.deb"
+    - "postgresql-{{ postgresql_version }}-jit_{{ postgresql_package_version }}_amd64.deb"
+  when: pg_installed_version.stdout != postgresql_package_version
+
+# The packagecloud repo still serves old TimescaleDB versions (unlike PGDG),
+# so these install by pinned name. pgdg_cache/ also holds copies of these
+# .debs as insurance should packagecloud ever prune them.
 - name: Install TimescaleDB
   ansible.builtin.apt:
     name:
-      - timescaledb-2-postgresql-{{ postgresql_version }}
-      - timescaledb-2-loader-postgresql-{{ postgresql_version }}
-      - timescaledb-toolkit-postgresql-{{ postgresql_version }}
+      - timescaledb-2-postgresql-{{ postgresql_version }}={{ timescaledb_package_version }}
+      - timescaledb-2-loader-postgresql-{{ postgresql_version }}={{ timescaledb_package_version }}
+      - timescaledb-toolkit-postgresql-{{ postgresql_version }}={{ timescaledb_toolkit_package_version }}
+      - timescaledb-tools={{ timescaledb_tools_package_version }}
     state: present
+    allow_downgrade: true
+
+- name: Hold pinned packages against unattended upgrades
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - "postgresql-{{ postgresql_version }}"
+    - "postgresql-client-{{ postgresql_version }}"
+    - "timescaledb-2-postgresql-{{ postgresql_version }}"
+    - "timescaledb-2-loader-postgresql-{{ postgresql_version }}"
+    - "timescaledb-toolkit-postgresql-{{ postgresql_version }}"
+    - "timescaledb-tools"
 
 # Run timescaledb-tune to configure PostgreSQL for TimescaleDB
 - name: Check if TimescaleDB is already in shared_preload_libraries
@@ -102,6 +153,17 @@
     timescaledb-tune --quiet --yes
   when: tsdb_preload_check.rc != 0
   changed_when: true
+  notify: Restart PostgreSQL
+
+# PGDATA location. Debian's conf always carries an explicit data_directory
+# line, so this is a pure replace. Only writes the setting — see the
+# postgresql_data_directory comment in group_vars/all.yml for how to relocate
+# an existing cluster (manual stop + rsync first, or postgres won't start).
+- name: Configure PostgreSQL data_directory
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql/{{ postgresql_version }}/main/postgresql.conf
+    regexp: "^#?data_directory"
+    line: "data_directory = '{{ postgresql_data_directory }}'"
   notify: Restart PostgreSQL
 
 # Allow connections from Tailscale

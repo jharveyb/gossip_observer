@@ -1,7 +1,6 @@
 # Proxmox-specific DNS and network configuration for Tailscale setup.
 # Only called for hosts in the [proxmox] group
 #
-
-# set tailscale to not overwrite resolv.conf by default
-# populate / edit resolv.conf to add tailscale entries
-# or will with work OOTB with systemd-resolved?
+# Our Debian 13 base image already uses systemd-resolved, nothing to do here.
+# We also skip the firewall task, since these VMs are behind NAT anyways, and
+# we aren't opening any public ports.

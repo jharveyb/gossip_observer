@@ -1,6 +1,8 @@
 [Unit]
 Description=Gossip Archiver %i
-After=network-online.target postgresql.service nats-server-prod.service
+# Order after the actual PG cluster unit (postgresql.service is only the Debian
+# wrapper and never restarts with the cluster). 
+After=network-online.target postgresql@{{ postgresql_version }}-main.service
 Wants=network-online.target
 
 [Service]

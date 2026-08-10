@@ -73,6 +73,26 @@ controller_staging: "http://do-medium:50060"
 controller_prod: "http://do-medium:50061"
 
 postgresql_version: "18"
+# Exact package pins for every [timescale] host. Physical replication and
+# file-level copies require byte-identical server + extension .so versions
+# across hosts, and pg_dump/restore requires matching extension versions — so
+# these are pinned and apt-mark held rather than 'state: present' latest.
+# Values discovered from do-medium (dpkg -l | grep -E 'postgresql-18|timescaledb').
+# The matching .debs are staged in infra/ansible/pgdg_cache/ (gitignored) —
+# PGDG's repo only serves the latest minor, so PostgreSQL installs from there.
+# To upgrade: bump here, then apply to ALL timescale hosts in one maintenance
+# window with the archivers stopped first (ack-before-write loses messages if
+# postgres restarts under a running archiver).
+postgresql_package_version: "18.1-1.pgdg13+2"
+timescaledb_package_version: "2.24.0~debian13-1801"
+timescaledb_toolkit_package_version: "1:1.22.0~debian13"
+timescaledb_tools_package_version: "0.18.1~debian13"
+# PGDATA location, written into postgresql.conf by tasks/timescaledb.yml.
+# Debian's default; override per host in inventory/host_vars/<host>.yml when
+# the cluster lives on a separate volume (do-medium does). NOTE: the playbook
+# only writes the setting — relocating an EXISTING cluster is manual:
+# stop postgres → rsync -a old/ new/ → set the override → re-run the playbook.
+postgresql_data_directory: "/var/lib/postgresql/{{ postgresql_version }}/main"
 timescaledb_database_name: "gossip_observer"
 timescaledb_staging_database_name: "gossip_observer_staging"
 

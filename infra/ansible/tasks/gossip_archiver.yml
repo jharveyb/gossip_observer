@@ -36,13 +36,28 @@
     mode: "0755"
   loop: "{{ ['/var/lib/gossip_archiver', '/etc/gossip_archiver'] | product(host_archivers) }}"
 
+# Parquet export + DuckDB spill location. Not a mount — the underlying volume
+# (archiver_export_dir_base) must already exist; this just ensures the
+# per-instance directory is present and writable before first export tick.
+- name: Create export directories
+  ansible.builtin.file:
+    path: "{{ item.export_dir }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: "0755"
+  loop: "{{ host_archivers }}"
+  when: item.export_dir is defined
+
+# 0640: config.toml holds the DB password and the Garage S3 secret (same
+# treatment as the collector's config).
 - name: Deploy archiver config files
   ansible.builtin.template:
     src: archiver_config.toml.j2
     dest: "/etc/gossip_archiver/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
-    mode: "0644"
+    mode: "0640"
   loop: "{{ host_archivers }}"
   notify: Restart all gossip archivers
 

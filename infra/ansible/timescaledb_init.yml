@@ -12,6 +12,13 @@
         - name: Import timescaledb tasks
           ansible.builtin.import_tasks: tasks/timescaledb.yml
 
+    # Gate G2 (DB-migration runbook): pinned-version verification across the
+    # [timescale] hosts. 'never' keeps it out of normal runs — invoke with
+    # --tags version_check (no vault pass needed; the vault task above is skipped).
+    - name: Verify pinned DB stack versions (gate G2)
+      ansible.builtin.import_tasks: tasks/timescaledb_version_gate.yml
+      tags: [version_check, never]
+
   handlers:
     - name: Import handlers
       ansible.builtin.import_tasks: handlers/main.yml
