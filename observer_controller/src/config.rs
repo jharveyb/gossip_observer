@@ -64,6 +64,7 @@ impl ControllerConfig {
             // All default config values
             .set_default("grpc.hostname", "127.0.0.1")?
             .set_default("grpc.port", 50051)?
+            .set_default("console.enabled", false)?
             .set_default("console.listen_addr", "127.0.0.1")?
             .set_default("console.listen_port", 6671)?
             .set_default("console.retention_secs", 120)?

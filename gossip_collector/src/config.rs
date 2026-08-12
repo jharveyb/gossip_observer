@@ -213,6 +213,10 @@ impl CollectorConfig {
             .set_default("nats.stream", "observer")?
             // Our NATS messages should be ~500kB.
             .set_default("nats.batch_size", 1024)?
+            // Opt-in: the console aggregator retains a record per spawned task
+            // for `retention_secs`, so any high task-churn path causes significant
+            // memory use.
+            .set_default("console.enabled", false)?
             .set_default("console.listen_addr", "127.0.0.1")?
             .set_default("console.listen_port", 6669)?
             .set_default("console.retention_secs", 120)?

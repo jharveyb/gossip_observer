@@ -121,6 +121,7 @@ impl ArchiverConfig {
             .set_default("database.batch_size", 10000)?
             // We'll have mandatory flushes on this interval.
             .set_default("database.flush_interval", 5)?
+            .set_default("console.enabled", false)?
             .set_default("console.listen_addr", "127.0.0.1")?
             .set_default("console.listen_port", 6670)?
             .set_default("console.retention_secs", 120)?

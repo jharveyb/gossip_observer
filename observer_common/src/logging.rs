@@ -15,8 +15,13 @@ use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Configuration for tokio-console integration.
+///
+/// The aggregator retains per-task/resource records for `retention_secs` and
+/// holds an event buffer whether or not a client is attached, so `enabled`
+/// exists to turn that cost off on memory-constrained hosts.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsoleConfig {
+    pub enabled: bool,
     pub listen_addr: String,
     pub listen_port: u16,
     pub retention_secs: u16,
@@ -330,16 +335,15 @@ pub fn init_logging(
         .pretty();
 
     // Optional tokio-console layer for async debugging (unfiltered - needs TRACE events)
-    let console_layer = if let Some(cfg) = console_config {
-        Some(
+    let console_layer = match console_config {
+        Some(cfg) if cfg.enabled => Some(
             console_subscriber::ConsoleLayer::builder()
                 .event_buffer_capacity(1024 * 10)
                 .retention(Duration::from_secs(cfg.retention_secs.into()))
                 .server_addr((IpAddr::from_str(&cfg.listen_addr)?, cfg.listen_port))
                 .spawn(),
-        )
-    } else {
-        None
+        ),
+        _ => None,
     };
 
     // Apply env_filter per-layer so it doesn't filter tokio TRACE events needed by console_layer.
