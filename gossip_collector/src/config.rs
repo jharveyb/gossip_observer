@@ -227,6 +227,10 @@ impl CollectorConfig {
             .set_default("log_rotation.compress_after_secs", 24 * 3600)?
             .set_default("log_rotation.retention_secs", 30 * 24 * 3600)?
             .set_default("log_rotation.sweep_interval_secs", 30 * 60)?
+            // Keep compression clear of startup, and de-sync sibling instances
+            // sharing a host; cap per-sweep work so a backlog is spread out.
+            .set_default("log_rotation.startup_delay_max_secs", 300)?
+            .set_default("log_rotation.max_compressions_per_pass", 20)?
             .set_default("collector.connection_sweeper_interval", 60)?
             // Wait 10 minutes pefore exporting peer messages.
             .set_default("collector.pending_connection_delay", 10 * 60)?

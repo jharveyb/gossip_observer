@@ -211,6 +211,8 @@ rotation = "minutely"
 compress_after_secs = 60
 retention_secs = 120
 sweep_interval_secs = 5
+startup_delay_max_secs = 1
+max_compressions_per_pass = 20
 "#;
 
 fn setup_controller_dir(extra_toml: &str) -> Result<ControllerFixture> {
@@ -634,6 +636,11 @@ async fn log_janitor_rotation() -> Result<()> {
             content: TEST_MNEMONIC.as_bytes().to_vec(),
         },
     ];
+    // NOTE: the poison-pill case (a source plus a leftover `.zst.tmp` from a
+    // compression killed mid-write) is deliberately *not* asserted here. This
+    // test runs with a 120 s retention, so any seeded source is legitimately
+    // expired before it can demonstrate "skipped, not retried". It is covered
+    // precisely in `observer_common::logging`'s unit tests, which pin `now`.
 
     let mut controller = ChildGuard::spawn(
         "observer_controller",

@@ -9,7 +9,6 @@ workspace = true
 [dependencies]
 
 anyhow = "1.0"
-async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 bitcoin = { version = "0.32.4", features = ["std", "secp-recovery", "serde"] }
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = [
@@ -21,8 +20,10 @@ lightning = { version = "0.2", features = ["std"] }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_with = { version = "3.16.1", features = ["json", "hex"] }
+rand = "0.9"
 tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-util = "0.7"
+zstd = "0.13"
 tonic = { version = "0.14", features = [
         "router",
         "transport",

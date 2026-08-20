@@ -132,6 +132,8 @@ impl ArchiverConfig {
             .set_default("log_rotation.compress_after_secs", 24 * 3600)?
             .set_default("log_rotation.retention_secs", 30 * 24 * 3600)?
             .set_default("log_rotation.sweep_interval_secs", 30 * 60)?
+            .set_default("log_rotation.startup_delay_max_secs", 300)?
+            .set_default("log_rotation.max_compressions_per_pass", 20)?
             .set_default("export.dir", export_dir)?
             // Our hypertables are compressed after 7 days, so this provides some buffer
             // before data export.

@@ -1,12 +1,11 @@
 use anyhow::Context;
-use async_compression::tokio::write::ZstdEncoder;
 use chrono::{DateTime, DurationRound, NaiveDate, TimeDelta, Utc};
+use rand::Rng;
 use serde::Deserialize;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -73,6 +72,13 @@ pub struct LogRotationConfig {
     pub retention_secs: u32,
     /// Seconds between janitor sweeps.
     pub sweep_interval_secs: u32,
+    /// The first sweep is delayed by a random 0..=this many seconds. Keeps
+    /// compression away from process startup (so it can never be driven by a
+    /// restart loop) and de-synchronises sibling instances sharing a host.
+    pub startup_delay_max_secs: u32,
+    /// Compressions attempted per sweep, per target. A large backlog is spread
+    /// over sweeps instead of burned through in one long burst.
+    pub max_compressions_per_pass: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,27 +129,38 @@ pub async fn run_log_janitor(
     cfg: LogRotationConfig,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    // Jittered start: compression must never overlap process startup (or a
+    // restart loop could drive it), and sibling instances on one host must not
+    // sweep in lockstep.
+    let startup_delay =
+        Duration::from_secs(rand::rng().random_range(0..=u64::from(cfg.startup_delay_max_secs)));
     info!(
         ?targets,
         rotation = ?cfg.rotation,
         compress_after_secs = cfg.compress_after_secs,
         retention_secs = cfg.retention_secs,
         sweep_interval_secs = cfg.sweep_interval_secs,
+        max_compressions_per_pass = cfg.max_compressions_per_pass,
+        startup_delay_secs = startup_delay.as_secs(),
         "Log janitor: starting"
     );
+
     let sweep_interval = Duration::from_secs(cfg.sweep_interval_secs.into());
+    let mut delay = startup_delay;
     loop {
-        for target in &targets {
-            if let Err(e) = janitor_pass(target, &cfg, Utc::now()).await {
-                warn!(error = %e, dir = %target.dir.display(), "Log janitor: pass failed");
-            }
-        }
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Log janitor: shutting down");
                 return Ok(());
             }
-            _ = tokio::time::sleep(sweep_interval) => {}
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = sweep_interval;
+
+        for target in &targets {
+            if let Err(e) = janitor_pass(target, &cfg, Utc::now()).await {
+                warn!(error = %e, dir = %target.dir.display(), "Log janitor: pass failed");
+            }
         }
     }
 }
@@ -193,47 +210,90 @@ async fn janitor_pass(
     // listing the directory by mtime matches chronological order.
     candidates.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
 
-    for (path, name, file_time) in candidates {
-        if let Err(e) = janitor_file(&path, &name, file_time, rotation_cfg, now).await {
-            warn!(error = %e, path = %path.display(), "Log janitor: skipping file");
+    let mut compressions = 0;
+    let total = candidates.len();
+    for (idx, (path, name, file_time)) in candidates.into_iter().enumerate() {
+        if compressions >= cfg.max_compressions_per_pass {
+            info!(
+                dir = %target.dir.display(),
+                deferred = total - idx,
+                "Log janitor: per-pass compression budget reached, deferring rest to next sweep"
+            );
+            break;
+        }
+        match janitor_file(&path, &name, file_time, rotation_cfg, now).await {
+            Ok(true) => compressions += 1,
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, path = %path.display(), "Log janitor: skipping file"),
         }
     }
     Ok(())
 }
 
+/// Handle one candidate. Returns whether it compressed (which the caller
+/// budgets), as opposed to expiring/skipping it.
 async fn janitor_file(
     path: &Path,
     name: &str,
     file_time: DateTime<Utc>,
     rotation_cfg: RotationConfigDeltas,
     now: DateTime<Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let age = now - file_time;
+
+    // Checked before the age guard: an orphaned temp file has a *fresh* mtime,
+    // so the guard below would skip it forever. A temp file only survives if
+    // the process died mid-compression (compress_file cleans up its own on
+    // error), so while its source is still present we deliberately keep it as
+    // a durable "this file killed us" marker — see the poison-pill guard.
+    if let Some(source_name) = name.strip_suffix(TMP_SUFFIX) {
+        if path.with_file_name(source_name).exists() {
+            return Ok(false);
+        }
+        info!(path = %path.display(), "Log janitor: removing orphaned temp file");
+        tokio::fs::remove_file(path).await?;
+        return Ok(false);
+    }
 
     // Never touch a file that may still be written to: the current period's
     // file (its period-start is less than one period old) or anything with a
     // fresh mtime.
     if age < rotation_cfg.period {
-        return Ok(());
-    }
-
-    // Leftover temp file from a compression attempt that died mid-write; the
-    // original is still present and will be recompressed.
-    if name.ends_with(TMP_SUFFIX) {
-        info!(path = %path.display(), "Log janitor: removing stale temp file");
-        return tokio::fs::remove_file(path).await.map_err(Into::into);
+        return Ok(false);
     }
 
     if age > rotation_cfg.retain_for {
         info!(path = %path.display(), "Log janitor: expiring old log file");
-        return tokio::fs::remove_file(path).await.map_err(Into::into);
+        tokio::fs::remove_file(path).await?;
+        return Ok(false);
     }
 
     if !name.ends_with(ZSTD_SUFFIX) && age > rotation_cfg.compress_after {
+        // Poison-pill guard: a leftover temp file means a previous attempt on
+        // this exact source died (OOM, SIGKILL, power loss). Retrying it every
+        // sweep is how one pathological file turns into a restart loop, so
+        // skip it permanently and make it loud. Delete the .zst.tmp by hand to
+        // re-arm, or let retention expire the source.
+        let mut tmp_os = path.as_os_str().to_owned();
+        tmp_os.push(TMP_SUFFIX);
+        if Path::new(&tmp_os).exists() {
+            warn!(
+                path = %path.display(),
+                "Log janitor: skipping file, a previous compression of it did not finish \
+                 (remove the .zst.tmp to retry)"
+            );
+            return Ok(false);
+        }
+
+        let bytes = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         compress_file(path).await?;
-        info!(path = %path.display(), "Log janitor: compressed log file");
+        info!(path = %path.display(), bytes, "Log janitor: compressed log file");
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Parse the leading `YYYY-MM-DD-HH` (hourly) or `YYYY-MM-DD-HH-MM` (minutely)
@@ -255,10 +315,29 @@ fn parse_file_stamp(rest: &str) -> Option<DateTime<Utc>> {
     Some(date.and_hms_opt(hour, minute, 0)?.and_utc())
 }
 
+/// Read buffer capacity for compression.
+const COMPRESS_BUF_SIZE: usize = 256 * 1024;
+
 /// Zstd-compress `path` to `{path}.zst` and remove the original. The output is
 /// staged as `{path}.zst.tmp` and only renamed into place after a successful
 /// full write + fsync, so the source is never lost to a partial compression.
+///
+/// Use sync code here, as tokio IO traits are bad for large file operations:
+/// https://docs.rs/tokio/latest/tokio/fs/index.html#tuning-your-file-io
+///
+/// std::io::copy should be 'zero-copy' on Linux via `copy_file_range`:
+/// https://doc.rust-lang.org/stable/std/io/fn.copy.html#platform-specific-behavior
+///
+/// The tokio equivlent spawns a blocking task per 8 KiB input, which floods the
+/// same blocking pool `node_manager::node_call` uses, and
+/// (with tokio-console enabled) retains a task record for each.
+/// That combination caused the 2026-08-11 OOM; see `.claude/rules/rust.md`.
 async fn compress_file(path: &Path) -> anyhow::Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || compress_file_blocking(&path)).await?
+}
+
+fn compress_file_blocking(path: &Path) -> anyhow::Result<()> {
     let mut tmp_os = path.as_os_str().to_owned();
     tmp_os.push(TMP_SUFFIX);
     let tmp_path = PathBuf::from(tmp_os);
@@ -266,23 +345,32 @@ async fn compress_file(path: &Path) -> anyhow::Result<()> {
     final_os.push(ZSTD_SUFFIX);
     let final_path = PathBuf::from(final_os);
 
-    let write_compressed = async {
-        let mut src = tokio::io::BufReader::new(tokio::fs::File::open(path).await?);
-        let tmp = tokio::fs::File::create(&tmp_path).await?;
-        let mut encoder = ZstdEncoder::new(tokio::io::BufWriter::new(tmp));
-        tokio::io::copy_buf(&mut src, &mut encoder).await?;
-        // Finish the zstd frame and flush the BufWriter through to the file.
-        encoder.shutdown().await?;
-        encoder.into_inner().into_inner().sync_all().await?;
-        anyhow::Ok(())
+    let write_compressed = || -> anyhow::Result<()> {
+        // `io::copy` specializes on a `BufReader` source: it copies straight out
+        // of the reader's own buffer, so the chunk size is COMPRESS_BUF_SIZE
+        // rather than the 8 KiB it would otherwise default to. The encoder does
+        // its own output buffering, so no `BufWriter` is needed.
+        let mut src =
+            std::io::BufReader::with_capacity(COMPRESS_BUF_SIZE, std::fs::File::open(path)?);
+        let tmp = std::fs::File::create(&tmp_path)?;
+
+        // Level 0 selects zstd's default (3).
+        let mut encoder = zstd::stream::write::Encoder::new(tmp, 0)?;
+        std::io::copy(&mut src, &mut encoder)?;
+
+        // Finish the zstd frame, then fsync before the rename below makes the
+        // archive authoritative.
+        let tmp = encoder.finish()?;
+        tmp.sync_all()?;
+        Ok(())
     };
-    if let Err(e) = write_compressed.await {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
+    if let Err(e) = write_compressed() {
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(e.context(format!("Failed to compress {}", path.display())));
     }
 
-    tokio::fs::rename(&tmp_path, &final_path).await?;
-    tokio::fs::remove_file(path).await?;
+    std::fs::rename(&tmp_path, &final_path)?;
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -364,7 +452,19 @@ pub fn init_logging(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+
+    /// Config with generous production-shaped limits; individual tests override
+    /// the fields they exercise.
+    fn test_cfg(rotation: LogRotation) -> LogRotationConfig {
+        LogRotationConfig {
+            rotation,
+            compress_after_secs: 3600,
+            retention_secs: 30 * 24 * 3600,
+            sweep_interval_secs: 1800,
+            startup_delay_max_secs: 1,
+            max_compressions_per_pass: 100,
+        }
+    }
 
     #[test]
     fn parses_appender_file_stamps() {
@@ -396,25 +496,16 @@ mod tests {
         )
     }
 
-    async fn decompress(path: &Path) -> Vec<u8> {
-        let file = tokio::fs::File::open(path).await.expect("open zst");
-        let mut decoder =
-            async_compression::tokio::bufread::ZstdDecoder::new(tokio::io::BufReader::new(file));
-        let mut out = Vec::new();
-        decoder.read_to_end(&mut out).await.expect("decode zst");
-        out
+    fn decompress(path: &Path) -> Vec<u8> {
+        let bytes = std::fs::read(path).expect("open zst");
+        zstd::stream::decode_all(&bytes[..]).expect("decode zst")
     }
 
     #[tokio::test]
     async fn janitor_pass_compresses_expires_and_skips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
-        let cfg = LogRotationConfig {
-            rotation: LogRotation::Hourly,
-            compress_after_secs: 3600,
-            retention_secs: 30 * 24 * 3600,
-            sweep_interval_secs: 1800,
-        };
+        let cfg = test_cfg(LogRotation::Hourly);
         let target = JanitorTarget::new(dir.path(), "collector");
 
         let current = hour_name("collector", TimeDelta::zero());
@@ -424,7 +515,9 @@ mod tests {
         let compressed = hour_name("collector", TimeDelta::hours(5)) + ".zst";
         let expired = hour_name("collector", TimeDelta::days(40));
         let legacy_expired = hour_name("collector", TimeDelta::days(40)) + ".1.zst";
-        let stale_tmp = hour_name("collector", TimeDelta::hours(3)) + ".zst.tmp";
+        // Orphan: no source file at this hour, so it is swept. (A tmp whose
+        // source still exists is a poison pill and is covered separately.)
+        let stale_tmp = hour_name("collector", TimeDelta::hours(12)) + ".zst.tmp";
         // Unparseable name -> mtime fallback; freshly created, so untouched.
         let fresh_mtime = "collector.log";
         // Prefix matching is strict about the dot: neither of these may be touched.
@@ -453,7 +546,7 @@ mod tests {
         let exists = |name: &str| dir.path().join(name).exists();
         // Closed hour compressed in place, contents intact.
         assert!(!exists(&closed), "closed file should be replaced by .zst");
-        let round_trip = decompress(&dir.path().join(format!("{closed}.zst"))).await;
+        let round_trip = decompress(&dir.path().join(format!("{closed}.zst")));
         assert_eq!(round_trip, format!("contents of {closed}\n").into_bytes());
         // Candidates are processed oldest-first, so the archives' mtimes must
         // follow log order (listing by mtime = chronological order).
@@ -479,7 +572,8 @@ mod tests {
             !exists(&legacy_expired),
             "legacy logrotate output should be expired"
         );
-        assert!(!exists(&stale_tmp), "stale temp file should be removed");
+        // The tmp's source was compressed away, so the orphan is swept.
+        assert!(!exists(&stale_tmp), "orphaned temp file should be removed");
         assert!(
             exists(fresh_mtime),
             "fresh unparseable file must not be touched"
@@ -504,10 +598,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = Utc::now();
         let cfg = LogRotationConfig {
-            rotation: LogRotation::Minutely,
             compress_after_secs: 60,
             retention_secs: 120,
             sweep_interval_secs: 5,
+            ..test_cfg(LogRotation::Minutely)
         };
         let target = JanitorTarget::new(dir.path(), "collector");
 
@@ -540,14 +634,104 @@ mod tests {
         );
     }
 
+    /// A leftover `.zst.tmp` means a previous attempt on that source died. The
+    /// source must be skipped permanently rather than retried every sweep —
+    /// that retry loop is what turned one 3 GB file into a boot loop on
+    /// 2026-08-11.
+    #[tokio::test]
+    async fn poison_pill_tmp_blocks_retry_and_survives_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let cfg = test_cfg(LogRotation::Hourly);
+        let target = JanitorTarget::new(dir.path(), "collector");
+
+        let poisoned = hour_name("collector", TimeDelta::hours(3));
+        let healthy = hour_name("collector", TimeDelta::hours(4));
+        std::fs::write(dir.path().join(&poisoned), "would have OOMed us").unwrap();
+        std::fs::write(dir.path().join(&healthy), "fine").unwrap();
+        // Simulate a compression killed mid-write: partial tmp, source intact.
+        std::fs::write(dir.path().join(format!("{poisoned}.zst.tmp")), "partial").unwrap();
+
+        for _ in 0..3 {
+            janitor_pass(&target, &cfg, now).await.expect("pass");
+        }
+
+        let exists = |name: &str| dir.path().join(name).exists();
+        assert!(exists(&poisoned), "poisoned source must be left alone");
+        assert!(
+            !exists(&format!("{poisoned}.zst")),
+            "poisoned source must not be recompressed"
+        );
+        assert!(
+            exists(&format!("{poisoned}.zst.tmp")),
+            "tmp marker must persist across passes, or the guard forgets"
+        );
+        // ...and the rest of the backlog still gets processed.
+        assert!(
+            !exists(&healthy) && exists(&format!("{healthy}.zst")),
+            "one poisoned file must not starve the other candidates"
+        );
+    }
+
+    /// The tmp check must run *before* the age guard: an orphan has a fresh
+    /// mtime, so an age-first ordering skips it forever.
+    #[tokio::test]
+    async fn orphaned_tmp_with_fresh_mtime_is_swept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = test_cfg(LogRotation::Hourly);
+        let target = JanitorTarget::new(dir.path(), "collector");
+
+        // No matching source => the compression finished or the source is gone.
+        let orphan = "collector.2020-01-01-00.zst.tmp";
+        std::fs::write(dir.path().join(orphan), "partial").unwrap();
+
+        janitor_pass(&target, &cfg, Utc::now()).await.expect("pass");
+        assert!(
+            !dir.path().join(orphan).exists(),
+            "orphaned tmp must be swept despite its fresh mtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_budget_defers_backlog_to_later_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let cfg = LogRotationConfig {
+            max_compressions_per_pass: 2,
+            ..test_cfg(LogRotation::Hourly)
+        };
+        let target = JanitorTarget::new(dir.path(), "collector");
+
+        let names: Vec<String> = (2..=6)
+            .map(|h| hour_name("collector", TimeDelta::hours(h)))
+            .collect();
+        for name in &names {
+            std::fs::write(dir.path().join(name), "x").unwrap();
+        }
+
+        let zst_count = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".zst")
+                })
+                .count()
+        };
+        janitor_pass(&target, &cfg, now).await.expect("pass 1");
+        assert_eq!(zst_count(), 2, "budget caps compressions per pass");
+        janitor_pass(&target, &cfg, now).await.expect("pass 2");
+        assert_eq!(zst_count(), 4, "backlog resumes on the next sweep");
+        janitor_pass(&target, &cfg, now).await.expect("pass 3");
+        assert_eq!(zst_count(), 5, "backlog drains");
+    }
+
     #[tokio::test]
     async fn janitor_pass_missing_dir_errors_but_is_survivable() {
-        let cfg = LogRotationConfig {
-            rotation: LogRotation::Hourly,
-            compress_after_secs: 24 * 3600,
-            retention_secs: 30 * 24 * 3600,
-            sweep_interval_secs: 1800,
-        };
+        let cfg = test_cfg(LogRotation::Hourly);
         let target = JanitorTarget::new("/nonexistent/log/dir", "collector");
         assert!(janitor_pass(&target, &cfg, Utc::now()).await.is_err());
     }
