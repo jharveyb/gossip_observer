@@ -34,6 +34,42 @@ A collector survived its own fatal error as a zombie: panicked exporter → root
 - **Leave SIGQUIT unhandled** — it's the operator's kill-with-core-dump escape hatch for a wedged process; catching it would destroy the diagnostic.
 - The collector unit sets `TimeoutStopSec=150` so systemd's SIGKILL lands *after* the 90s LDK-stop cap + 120s deadman. Keep those three numbers ordered if any of them change.
 
+## tokio-console is opt-in — it is a memory bomb under task churn (2026-08-11 OOM)
+`console_subscriber`'s aggregator keeps a record for **every spawned task** (including
+`spawn_blocking`) for `console.retention_secs`, whether or not a client is attached. Steady-state
+RSS ≈ *task-spawn rate × retention*, with no ceiling. Measured on the collector compressing one
+3 GB log (`tokio::fs` dispatches **one `spawn_blocking` per 8 KiB** → ~390k tasks):
+
+| `console.enabled` | RSS |
+|---|---|
+| `true` (retention 120s, the old prod default) | 5.5 GB @25s → 9.1 GB @75s, still climbing |
+| `true`, retention 5s | plateaus ~2.5 GB |
+| `false` | **flat ~180 MB** |
+
+- **`console.enabled` defaults to `false` in all three crates.** Turn it on per-instance only
+  while actively attaching `tokio-console`, and prefer a small `retention_secs` when you do.
+- **Any new high-frequency `spawn_blocking` path is a memory risk while console is on.** Prefer
+  one long-lived blocking task over many small ones (`tokio::fs` in a byte-copy loop is the
+  anti-pattern; use sync `std::fs` inside a single `spawn_blocking`).
+- **Bulk file IO is sync-inside-one-`spawn_blocking` everywhere.** Two implementations to copy
+  from: `observer_common::logging::compress_file` (log files) and
+  `observer_controller::json_writer` (graph dumps — `serde_json::to_writer` straight into a
+  `zstd::stream::write::Encoder`, so a 112 MB graph is never materialized as a `Vec<u8>`;
+  measured RSS delta for that write is ~0). `async-compression` was removed from the workspace
+  in the process — don't reintroduce it for files. Everything else that still calls `tokio::fs`
+  (the archiver's export paths, the janitor's `read_dir`) is a **single** metadata/dir syscall,
+  which is fine; the rule is about streaming bytes.
+- Debugging note: this is invisible in unit tests — no subscriber is installed, so the same code
+  shows a few MiB of growth. Reproduce with the real binary, or you will exonerate the wrong
+  component (we did, twice).
+
+## Logging & rotation
+- **Log rotation is in-process — never reintroduce logrotate/external rotation.** Every daemon spawns `observer_common::logging::run_log_janitor`, which zstd-compresses closed rolled files after `log_rotation.compress_after_secs` (default 1 day) and deletes them after `log_rotation.retention_secs` (default 30 days), sweeping every `sweep_interval_secs` (default 30 min). It only touches regular files named `{prefix}.*` (**strict dot** — that's what protects `controller_graph-*.zst`, `ldk_node_data.sqlite`, etc. sharing the storage dir); keep that invariant when naming new artifacts. File age comes from the filename timestamp suffix, mtime as fallback; the current rotation period is never touched.
+- `log_rotation.rotation` is `"hourly"` in production; `"minutely"` exists **for tests only** (the janitor integration test watches a full roll → compress → expire cycle in ~3 minutes).
+- **Compression runs in one `spawn_blocking` with sync `std::fs` + `zstd` and a 256 KiB buffer** — never `tokio::fs` in a copy loop, which dispatches a blocking task per 8 KiB (see the tokio-console section above). `startup_delay_max_secs` jitters the first sweep so compression never overlaps startup or runs in lockstep across sibling instances; `max_compressions_per_pass` spreads a backlog over sweeps.
+- **A leftover `{file}.zst.tmp` is a poison-pill marker, not garbage.** `compress_file` removes its own temp on error, so one surviving a restart means the *process died* compressing that file. While the source still exists the janitor skips it permanently and warns (delete the `.zst.tmp` to re-arm); the temp is only swept once its source is gone. The temp check runs **before** the age guard — an orphan has a fresh mtime and would otherwise be skipped forever.
+- The collector's LDK logger (`gossip_collector/src/logger.rs`) rolls to `ldk_node.<timestamp>` on the same cadence/naming as `tracing_appender` and writes **best-effort**: a failed open/write logs once to stderr and drops lines — a full disk must not panic inside an LDK thread.
+
 ## Resilience
 - **Reconnect loops, don't exit on disconnect.** The NATS client loops with 5s retry sleeps and reconnects on normal exit (`gossip_archiver/src/nats.rs`).
 - **One bad message must not kill a pipeline** — `match … { Err(e) => { warn!(…); continue } }`, validate UTF-8 before parsing, distinguish channel-closure from send errors. Avoid `.unwrap()`/`.expect()` on external data (timestamps, payloads).
