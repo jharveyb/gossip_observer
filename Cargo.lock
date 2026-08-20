@@ -293,18 +293,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.39"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68650b7df54f0293fd061972a0fb05aaf4fc0879d3b3d21a638a182c5c543b9f"
-dependencies = [
- "compression-codecs",
- "compression-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-duckdb"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -872,23 +860,6 @@ dependencies = [
  "strum_macros 0.26.4",
  "unicode-width",
 ]
-
-[[package]]
-name = "compression-codecs"
-version = "0.4.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00828ba6fd27b45a448e57dbfe84f1029d4c9f26b368157e9a448a5f49a2ec2a"
-dependencies = [
- "compression-core",
- "zstd",
- "zstd-safe",
-]
-
-[[package]]
-name = "compression-core"
-version = "0.4.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
 name = "concurrent-queue"
@@ -3085,7 +3056,6 @@ name = "observer_controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "bitcoin",
  "chrono",
  "config",
@@ -3098,12 +3068,14 @@ dependencies = [
  "rand 0.9.2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "toml",
  "tonic",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

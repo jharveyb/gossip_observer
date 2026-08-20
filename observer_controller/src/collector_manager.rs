@@ -642,6 +642,19 @@ pub struct GossipDiffConfig {
     pub file_writer: mpsc::Sender<json_writer::WriteRequest>,
 }
 
+/// `SendError` carries the rejected `WriteRequest` back, and that holds a boxed
+/// `FnOnce` which is `Send` but not `Sync` — so it can't be converted into an
+/// `anyhow::Error` directly. The only failure here is a closed channel anyway.
+async fn send_to_writer(
+    cfg: &GossipDiffConfig,
+    req: json_writer::WriteRequest,
+) -> anyhow::Result<()> {
+    cfg.file_writer
+        .send(req)
+        .await
+        .map_err(|_| anyhow::anyhow!("Controller: gossip differ: JSON writer channel closed"))
+}
+
 pub fn time_until_next(cron: &Cron) -> anyhow::Result<std::time::Duration> {
     let now = chrono::Utc::now();
     // Inclusive is false, so our duration should always be positive.
@@ -686,29 +699,23 @@ pub async fn collector_gossip_differ(
             diff_results.graphs,
             diff_results.controller_graph,
         );
+        // The writer serializes each value inside its own blocking task, so the
+        // graphs are handed over as-is rather than pre-rendered to JSON bytes.
         if !diffs.is_empty() {
             let diff_path = format!("{}/{}{}", cfg.base_dir, "collector_diffs-", ts_suffix);
-            let write_diffs = json_writer::WriteRequest {
-                path: diff_path.parse()?,
-                json_bytes: json_writer::serialize_to_json(diffs).await?,
-            };
-            cfg.file_writer.send(write_diffs).await?;
+            let write_diffs = json_writer::WriteRequest::new(diff_path.parse()?, diffs);
+            send_to_writer(&cfg, write_diffs).await?;
         }
 
         let controller_path = format!("{}/{}{}", cfg.base_dir, "controller_graph-", ts_suffix);
-        let write_controller = json_writer::WriteRequest {
-            path: controller_path.parse()?,
-            json_bytes: json_writer::serialize_to_json(controller_graph).await?,
-        };
-        cfg.file_writer.send(write_controller).await?;
+        let write_controller =
+            json_writer::WriteRequest::new(controller_path.parse()?, controller_graph);
+        send_to_writer(&cfg, write_controller).await?;
 
         for (uuid, graph) in collector_graphs.into_iter() {
             let graph_path = format!("{}/collector-{}-{}", cfg.base_dir, uuid, ts_suffix);
-            let write_graph = json_writer::WriteRequest {
-                path: graph_path.parse()?,
-                json_bytes: json_writer::serialize_to_json(graph).await?,
-            };
-            cfg.file_writer.send(write_graph).await?;
+            let write_graph = json_writer::WriteRequest::new(graph_path.parse()?, graph);
+            send_to_writer(&cfg, write_graph).await?;
         }
     }
 
