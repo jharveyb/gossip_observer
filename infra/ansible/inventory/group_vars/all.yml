@@ -38,6 +38,8 @@ baremetal_pkgs:
   - libtool
   - cpuinfo
   - g++
+  - clang
+  - llvm
 
 locale: "en_US.UTF-8"
 nonroot_username: "goss"

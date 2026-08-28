@@ -74,8 +74,10 @@ garage_buckets:
     verify_key: "archiver-staging-verify"
   - name: "gossip-collector-packet-captures"
     write_key: "packet-capture-sync"
+    verify_key: "packet-capture-verify"
   - name: "gossip-graph-dumps"
     write_key: "graph-dump-sync"
+    verify_key: "graph-dump-verify"
 
 # Public/prod bucket that per-researcher reader keys are granted read access on.
 garage_public_bucket: "{{ garage_buckets[0].name }}"
@@ -86,3 +88,6 @@ garage_reader_keys:
   - internal
   - alice
   - office
+  - visualizer
+  - and
+  - fab
