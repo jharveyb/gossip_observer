@@ -23,8 +23,8 @@
     group: nats
     mode: '0755'
   loop:
-    - /var/lib/nats_staging
-    - /var/lib/nats_prod
+    - "{{ nats_store_dir_base }}/nats_staging"
+    - "{{ nats_store_dir_base }}/nats_prod"
     - /opt/nats
 
 # https://docs.nats.io/running-a-nats-service/introduction/installation

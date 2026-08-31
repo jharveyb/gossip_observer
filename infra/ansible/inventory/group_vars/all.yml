@@ -55,7 +55,17 @@ bash_config:
   - { line: "shopt -s cmdhist" }
 
 nats_version: "2.12.14"
+
+# JetStream file-store cap PER INSTANCE (staging + prod can each grow to this).
+# Compare to a message ingest rate of 2-4 Mb/s from all 21 collectors / 600 peers.
 nats_file_store: 17179869184
+
+# Base dir for the per-instance JetStream stores ({base}/nats_staging,
+# {base}/nats_prod).
+# NOTE: changing this on a live host moves the store path but NOT the data.
+# Stop both nats services, `rsync -a` the old dirs onto the volume, then re-run
+# config_nats.yml (stream + durable-consumer state live in these dirs).
+nats_store_dir_base: "/var/lib"
 
 nats_instances:
   - name: staging
