@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE chunk_archive_log\n        SET object_key = $4\n        WHERE range_start = $1 AND range_end = $2 AND range_table = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "35146b255309d0460b0d1375463e9dd2fd386b0fba65fe50493856b8ca91bac6"
+}

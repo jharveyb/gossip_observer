@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::anyhow;
 use async_duckdb::ClientBuilder;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use observer_common::uploader::ArtifactUploader;
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,26 @@ const COMPANION_TABLES: &[CompanionTableDef] = &[
     },
 ];
 
+/// THE definition of the exported-Parquet layout, relative to `export.dir`:
+///
+///   {table}/{YYYY}/{MM}/{DD}/{table}_{YYYY-MM-DD}.parquet
+///
+/// Used for the local staging path, the Garage object key, and the retention
+/// read-back, so those three agree by construction rather than by three copies
+/// of the same `format!`. The relative path is *also* the object key suffix --
+/// that invariant is what makes these keys identical to the ones the manual
+/// `rclone copy {export.dir} garage-archiver-write:{bucket}` flow produced, so
+/// the two can overlap during rollout instead of forking the bucket.
+///
+/// Changing this orphans every previously-exported object. Don't.
+fn export_rel_path(table: &str, day: NaiveDate) -> PathBuf {
+    PathBuf::from(table)
+        .join(day.format("%Y").to_string())
+        .join(day.format("%m").to_string())
+        .join(day.format("%d").to_string())
+        .join(format!("{table}_{}.parquet", day.format("%Y-%m-%d")))
+}
+
 struct CompanionTableDef {
     table_name: &'static str,
     /// SELECT clause (without WHERE). The time-range filter is appended at
@@ -63,6 +84,7 @@ struct CompanionTableDef {
 pub async fn chunk_archiver_task(
     pool: PgPool,
     cfg: Arc<ArchiverConfig>,
+    uploader: Option<ArtifactUploader>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let _drop_guard = cancel_token.drop_guard_ref();
@@ -83,11 +105,20 @@ pub async fn chunk_archiver_task(
                 return Ok(());
             }
             _ = interval.tick() => {
-                match archive_pending_chunks(&pool, &cfg).await {
+                match archive_pending_chunks(&pool, &cfg, uploader.as_ref()).await {
                     Ok(0) => {}
                     Ok(n) => info!(archived_chunks = n, "Archived chunks to Parquet"),
                     Err(e) => error!(error = %e, "Chunk archival failed, will retry next interval"),
                 };
+                // Catch up anything exported but not yet published: a failed
+                // upload, or uploads that were only just enabled.
+                if let Some(up) = uploader.as_ref() {
+                    match upload_pending_exports(&pool, &cfg, up).await {
+                        Ok(0) => {}
+                        Ok(n) => info!(published = n, "Published pending Parquet exports"),
+                        Err(e) => error!(error = %e, "Pending-export upload failed, will retry next interval"),
+                    }
+                }
                 match drop_verified_chunks(&pool, &cfg).await {
                     Ok(0) => {}
                     Ok(n) => info!(dropped_chunks = n, "Dropped chunks from main DB"),
@@ -116,9 +147,17 @@ struct EligibleChunk {
     row_count: i64,
     file_size_bytes: i64,
     file_path: String,
+    /// Where the export was published, recorded at publish time. NULL for rows
+    /// predating the uploader (the rclone era), which fall back to the layout
+    /// function -- so even that branch goes through `export_rel_path`.
+    object_key: Option<String>,
 }
 
-async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Result<u32> {
+async fn archive_pending_chunks(
+    pool: &PgPool,
+    cfg: &ArchiverConfig,
+    uploader: Option<&ArtifactUploader>,
+) -> anyhow::Result<u32> {
     // Find timings chunks older than `after_days` not yet in chunk_archive_log.
     // As a safety check, we also only return ranges that TimescaleDB already
     // compressed, which implies that they are older than the 'compress_after'
@@ -166,6 +205,10 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
         // Export timings data first, before data from any other tables
         match archive_timings_chunk(&duckdb, range_start, range_end, &archive_dir).await {
             Ok((file_path, row_count, file_size)) => {
+                // Record first, publish second. A crash in between leaves a
+                // row with object_key = NULL, which the pending-upload sweep
+                // fixes for the price of one upload. The other order would
+                // leave an object with no row and re-run the whole DuckDB COPY.
                 record_archive(
                     pool,
                     range_start,
@@ -184,6 +227,7 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
                     path = %file_path.display(),
                     "Archived timings chunk"
                 );
+                publish_export(pool, uploader, range_start, range_end, "timings", &file_path).await;
                 archived += 1;
             }
             Err(e) => {
@@ -194,7 +238,8 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
         }
 
         // Export companion tables (messages, metadata, message_hashes, message_first_seen)
-        archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir).await?;
+        archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir, uploader)
+            .await?;
 
         cleanup_temp_duckdb(duckdb, cfg).await;
     }
@@ -256,9 +301,15 @@ async fn archive_pending_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::
             let (Some(range_start), Some(range_end)) = (row.range_start, row.range_end) else {
                 continue;
             };
-            if let Err(e) =
-                archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir)
-                    .await
+            if let Err(e) = archive_missing_companions(
+                pool,
+                &duckdb,
+                range_start,
+                range_end,
+                &archive_dir,
+                uploader,
+            )
+            .await
             {
                 error!(error = %e, %range_start, %range_end, "Backfill companion export failed");
             }
@@ -289,6 +340,7 @@ async fn archive_missing_companions(
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     archive_dir: &Path,
+    uploader: Option<&ArtifactUploader>,
 ) -> anyhow::Result<()> {
     for companion in COMPANION_TABLES {
         // Skip if already archived for this range. The 'as "exists!"' bit
@@ -337,6 +389,15 @@ async fn archive_missing_companions(
                     path = %file_path.display(),
                     "Archived companion table"
                 );
+                publish_export(
+                    pool,
+                    uploader,
+                    range_start,
+                    range_end,
+                    companion.table_name,
+                    &file_path,
+                )
+                .await;
             }
             Err(e) => {
                 error!(
@@ -383,6 +444,191 @@ async fn record_archive(
     Ok(())
 }
 
+/// Publish one exported Parquet file to Garage and record where it landed.
+///
+/// Never fatal: on failure the `chunk_archive_log` row keeps `object_key =
+/// NULL`, the local file stays put, and [`upload_pending_exports`] retries on
+/// the next tick. Losing an upload must not cost us a re-export.
+async fn publish_export(
+    pool: &PgPool,
+    uploader: Option<&ArtifactUploader>,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    table_name: &str,
+    local_path: &Path,
+) {
+    let Some(uploader) = uploader else {
+        return;
+    };
+    let rel = export_rel_path(table_name, range_start.date_naive());
+    if let Err(e) = upload_and_record(
+        pool,
+        uploader,
+        range_start,
+        range_end,
+        table_name,
+        local_path,
+        &rel,
+    )
+    .await
+    {
+        warn!(
+            error = %e,
+            %range_start, %range_end, table = table_name,
+            path = %local_path.display(),
+            "Failed to publish export; will retry on the next tick"
+        );
+    }
+}
+
+/// Upload `local_path` to `rel` and set `chunk_archive_log.object_key`.
+///
+/// Short-circuits when the object is already present at the same size. That is
+/// what keeps the first tick after enabling uploads cheap: every historical
+/// export pushed by hand with rclone lives at exactly this key, so the backfill
+/// is a few hundred HEADs rather than a few hundred GB of re-upload.
+async fn upload_and_record(
+    pool: &PgPool,
+    uploader: &ArtifactUploader,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    table_name: &str,
+    local_path: &Path,
+    rel: &Path,
+) -> anyhow::Result<()> {
+    let key = uploader.key_for(rel)?;
+    let local_len = tokio::fs::metadata(local_path)
+        .await
+        .with_context(|| format!("stat {}", local_path.display()))?
+        .len();
+
+    let uri = match uploader.head_size(&key).await? {
+        Some(remote_len) if remote_len == local_len => {
+            info!(%key, bytes = local_len, "Export already published, recording key");
+            // Keep the end state identical to the upload path so a backfilled
+            // row is indistinguishable from a freshly-uploaded one.
+            if uploader.delete_local()
+                && let Err(e) = tokio::fs::remove_file(local_path).await
+            {
+                warn!(path = %local_path.display(), error = %e, "Could not remove local staging file");
+            }
+            uploader.uri_for(&key)
+        }
+        _ => uploader.upload_file(local_path, rel).await?.uri,
+    };
+
+    record_object_key(pool, range_start, range_end, table_name, &uri).await
+}
+
+/// Mark a `chunk_archive_log` row as published.
+async fn record_object_key(
+    pool: &PgPool,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    table_name: &str,
+    object_key: &str,
+) -> anyhow::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE chunk_archive_log
+        SET object_key = $4
+        WHERE range_start = $1 AND range_end = $2 AND range_table = $3
+        "#,
+        &range_start,
+        &range_end,
+        table_name,
+        object_key,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to record chunk_archive_log object_key")?;
+    Ok(())
+}
+
+/// An export recorded in the log but not yet published to Garage.
+#[derive(sqlx::FromRow, Debug)]
+struct PendingUpload {
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    range_table: String,
+    file_path: String,
+}
+
+/// Publish exports that were written locally but never made it to the bucket.
+///
+/// Covers three cases with one query: an upload that failed, a crash between
+/// the log insert and the upload, and the initial backfill when uploads are
+/// first enabled on an archiver with months of exports on disk.
+async fn upload_pending_exports(
+    pool: &PgPool,
+    cfg: &ArchiverConfig,
+    uploader: &ArtifactUploader,
+) -> anyhow::Result<u32> {
+    let rows: Vec<PendingUpload> = sqlx::query_as!(
+        PendingUpload,
+        r#"
+        SELECT range_start, range_end, range_table, file_path
+        FROM chunk_archive_log
+        WHERE object_key IS NULL
+        ORDER BY range_start
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    info!(pending = rows.len(), "Found exports not yet published");
+
+    let archive_dir = PathBuf::from(&cfg.export.dir);
+    let mut published = 0u32;
+    for row in rows {
+        // Prefer the recorded local path, but fall back to the layout function
+        // for rows written before export.dir moved.
+        let rel = export_rel_path(&row.range_table, row.range_start.date_naive());
+        let local = PathBuf::from(&row.file_path);
+        let local = if local.is_absolute() {
+            local
+        } else {
+            archive_dir.join(&rel)
+        };
+
+        if !local.try_exists().unwrap_or(false) {
+            // Nothing to publish and nothing to verify against: a human needs
+            // to decide whether the data is recoverable.
+            warn!(
+                path = %local.display(),
+                %row.range_start, table = row.range_table,
+                "Logged export is missing locally and unpublished; skipping"
+            );
+            continue;
+        }
+
+        match upload_and_record(
+            pool,
+            uploader,
+            row.range_start,
+            row.range_end,
+            &row.range_table,
+            &local,
+            &rel,
+        )
+        .await
+        {
+            Ok(()) => published += 1,
+            Err(e) => warn!(
+                error = %e,
+                path = %local.display(),
+                table = row.range_table,
+                "Failed to publish pending export; will retry next interval"
+            ),
+        }
+    }
+
+    Ok(published)
+}
+
 /// Export a single 24-hour timings chunk to a Parquet file.
 ///
 /// Returns `(file_path, row_count, file_size_bytes)` on success.
@@ -392,14 +638,7 @@ async fn archive_timings_chunk(
     range_end: DateTime<Utc>,
     archive_dir: &Path,
 ) -> anyhow::Result<(PathBuf, u64, u64)> {
-    // Output path: timings/YYYY/MM/DD/timings_YYYY-MM-DD.parquet
-    let date = range_start.date_naive();
-    let out_path = archive_dir
-        .join("timings")
-        .join(date.format("%Y").to_string())
-        .join(date.format("%m").to_string())
-        .join(date.format("%d").to_string())
-        .join(format!("timings_{}.parquet", date.format("%Y-%m-%d")));
+    let out_path = archive_dir.join(export_rel_path("timings", range_start.date_naive()));
 
     // If the file already exists (e.g. a crash after export but before
     // chunk_archive_log insert), try to record it without re-exporting.
@@ -490,17 +729,8 @@ async fn archive_companion_table(
     archive_dir: &Path,
     companion: &CompanionTableDef,
 ) -> anyhow::Result<(PathBuf, u64, u64)> {
-    let date = range_start.date_naive();
-    let out_path = archive_dir
-        .join(companion.table_name)
-        .join(date.format("%Y").to_string())
-        .join(date.format("%m").to_string())
-        .join(date.format("%d").to_string())
-        .join(format!(
-            "{}_{}.parquet",
-            companion.table_name,
-            date.format("%Y-%m-%d")
-        ));
+    let out_path =
+        archive_dir.join(export_rel_path(companion.table_name, range_start.date_naive()));
 
     if out_path.try_exists()? {
         let file_size = tokio::fs::metadata(&out_path).await?.len();
@@ -684,7 +914,8 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
     let rows: Vec<EligibleChunk> = sqlx::query_as!(
         EligibleChunk,
         r#"
-        SELECT c.range_start, c.range_end, l.row_count, l.file_size_bytes, l.file_path
+        SELECT c.range_start, c.range_end, l.row_count, l.file_size_bytes, l.file_path,
+               l.object_key
         FROM timescaledb_information.chunks c
         JOIN chunk_archive_log l
           ON l.range_start = c.range_start AND l.range_end = c.range_end
@@ -732,21 +963,18 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
 
         // (2) Garage Parquet metadata (num_rows + file_size_bytes); a successful
         //     read also proves the file is present and readable.
-        let key = format!(
-            "timings/{}/timings_{}.parquet",
-            range_start.format("%Y/%m/%d"),
-            range_start.format("%Y-%m-%d")
-        );
-        let (parquet_rows, parquet_bytes) = match parquet_s3_metadata(
-            &duckdb,
-            &cfg.export.verify_bucket,
-            &key,
-        )
-        .await
-        {
+        let uri = match row.object_key.as_deref() {
+            Some(uri) => uri.to_string(),
+            None => format!(
+                "s3://{}/{}",
+                cfg.export.verify_bucket,
+                export_rel_path("timings", range_start.date_naive()).display()
+            ),
+        };
+        let (parquet_rows, parquet_bytes) = match parquet_s3_metadata(&duckdb, &uri).await {
             Ok(m) => m,
             Err(e) => {
-                warn!(error = %e, key, %range_start, %range_end, "Parquet unreadable on Garage; NOT dropping chunk");
+                warn!(error = %e, uri, %range_start, %range_end, "Parquet unreadable on Garage; NOT dropping chunk");
                 continue;
             }
         };
@@ -796,6 +1024,7 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
             row.row_count,
             parquet_bytes as i64,
             &row.file_path,
+            &uri,
         )
         .await?;
         info!(
@@ -894,10 +1123,9 @@ async fn cleanup_verify_duckdb(duckdb: async_duckdb::Client, cfg: &ArchiverConfi
 /// missing or unreadable — which is exactly the readability check we want.
 async fn parquet_s3_metadata(
     duckdb: &async_duckdb::Client,
-    bucket: &str,
-    key: &str,
+    uri: &str,
 ) -> anyhow::Result<(u64, u64)> {
-    let uri = format!("s3://{bucket}/{key}");
+    let uri = uri.to_string();
     let (num_rows, file_size_bytes): (i64, i64) = duckdb
         .conn(move |conn| {
             conn.query_row(
@@ -927,13 +1155,14 @@ async fn record_deletion(
     log_row_count: i64,
     file_size_bytes: i64,
     file_path: &str,
+    object_key: &str,
 ) -> anyhow::Result<()> {
     sqlx::query!(
         r#"
         INSERT INTO chunk_deletion_log
             (range_start, range_end, range_table, db_row_count, parquet_row_count,
-             log_row_count, file_size_bytes, file_path)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             log_row_count, file_size_bytes, file_path, object_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT DO NOTHING
         "#,
         range_start,
@@ -943,10 +1172,65 @@ async fn record_deletion(
         parquet_row_count,
         log_row_count,
         file_size_bytes,
-        file_path
+        file_path,
+        object_key
     )
     .execute(pool)
     .await
     .context("Failed to insert chunk_deletion_log entry")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression gate for collapsing the three hand-written copies of this
+    /// layout into one function. These exact strings are what the manual rclone
+    /// flow already wrote into the bucket and what the retention read-back
+    /// looks for; if they change, every historical object is orphaned.
+    #[test]
+    fn export_rel_path_matches_the_deployed_layout() {
+        let day = NaiveDate::from_ymd_opt(2026, 3, 30).expect("valid date");
+        assert_eq!(
+            export_rel_path("timings", day),
+            PathBuf::from("timings/2026/03/30/timings_2026-03-30.parquet")
+        );
+        assert_eq!(
+            export_rel_path("message_first_seen", day),
+            PathBuf::from(
+                "message_first_seen/2026/03/30/message_first_seen_2026-03-30.parquet"
+            )
+        );
+    }
+
+    /// Every companion table has to round-trip through the same layout, since
+    /// the retention pass and the pending-upload sweep both rebuild keys from
+    /// (table, date) alone.
+    #[test]
+    fn export_rel_path_covers_every_companion_table() {
+        let day = NaiveDate::from_ymd_opt(2026, 12, 1).expect("valid date");
+        for companion in COMPANION_TABLES {
+            let name = companion.table_name;
+            assert_eq!(
+                export_rel_path(name, day),
+                PathBuf::from(format!("{name}/2026/12/01/{name}_2026-12-01.parquet"))
+            );
+        }
+    }
+
+    /// The retention pass derives its key from a `DateTime<Utc>` while the
+    /// export derives it from the same value's `date_naive()`. They must agree.
+    #[test]
+    fn export_rel_path_agrees_across_datetime_and_date() {
+        let ts: DateTime<Utc> = "2026-03-30T00:00:00Z".parse().expect("valid timestamp");
+        assert_eq!(
+            export_rel_path("timings", ts.date_naive()),
+            PathBuf::from(format!(
+                "timings/{}/timings_{}.parquet",
+                ts.format("%Y/%m/%d"),
+                ts.format("%Y-%m-%d")
+            ))
+        );
+    }
 }

@@ -1,5 +1,6 @@
 use config::{Config, Environment, File};
 use observer_common::logging::{ConsoleConfig, LogRotationConfig};
+use observer_common::uploader::UploadConfig;
 use serde::Deserialize;
 use std::env;
 
@@ -76,6 +77,7 @@ pub struct ArchiverConfig {
     pub nats: Nats,
     pub database: Database,
     pub export: DataExport,
+    pub upload: UploadConfig,
     pub console: ConsoleConfig,
     pub log_rotation: LogRotationConfig,
     pub db_url: String,
@@ -111,6 +113,10 @@ impl ArchiverConfig {
         let export_dir = format!("{}/exports", storage_dir);
 
         let cfg = Config::builder()
+            // Shared [upload] defaults, so they live in one place instead of
+            // drifting between crates. Added first: the config file and the
+            // environment below still override it.
+            .add_source(UploadConfig::defaults_source()?)
             // All default config values
             .set_default("nats.server_addr", "localhost:4222")?
             .set_default("nats.stream_name", "main")?
@@ -154,10 +160,18 @@ impl ArchiverConfig {
             .set_default("export.verify_use_ssl", false)?
             .set_default("export.verify_bucket", "gossip-observer-data")?
             .set_default("export.verify_region", "garage")?
+            .set_default("upload.bucket", "gossip-observer-data")?
             .set_default("storage_dir", storage_dir)?
             .set_default("log_level", "info")?
             .add_source(File::with_name(&cfg_path).required(false))
-            .add_source(Environment::with_prefix("ARCHIVER"))
+            // Pin both separators so nested keys are settable from the
+            // environment (ARCHIVER_UPLOAD__BUCKET).
+            // https://docs.rs/config/latest/config/struct.Environment.html#method.separator
+            .add_source(
+                Environment::with_prefix("ARCHIVER")
+                    .prefix_separator("_")
+                    .separator("__"),
+            )
             .build()?;
 
         cfg.try_deserialize().map_err(anyhow::Error::new)

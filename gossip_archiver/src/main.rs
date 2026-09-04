@@ -13,6 +13,7 @@ use gossip_archiver::nats::nats_reader_with_reconnect;
 use gossip_archiver::{ExportedGossip, MessageMetadata, MessageNodeTimings, RawMessage};
 use gossip_archiver::{decode_msg, split_exported_gossip};
 use itertools::Itertools;
+use observer_common::uploader::ArtifactUploader;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::mpsc::channel as tokio_channel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -73,6 +74,55 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
         .connect(&database_url)
         .await?;
     info!("Initialized TimescaleDB connection");
+
+    // Same eager-connect sequence as NATS and the database above: build the
+    // client and prove the bucket is reachable before anything is spawned.
+    let uploader = ArtifactUploader::new(&cfg.upload)?;
+    match &uploader {
+        Some(up) => match up.probe().await {
+            Ok(()) => info!(bucket = up.bucket(), "Artifact bucket reachable"),
+            Err(e) if cfg.upload.required_on_startup => {
+                bail!("upload.required_on_startup is set and the bucket probe failed: {e:#}")
+            }
+            // Deliberately not degrading to None: a bucket that is down at boot
+            // is usually transient, and disabling uploads for the whole process
+            // lifetime is worse than retrying every export tick.
+            Err(e) => error!(
+                error = %e,
+                bucket = up.bucket(),
+                "Artifact bucket probe failed; exports will stage locally and retry"
+            ),
+        },
+        None => info!("Artifact upload disabled; exports stay on local disk"),
+    }
+
+    // Publishing to one bucket while the retention pass verifies against
+    // another would let chunks be dropped on the strength of stale objects.
+    //
+    // The two endpoints are spelled differently by design: upload.endpoint is a
+    // full URL (its scheme is what decides plain HTTP vs TLS) while
+    // export.verify_endpoint is a bare host:port that DuckDB pairs with
+    // verify_use_ssl. Compare hosts, or this fires on every start.
+    let upload_host = cfg
+        .upload
+        .endpoint
+        .split_once("://")
+        .map_or(cfg.upload.endpoint.as_str(), |(_, host)| host)
+        .trim_end_matches('/');
+    if cfg.upload.enabled
+        && cfg.export.deletion_enabled
+        && (cfg.upload.bucket != cfg.export.verify_bucket
+            || upload_host != cfg.export.verify_endpoint)
+    {
+        error!(
+            upload_bucket = cfg.upload.bucket,
+            upload_endpoint = cfg.upload.endpoint,
+            upload_host,
+            verify_bucket = cfg.export.verify_bucket,
+            verify_endpoint = cfg.export.verify_endpoint,
+            "Upload and retention-verify targets disagree; retention may verify stale objects"
+        );
+    }
 
     let cfg = Arc::new(cfg);
     let root_cancel_token = CancellationToken::new();
@@ -139,7 +189,12 @@ async fn async_main(cfg: ArchiverConfig) -> anyhow::Result<()> {
     // Use a child token for the exporter so that we don't crash the whole
     // archiver if export fails.
     let export_cancel_token = root_cancel_token.child_token();
-    let export_handle = tokio::spawn(chunk_archiver_task(pool, cfg, export_cancel_token));
+    let export_handle = tokio::spawn(chunk_archiver_task(
+        pool,
+        cfg,
+        uploader,
+        export_cancel_token,
+    ));
 
     match tokio::try_join!(
         nats_handle,
