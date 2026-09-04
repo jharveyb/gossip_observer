@@ -3,10 +3,11 @@ use std::{
     boxed::Box,
     collections::{HashMap, HashSet, hash_map::Entry},
     mem,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use observer_common::types::{
     CollectorHeartbeat, CollectorInfo, GossipChannelInfo, GossipNodeInfo, ManagerStatus,
 };
@@ -289,9 +290,7 @@ impl CollectorManagerHandle {
             .await
     }
 
-    pub async fn get_expected_collectors(
-        &self,
-    ) -> Result<HashSet<String>, CollectorManagerError> {
+    pub async fn get_expected_collectors(&self) -> Result<HashSet<String>, CollectorManagerError> {
         self.request(CollectorManagerMsg::GetExpectedCollectors)
             .await
     }
@@ -640,11 +639,74 @@ pub struct GossipDiffConfig {
     pub base_dir: String,
     pub cron: Cron,
     pub file_writer: mpsc::Sender<json_writer::WriteRequest>,
+    /// When true, finished dumps are also queued for upload by the writer.
+    pub upload: bool,
+}
+
+/// The gossip artifacts the differ emits each tick, and the one place their
+/// names are built.
+///
+/// Local and remote layouts differ on purpose. Local filenames are unchanged
+/// and **flat**: the log janitor only sweeps files matching `{prefix}.` with a
+/// strict dot, which is exactly what keeps it away from these dash-separated
+/// names (`observer_common::logging`) Object keys are date-partitioned, similar
+/// to the main gossip-observer-data bucket.
+pub enum GraphArtifact<'a> {
+    ControllerGraph,
+    CollectorDiffs,
+    Collector(&'a str),
+}
+
+impl GraphArtifact<'_> {
+    /// Directory component of the object key; also the artifact family name.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::ControllerGraph => "controller_graph",
+            Self::CollectorDiffs => "collector_diffs",
+            Self::Collector(_) => "collector",
+        }
+    }
+
+    fn file_name(&self, now: DateTime<Utc>) -> String {
+        let ts = now.format("%Y-%m-%d-%H-%M.zst");
+        match self {
+            Self::ControllerGraph => format!("controller_graph-{ts}"),
+            Self::CollectorDiffs => format!("collector_diffs-{ts}"),
+            Self::Collector(uuid) => format!("collector-{uuid}-{ts}"),
+        }
+    }
+
+    fn local_path(&self, base_dir: &str, now: DateTime<Utc>) -> PathBuf {
+        Path::new(base_dir).join(self.file_name(now))
+    }
+
+    /// `{kind}/{YYYY}/{MM}/{DD}/{file_name}`
+    fn rel_key(&self, now: DateTime<Utc>) -> PathBuf {
+        PathBuf::from(self.kind())
+            .join(now.format("%Y").to_string())
+            .join(now.format("%m").to_string())
+            .join(now.format("%d").to_string())
+            .join(self.file_name(now))
+    }
 }
 
 /// `SendError` carries the rejected `WriteRequest` back, and that holds a boxed
 /// `FnOnce` which is `Send` but not `Sync` — so it can't be converted into an
 /// `anyhow::Error` directly. The only failure here is a closed channel anyway.
+fn write_request<T: serde::Serialize + Send + 'static>(
+    cfg: &GossipDiffConfig,
+    artifact: GraphArtifact<'_>,
+    now: DateTime<Utc>,
+    value: T,
+) -> json_writer::WriteRequest {
+    let path = artifact.local_path(&cfg.base_dir, now);
+    if cfg.upload {
+        json_writer::WriteRequest::new_with_key(path, artifact.rel_key(now), value)
+    } else {
+        json_writer::WriteRequest::new(path, value)
+    }
+}
+
 async fn send_to_writer(
     cfg: &GossipDiffConfig,
     req: json_writer::WriteRequest,
@@ -686,7 +748,6 @@ pub async fn collector_gossip_differ(
         let diff_results =
             task::spawn_blocking(move || compute_graph_differences(collector_graphs)).await?;
         // log all diffs
-        let ts_suffix = now.format("%Y-%m-%d-%H-%M.zst");
         for diff in diff_results.diffs.iter() {
             info!(
                 uuid = %diff.0,
@@ -702,20 +763,17 @@ pub async fn collector_gossip_differ(
         // The writer serializes each value inside its own blocking task, so the
         // graphs are handed over as-is rather than pre-rendered to JSON bytes.
         if !diffs.is_empty() {
-            let diff_path = format!("{}/{}{}", cfg.base_dir, "collector_diffs-", ts_suffix);
-            let write_diffs = json_writer::WriteRequest::new(diff_path.parse()?, diffs);
-            send_to_writer(&cfg, write_diffs).await?;
+            let req = write_request(&cfg, GraphArtifact::CollectorDiffs, now, diffs);
+            send_to_writer(&cfg, req).await?;
         }
 
-        let controller_path = format!("{}/{}{}", cfg.base_dir, "controller_graph-", ts_suffix);
-        let write_controller =
-            json_writer::WriteRequest::new(controller_path.parse()?, controller_graph);
-        send_to_writer(&cfg, write_controller).await?;
+        let req = write_request(&cfg, GraphArtifact::ControllerGraph, now, controller_graph);
+        send_to_writer(&cfg, req).await?;
 
         for (uuid, graph) in collector_graphs.into_iter() {
-            let graph_path = format!("{}/collector-{}-{}", cfg.base_dir, uuid, ts_suffix);
-            let write_graph = json_writer::WriteRequest::new(graph_path.parse()?, graph);
-            send_to_writer(&cfg, write_graph).await?;
+            let uuid = uuid.to_string();
+            let req = write_request(&cfg, GraphArtifact::Collector(&uuid), now, graph);
+            send_to_writer(&cfg, req).await?;
         }
     }
 
@@ -742,6 +800,84 @@ pub async fn heartbeat_sweeper(
                     info!("Collector manager: sweeper: shutting down");
                     break;
                 }
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_artifact_tests {
+    use super::*;
+
+    fn at() -> DateTime<Utc> {
+        "2026-03-30T14:05:00Z".parse().expect("valid timestamp")
+    }
+
+    /// Local filenames must not change. The log janitor only sweeps `{prefix}.`
+    /// with a strict dot, so these dash-separated names are what keeps it from
+    /// eating graph dumps -- and `electrum-cli filter_graph` globs for
+    /// `controller_graph-*.zst` on disk.
+    #[test]
+    fn local_filenames_are_unchanged_and_dot_free_after_the_prefix() {
+        let now = at();
+        for (artifact, expected) in [
+            (
+                GraphArtifact::ControllerGraph,
+                "controller_graph-2026-03-30-14-05.zst",
+            ),
+            (
+                GraphArtifact::CollectorDiffs,
+                "collector_diffs-2026-03-30-14-05.zst",
+            ),
+            (
+                GraphArtifact::Collector("019c0000-0000-7000-8000-000000000001"),
+                "collector-019c0000-0000-7000-8000-000000000001-2026-03-30-14-05.zst",
+            ),
+        ] {
+            assert_eq!(artifact.file_name(now), expected);
+            assert_eq!(
+                artifact.local_path("/var/lib/observer_controller/x", now),
+                PathBuf::from(format!("/var/lib/observer_controller/x/{expected}"))
+            );
+            // "controller." would be swept; "controller_graph-" must not be.
+            let name = artifact.file_name(now);
+            let stem = name.split('.').next().expect("non-empty");
+            assert!(!stem.contains('.'), "{name} would match a janitor prefix");
+        }
+    }
+
+    /// Remote keys are date-partitioned so the bucket stays listable.
+    #[test]
+    fn object_keys_are_date_partitioned_by_artifact_kind() {
+        let now = at();
+        assert_eq!(
+            GraphArtifact::ControllerGraph.rel_key(now),
+            PathBuf::from("controller_graph/2026/03/30/controller_graph-2026-03-30-14-05.zst")
+        );
+        assert_eq!(
+            GraphArtifact::CollectorDiffs.rel_key(now),
+            PathBuf::from("collector_diffs/2026/03/30/collector_diffs-2026-03-30-14-05.zst")
+        );
+        assert_eq!(
+            GraphArtifact::Collector("abc").rel_key(now),
+            PathBuf::from("collector/2026/03/30/collector-abc-2026-03-30-14-05.zst")
+        );
+    }
+
+    /// The remote key always ends in the local filename, so an object can be
+    /// traced back to the file that produced it by name alone.
+    #[test]
+    fn object_key_ends_with_the_local_file_name() {
+        let now = at();
+        for artifact in [
+            GraphArtifact::ControllerGraph,
+            GraphArtifact::CollectorDiffs,
+            GraphArtifact::Collector("uuid"),
+        ] {
+            let key = artifact.rel_key(now);
+            assert_eq!(
+                key.file_name().and_then(|n| n.to_str()),
+                Some(artifact.file_name(now).as_str())
+            );
         }
     }
 }

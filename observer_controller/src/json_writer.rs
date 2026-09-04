@@ -1,9 +1,10 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use observer_common::uploader::UploadRequest;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Buffer between `serde_json` and the zstd encoder.
 const JSON_BUF_SIZE: usize = 256 * 1024;
@@ -19,6 +20,9 @@ type SerializeFn = Box<dyn FnOnce(&mut dyn Write) -> serde_json::Result<()> + Se
 /// A request to serialize a value to JSON and write it as a zstd-compressed file.
 pub struct WriteRequest {
     pub path: PathBuf,
+    /// Object key suffix to publish the finished file under, if it should be
+    /// published at all. `None` means local-only.
+    pub rel_key: Option<PathBuf>,
     serialize: SerializeFn,
 }
 
@@ -26,15 +30,34 @@ impl WriteRequest {
     pub fn new<T: serde::Serialize + Send + 'static>(path: PathBuf, value: T) -> Self {
         Self {
             path,
+            rel_key: None,
+            serialize: Box::new(move |w| serde_json::to_writer(w, &value)),
+        }
+    }
+
+    /// As [`Self::new`], but the finished file is also queued for upload.
+    pub fn new_with_key<T: serde::Serialize + Send + 'static>(
+        path: PathBuf,
+        rel_key: PathBuf,
+        value: T,
+    ) -> Self {
+        Self {
+            path,
+            rel_key: Some(rel_key),
             serialize: Box::new(move |w| serde_json::to_writer(w, &value)),
         }
     }
 }
 
 /// The writer task. Receives WriteRequests and writes them as zstd-compressed files.
+/// Compression stays serial here -- one file at a time is what bounds this
+/// task's memory. Uploads are handed to a separate pooled worker rather than
+/// awaited inline, so a slow bucket can't stall the next compression (and,
+/// through the write channel, the differ's cron tick).
 pub async fn json_writer_task(
     mut rx: mpsc::Receiver<WriteRequest>,
     compression_level: i32,
+    uploads: Option<mpsc::Sender<UploadRequest>>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -48,6 +71,8 @@ pub async fn json_writer_task(
                 match msg {
                     Some(req) => {
                         let path_display = req.path.display().to_string();
+                        let published = req.path.clone();
+                        let rel_key = req.rel_key.clone();
                         match write_compressed(req, compression_level).await {
                             Ok(input_bytes) => {
                                 info!(
@@ -55,6 +80,23 @@ pub async fn json_writer_task(
                                     input_bytes,
                                     "JSON writer: wrote compressed file"
                                 );
+                                if let (Some(tx), Some(rel_key)) = (uploads.as_ref(), rel_key) {
+                                    let req = UploadRequest::new(published, rel_key);
+                                    // select! on the cancel token so a full
+                                    // upload queue can't deadlock shutdown.
+                                    tokio::select! {
+                                        biased;
+                                        _ = cancel.cancelled() => break,
+                                        res = tx.send(req) => {
+                                            if res.is_err() {
+                                                warn!(
+                                                    path = %path_display,
+                                                    "JSON writer: upload queue closed; file stays local"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 error!(
@@ -85,7 +127,10 @@ async fn write_compressed(req: WriteRequest, compression_level: i32) -> anyhow::
 }
 
 fn write_compressed_blocking(req: WriteRequest, compression_level: i32) -> anyhow::Result<u64> {
-    let WriteRequest { path, serialize } = req;
+    // rel_key is the writer task's business, not the blocking writer's.
+    let WriteRequest {
+        path, serialize, ..
+    } = req;
     // Stage as `{path}.tmp` and only rename after a full write + fsync, so a
     // crash or a SIGKILL mid-write can't leave a truncated `.zst` that readers
     // (e.g. `electrum-cli filter_graph`) will choke on.
@@ -229,7 +274,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, cancel.clone()));
+        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, None, cancel.clone()));
 
         // The bad request must not take the task down with it.
         tx.send(WriteRequest::new(blocker.join("nope.zst"), payload()))
@@ -246,5 +291,73 @@ mod tests {
         let decoded: Payload = serde_json::from_slice(&raw).unwrap();
         assert_eq!(decoded, payload());
         assert!(!tmp_path(&good).exists());
+    }
+
+    /// A keyed request queues an upload of the *finished* file, and an unkeyed
+    /// one stays local. The uploader must never see a half-written path.
+    #[tokio::test]
+    async fn keyed_writes_are_queued_for_upload_and_unkeyed_ones_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let keyed = dir.path().join("controller_graph-x.zst");
+        let plain = dir.path().join("local_only.zst");
+
+        let (tx, rx) = mpsc::channel(4);
+        let (up_tx, mut up_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, Some(up_tx), cancel.clone()));
+
+        tx.send(WriteRequest::new_with_key(
+            keyed.clone(),
+            PathBuf::from("controller_graph/2026/03/30/controller_graph-x.zst"),
+            payload(),
+        ))
+        .await
+        .unwrap();
+        tx.send(WriteRequest::new(plain.clone(), payload()))
+            .await
+            .unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let req = up_rx.recv().await.expect("keyed write should be queued");
+        assert_eq!(req.local, keyed);
+        assert_eq!(
+            req.rel_key,
+            PathBuf::from("controller_graph/2026/03/30/controller_graph-x.zst")
+        );
+        // The file it points at is complete and readable, not the .tmp stage.
+        let raw = zstd::stream::decode_all(std::fs::read(&req.local).unwrap().as_slice()).unwrap();
+        assert_eq!(serde_json::from_slice::<Payload>(&raw).unwrap(), payload());
+        assert!(!tmp_path(&keyed).exists());
+
+        assert!(
+            up_rx.recv().await.is_none(),
+            "unkeyed write must not be queued for upload"
+        );
+    }
+
+    /// A failed write must not queue an upload of a file that isn't there.
+    #[tokio::test]
+    async fn a_failed_write_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        let (tx, rx) = mpsc::channel(4);
+        let (up_tx, mut up_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, Some(up_tx), cancel.clone()));
+
+        tx.send(WriteRequest::new_with_key(
+            blocker.join("nope.zst"),
+            PathBuf::from("controller_graph/nope.zst"),
+            payload(),
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        assert!(up_rx.recv().await.is_none());
     }
 }

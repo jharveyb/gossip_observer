@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, fs};
 
+use anyhow::Context;
 use croner::Cron;
+use observer_common::uploader::ArtifactUploader;
 use observer_controller::collector_manager::{
     CollectionConfig, CollectorManagerHandle, GossipDiffConfig, collector_gossip_differ,
     heartbeat_sweeper,
@@ -22,7 +24,7 @@ use tokio::time::{Interval, interval, sleep};
 use tokio_util::sync::CancellationToken;
 use toml::Table;
 use tonic::transport::Server as TonicServer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 fn main() -> anyhow::Result<()> {
     // Load .env file if present (optional for production with systemd)
@@ -170,18 +172,60 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
         stop_signal.child_token(),
     ));
 
+    // Publish graph dumps to Garage. Probe before spawning anything, on the
+    // same eager-connect pattern the other external dependencies use.
+    let uploader = ArtifactUploader::new(&cfg.upload)?;
+    let upload_tx = match &uploader {
+        Some(up) => {
+            match up.probe().await {
+                Ok(()) => info!(bucket = up.bucket(), "Artifact bucket reachable"),
+                Err(e) if cfg.upload.required_on_startup => {
+                    anyhow::bail!(
+                        "upload.required_on_startup is set and the bucket probe failed: {e:#}"
+                    )
+                }
+                // Transient unreachability must not stop the controller; the
+                // next cron tick retries.
+                Err(e) => error!(
+                    error = %e,
+                    bucket = up.bucket(),
+                    "Artifact bucket probe failed; graph dumps stay local and retry"
+                ),
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let _upload_worker = tokio::spawn(observer_common::uploader::upload_worker(
+                rx,
+                up.clone(),
+                cfg.upload.workers.max(1) as usize,
+                stop_signal.child_token(),
+            ));
+            Some(tx)
+        }
+        None => {
+            info!("Artifact upload disabled; graph dumps stay on local disk");
+            None
+        }
+    };
+
     // Spawn the JSON writer task for compressed file output.
     let (write_tx, write_rx) = tokio::sync::mpsc::channel::<json_writer::WriteRequest>(32);
     let _json_writer = tokio::spawn(json_writer::json_writer_task(
         write_rx,
-        22, // highest level
+        cfg.controller.zstd_level,
+        upload_tx,
         stop_signal.child_token(),
     ));
 
+    if !PathBuf::from_str(&cfg.controller.graph_dir)?.is_dir() {
+        fs::create_dir_all(&cfg.controller.graph_dir)
+            .with_context(|| format!("creating graph_dir {}", cfg.controller.graph_dir))?;
+    }
+
     let graph_diff_cfg = GossipDiffConfig {
-        base_dir: cfg.controller.storage_dir.clone(),
+        base_dir: cfg.controller.graph_dir.clone(),
         cron: Cron::from_str(&cfg.controller.graph_diff_cron)?,
         file_writer: write_tx.clone(),
+        upload: uploader.is_some(),
     };
     let _graph_differ = tokio::spawn(collector_gossip_differ(
         collector_manager.clone(),

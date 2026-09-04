@@ -215,11 +215,33 @@ startup_delay_max_secs = 1
 max_compressions_per_pass = 20
 "#;
 
+/// Extra TOML for the artifact-upload test: dump graphs every 10 seconds into a
+/// dedicated directory, and publish them through the real uploader against a
+/// `local` object_store backend. That exercises the whole plumbing --- differ ->
+/// writer -> upload queue -> upload_file -> size read-back -> local delete ---
+/// with no extra external process. SigV4/path-style/Caddy are the only parts
+/// this can't cover; those need a real Garage (see the `garage_smoke` notes).
+const UPLOAD_TEST_TOML: &str = r#"
+[upload]
+enabled = true
+backend = "local"
+key_prefix = "staging"
+delete_local = true
+local_root = "{bucket}"
+"#;
+
 fn setup_controller_dir(extra_toml: &str) -> Result<ControllerFixture> {
     let dir = TempDir::new()?;
     let root = dir.path();
     let storage = root.join("storage");
     fs::create_dir_all(&storage)?;
+    // Graph dumps go to their own directory, as in production, so the janitor
+    // never even sees them.
+    let graphs = root.join("graphs");
+    fs::create_dir_all(&graphs)?;
+    // Stands in for the bucket when the upload test selects the local backend.
+    let bucket = root.join("bucket");
+    fs::create_dir_all(&bucket)?;
 
     let pubkeys = fixture_pubkeys();
     let mut nodes_csv = String::from("pubkey,net_type,sockets,alias\n");
@@ -246,8 +268,12 @@ port = {grpc_port}
 
 [controller]
 storage_dir = "{storage}"
+graph_dir = "{graphs}"
 total_connections = 3
 heartbeat_expiry = 30
+# Dump graphs every 10s so a test can observe one within its window. Harmless
+# for the other tests: the dumps land in graph_dir, which nothing else asserts on.
+graph_diff_cron = "*/10 * * * * *"
 
 [console]
 listen_port = {console_port}
@@ -259,12 +285,17 @@ node_communities = "{communities}"
 collector_mapping = "{mapping}"
 "#,
         storage = storage.display(),
+        graphs = graphs.display(),
         console_port = free_port(),
         nodes = root.join("nodes.csv").display(),
         communities = root.join("communities.csv").display(),
         mapping = root.join("collector_mapping.toml").display(),
     );
-    fs::write(root.join("controller_config.toml"), config + extra_toml)?;
+    // `{bucket}` is the one value a caller's TOML can't hardcode: it is an
+    // absolute path under a TempDir only known here. A no-op for TOML that
+    // doesn't mention it.
+    let extra_toml = extra_toml.replace("{bucket}", &bucket.display().to_string());
+    fs::write(root.join("controller_config.toml"), config + &extra_toml)?;
 
     Ok(ControllerFixture { dir, grpc_port })
 }
@@ -732,4 +763,100 @@ async fn log_janitor_rotation() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// End-to-end artifact publishing against the real controller binary: the
+/// gossip differ writes a compressed graph dump, the writer hands the finished
+/// file to the upload worker, and the uploader publishes it under the
+/// configured key prefix and removes the local staging copy.
+///
+/// Runs the controller alone --- it needs neither bitcoind nor NATS --- and
+/// uses the `local` object_store backend, so no extra process is involved. The
+/// controller_graph dump is emitted every tick even with no collectors
+/// registered, which is what keeps this fast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns a workspace binary and runs ~1 minute; run via `just integration-test`"]
+async fn artifact_upload_publishes_graph_dumps() -> Result<()> {
+    let controller_bin = target_bin("observer_controller");
+
+    let controller_fixture = setup_controller_dir(UPLOAD_TEST_TOML)?;
+    let root = controller_fixture.dir.path().to_path_buf();
+    let graphs = root.join("graphs");
+    let bucket = root.join("bucket");
+
+    let mut controller = ChildGuard::spawn(
+        "observer_controller",
+        &controller_bin,
+        &root,
+        &[
+            ("CONTROLLER_MODE", "local"),
+            ("CONTROLLER_UUID", "integration-test-controller"),
+        ],
+    )?;
+
+    // `staging/` from UPLOAD_TEST_TOML, then the date-partitioned key the
+    // controller builds: controller_graph/YYYY/MM/DD/controller_graph-*.zst.
+    let published = bucket.join("staging").join("controller_graph");
+    wait_for(
+        "a controller graph dump to appear in the bucket",
+        Duration::from_secs(90),
+        &[],
+        || find_zst(&published).is_some(),
+    );
+
+    let object = find_zst(&published).expect("just asserted present");
+    let meta = fs::metadata(&object)?;
+    assert!(meta.len() > 0, "published object must not be empty");
+
+    // The key carries the local file name, so the staging copy it replaced is
+    // identifiable --- and with delete_local it must be gone.
+    let name = object
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("published object has no file name")?;
+    assert!(
+        name.starts_with("controller_graph-") && name.ends_with(".zst"),
+        "unexpected published object name: {name}"
+    );
+    assert!(
+        !graphs.join(name).exists(),
+        "delete_local is set, so the staging file {name} should be gone"
+    );
+
+    // Date partitioning: .../controller_graph/YYYY/MM/DD/<file>
+    let day = object.parent().context("no day component")?;
+    let month = day.parent().context("no month component")?;
+    let year = month.parent().context("no year component")?;
+    for (component, width) in [(day, 2), (month, 2), (year, 4)] {
+        let part = component
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("non-UTF-8 key component")?;
+        assert_eq!(part.len(), width, "unexpected key component: {part}");
+        assert!(part.chars().all(|c| c.is_ascii_digit()), "not a date: {part}");
+    }
+
+    let status = controller.signal_and_wait(Signal::SIGINT, Duration::from_secs(30));
+    assert!(
+        status.success(),
+        "controller exited with {status}\n{}",
+        controller.log_tail()
+    );
+    Ok(())
+}
+
+/// First `.zst` anywhere under `dir`, or None if the tree does not exist yet.
+fn find_zst(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_zst(&path) {
+                return Some(found);
+            }
+        } else if path.extension().is_some_and(|e| e == "zst") {
+            return Some(path);
+        }
+    }
+    None
 }

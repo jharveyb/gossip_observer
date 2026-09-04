@@ -1,5 +1,6 @@
 use config::{Config, Environment, File};
 use observer_common::logging::{ConsoleConfig, LogRotationConfig};
+use observer_common::uploader::UploadConfig;
 use serde::Deserialize;
 use std::env;
 
@@ -28,6 +29,13 @@ pub struct Controller {
     pub heartbeat_expiry: u32,
     pub chan_update_interval: u32,
     pub graph_diff_cron: String,
+    /// Where gossip graph dumps are written. Defaults to `storage_dir`, which
+    /// is where they have always gone; production points it at a subdirectory
+    /// so dumps don't share a directory with the log janitor's sweep.
+    pub graph_dir: String,
+    /// zstd level for graph dumps. 22 (max) is worth it here: these are written
+    /// on a cron, read rarely, and kept for a long time.
+    pub zstd_level: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +45,7 @@ pub struct ControllerConfig {
     pub console: ConsoleConfig,
     pub controller: Controller,
     pub log_rotation: LogRotationConfig,
+    pub upload: UploadConfig,
     pub uuid: String,
 }
 
@@ -59,8 +68,13 @@ impl ControllerConfig {
             "local" => "./controller".to_string(),
             _ => anyhow::bail!("Unknown CONTROLLER_MODE: {mode}"),
         };
+        // NOTE: this is a suffix to these defaults, not the storage_dir provided
+        // in the config file. So a graph dir should be specified in the config
+        // file if not using the default storage_dir.
+        let graph_dir = format!("{storage_dir}/graphs");
 
         let cfg = Config::builder()
+            .add_source(UploadConfig::defaults_source()?)
             // All default config values
             .set_default("grpc.hostname", "127.0.0.1")?
             .set_default("grpc.port", 50051)?
@@ -77,7 +91,9 @@ impl ControllerConfig {
             .set_default("log_rotation.sweep_interval_secs", 30 * 60)?
             .set_default("log_rotation.startup_delay_max_secs", 300)?
             .set_default("log_rotation.max_compressions_per_pass", 20)?
-            .set_default("controller.storage_dir", storage_dir)?
+            .set_default("controller.storage_dir", storage_dir.clone())?
+            .set_default("controller.graph_dir", graph_dir)?
+            .set_default("controller.zstd_level", 22)?
             .set_default("controller.log_level", "info")?
             // An arbitrary number, picked so that small communities can be sampled
             // without overly skewing the overall distribution of samples vs. reality.
@@ -89,7 +105,14 @@ impl ControllerConfig {
             // 5 minutes after every second hour should be fine.
             .set_default("controller.graph_diff_cron", "0 5 */2 * * *")?
             .add_source(File::with_name(&cfg_path).required(false))
-            .add_source(Environment::with_prefix("CONTROLLER"))
+            // Pin both separators so nested keys are settable from the
+            // environment (CONTROLLER_UPLOAD__BUCKET).
+            // https://docs.rs/config/latest/config/struct.Environment.html#method.separator
+            .add_source(
+                Environment::with_prefix("CONTROLLER")
+                    .prefix_separator("_")
+                    .separator("__"),
+            )
             .build()?;
 
         cfg.try_deserialize().map_err(anyhow::Error::new)
