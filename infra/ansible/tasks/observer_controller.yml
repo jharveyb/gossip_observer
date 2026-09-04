@@ -8,13 +8,52 @@
   ansible.builtin.set_fact:
     tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
+# `controller_uuids` optionally narrows a run to specific instances, e.g.
+#   ansible-playbook ... -e '{"controller_uuids": ["<staging-uuid>"]}'
+# Staging and prod instances share a host, so --limit cannot separate them; and
+# the restart handlers loop over `host_controllers`, so narrowing here also stops a
+# sibling instance from being restarted. Unset means every instance, as before.
+- name: Fail on an unknown controller_uuids entry
+  ansible.builtin.fail:
+    msg: >-
+      controller_uuids contains UUIDs that are not in observer_controllers:
+      {{ controller_uuids | difference(observer_controllers | map(attribute='uuid') | list) | join(', ') }}
+  when:
+    - controller_uuids is defined
+    - controller_uuids | difference(observer_controllers | map(attribute='uuid') | list) | length > 0
+
 - name: Filter controllers for this host
   ansible.builtin.set_fact:
-    host_controllers: "{{ observer_controllers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+    host_controllers: >-
+      {{ observer_controllers
+         | selectattr('host', 'equalto', inventory_hostname)
+         | selectattr('uuid', 'in', controller_uuids | default(observer_controllers | map(attribute='uuid') | list))
+         | list }}
 
 - name: Skip host if no controllers assigned
   ansible.builtin.meta: end_host
   when: host_controllers | length == 0
+
+# The config template omits the creds block when `controller_sync_s3_keys` has no entry
+# for an instance, which yields a config that starts fine and publishes
+# nothing. Catch it here instead.
+- name: Require upload credentials for any instance with uploads enabled
+  ansible.builtin.assert:
+    that: >-
+      controller_sync_s3_keys is defined
+      and item.uuid in controller_sync_s3_keys
+      and controller_sync_s3_keys[item.uuid].key_id | default('') | length > 0
+      and controller_sync_s3_keys[item.uuid].secret | default('') | length > 0
+    fail_msg: >-
+      {{ item.uuid }} has upload_enabled but no usable controller_sync_s3_keys
+      entry. Add one to vault.yml (key_id + secret from
+      `garage key info --show-secret <write-key>`), and check the playbook
+      loads vault.yml.
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }}"
+  when: item.upload_enabled | default(false)
+  no_log: true
 
 - name: Create base observer controller directories
   ansible.builtin.file:
@@ -22,7 +61,7 @@
     state: directory
     owner: goss
     group: goss
-    mode: '0755'
+    mode: "0755"
   loop:
     - /var/lib/observer_controller
     - /etc/observer_controller
@@ -33,8 +72,19 @@
     state: directory
     owner: goss
     group: goss
-    mode: '0755'
+    mode: "0755"
   loop: "{{ ['/var/lib/observer_controller', '/etc/observer_controller'] | product(host_controllers) }}"
+
+- name: Create gossip graph dump directories
+  ansible.builtin.file:
+    path: "{{ item.graph_dir | default('/var/lib/observer_controller/' ~ item.uuid ~ '/graphs') }}"
+    state: directory
+    owner: goss
+    group: goss
+    mode: "0755"
+  loop: "{{ host_controllers }}"
+  loop_control:
+    label: "{{ item.uuid }} - graph_dir"
 
 - name: Deploy controller input files (node clusterings)
   ansible.builtin.copy:
@@ -42,7 +92,7 @@
     dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0644"
   loop: "{{ host_controllers }}"
   loop_control:
     label: "{{ item.uuid }} - node_clusterings"
@@ -54,7 +104,7 @@
     dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_communities_file | basename }}"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0644"
   loop: "{{ host_controllers }}"
   loop_control:
     label: "{{ item.uuid }} - node_communities"
@@ -66,7 +116,7 @@
     dest: "/var/lib/observer_controller/{{ item.uuid }}/{{ item.collector_mapping_file | basename }}"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0644"
   loop: "{{ host_controllers }}"
   loop_control:
     label: "{{ item.uuid }} - collector_mapping"
@@ -78,8 +128,9 @@
     dest: "/etc/observer_controller/{{ item.uuid }}/config.toml"
     owner: goss
     group: goss
-    mode: '0644'
+    mode: "0640"
   loop: "{{ host_controllers }}"
+  no_log: true
   notify: Restart all observer controllers
 
 - name: Deploy observer controller binary
@@ -88,7 +139,7 @@
     dest: /usr/local/bin/observer_controller
     owner: root
     group: root
-    mode: '0755'
+    mode: "0755"
   notify: Restart all observer controllers
 
 - name: Install observer controller systemd template
@@ -97,7 +148,7 @@
     dest: /etc/systemd/system/observer-controller@.service
     owner: root
     group: root
-    mode: '0644'
+    mode: "0644"
   notify:
     - Reload systemd config
     - Restart all observer controllers

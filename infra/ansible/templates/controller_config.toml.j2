@@ -4,6 +4,9 @@ log_level = "{{ item.log_level | default('info') }}"
 total_connections = {{ item.total_connections | default(700) }}
 heartbeat_expiry = {{ item.heartbeat_expiry | default(600) }}
 graph_diff_cron = "{{ controller_graph_cron }}"
+# Gossip graph dumps land here rather than directly in storage_dir, so they
+# don't share a directory with the rotated logs the janitor sweeps.
+# graph_dir = "{{ item.graph_dir | default('/var/lib/observer_controller/' ~ item.uuid ~ '/graphs') }}"
 chan_update_interval = {{ controller_chan_update_interval | default(14400) }}
 
 [grpc]
@@ -19,3 +22,27 @@ retention_secs = 120
 node_clusterings = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_clusterings_file | basename }}"
 node_communities = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.node_communities_file | basename }}"
 collector_mapping = "/var/lib/observer_controller/{{ item.uuid }}/{{ item.collector_mapping_file | basename }}"
+
+[upload]
+# Publish gossip graph dumps to the gossip-graph-dump bucket. Remote keys are
+# date-partitioned ({kind}/YYYY/MM/DD/{filename}), local filenames are
+# unchanged.
+enabled = {{ item.upload_enabled | default(false) | lower }}
+# Full URL; the scheme decides plain HTTP vs TLS.
+endpoint = "{{ item.upload_endpoint | default('') }}"
+bucket = "{{ item.upload_bucket | default('') }}"
+region = "{{ item.upload_region | default('garage') }}"
+key_prefix = "{{ item.upload_key_prefix | default('') }}"
+delete_local = {{ item.upload_delete_local | default(false) | lower }}
+# Concurrent in-flight parts within one file, and concurrent uploads. Graph
+# dumps are large and infrequent, so low values keep the memory ceiling small.
+max_concurrency = {{ item.upload_max_concurrency | default(4) }}
+workers = {{ item.upload_workers | default(2) }}
+# Fail startup rather than logging and retrying when the bucket is unreachable
+# or the credentials are missing.
+required_on_startup = {{ item.upload_required_on_startup | default(false) | lower }}
+{% if controller_sync_s3_keys is defined and item.uuid in controller_sync_s3_keys %}
+# Read+write Garage creds from vault, keyed by controller instance UUID.
+access_key_id = "{{ controller_sync_s3_keys[item.uuid].key_id }}"
+secret_access_key = "{{ controller_sync_s3_keys[item.uuid].secret }}"
+{% endif %}

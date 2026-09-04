@@ -19,3 +19,21 @@ garage_admin_token: "change-me-admin-token"
 # metrics_token: scoped to GET /metrics only, for Prometheus scraping.
 #   Generate with: openssl rand -base64 32
 garage_metrics_token: "change-me-metrics-token"
+
+# --- Garage read+WRITE S3 creds used to publish artifacts ---
+# Keyed by instance UUID, so staging and prod get distinct keys.
+archiver_sync_s3_keys:
+  "019b3768-e9ea-7ce3-ae28-9a4acc0ad17f": # staging -> archiver-staging-sync
+    key_id: "GK0000000000000000000000"
+    secret: "0000000000000000000000000000000000000000000000000000000000000000"
+  "019c26be-a6d2-7bb8-ab6b-07b28bf96c1e": # prod -> archiver-sync
+    key_id: "GK0000000000000000000000"
+    secret: "0000000000000000000000000000000000000000000000000000000000000000"
+
+controller_sync_s3_keys:
+  "019c26e9-cb39-78ad-bb60-93d04942017b": # staging
+    key_id: "GK0000000000000000000000"
+    secret: "0000000000000000000000000000000000000000000000000000000000000000"
+  "019c26ea-281a-71eb-b14a-dce305b168c8": # prod
+    key_id: "GK0000000000000000000000"
+    secret: "0000000000000000000000000000000000000000000000000000000000000000"

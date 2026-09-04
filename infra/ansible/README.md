@@ -25,6 +25,27 @@ Run on a specific host, with a specific user:
 
 `ansible-playbook $PLAYBOOK --ask-vault-pass --limit $HOSTNAME -e ansible_user=$USER`
 
+Run on a specific *instance* (archivers / controllers):
+
+```bash
+ansible-playbook archiver_init.yml --ask-vault-pass \
+  -e '{"archiver_uuids": ["019b3768-e9ea-7ce3-ae28-9a4acc0ad17f"]}'
+
+ansible-playbook controller_init.yml --ask-vault-pass \
+  -e '{"controller_uuids": ["019c26e9-cb39-78ad-bb60-93d04942017b"]}'
+```
+
+`--limit` is not enough on its own here: staging and prod instances share a
+host, so it selects both. `archiver_uuids` / `controller_uuids` narrow the run
+to named instances, and because the restart handlers loop over the same
+filtered fact, a sibling instance on that host is left running untouched. Omit
+the variable to deploy every instance, as before. A UUID that isn't in
+`gossip_archivers` / `observer_controllers` fails the run rather than silently
+deploying nothing.
+
+Note the binary is shared by every instance on a host (`/usr/local/bin/...`
+plus a `service@.service` template).
+
 ## Initial host setup
 
 Note: Use a specific user for `server_init` if root SSH access is not available.

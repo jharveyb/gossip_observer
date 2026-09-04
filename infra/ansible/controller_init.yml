@@ -3,6 +3,11 @@
   hosts: controllers
   become: true
 
+  pre_tasks:
+    # Load S3 creds
+    - name: Load vault variables
+      ansible.builtin.include_vars: vault.yml
+
   tasks:
     - name: Observer Controller setup
       ansible.builtin.import_tasks: tasks/observer_controller.yml
