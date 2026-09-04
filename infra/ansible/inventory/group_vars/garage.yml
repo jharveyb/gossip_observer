@@ -53,6 +53,9 @@ garage_bootstrap_peers: []
 garage_zone: "dc1"
 garage_node_capacity: "250G"
 
+# We have mostly 'large files'
+garage_block_size: "10M"
+
 # --- Buckets ---
 # One entry per bucket/environment. Each carries the two archiver keys it needs:
 #   write_key  — read+write, used by the archiver to UPLOAD Parquet (archiver-sync).
@@ -75,9 +78,12 @@ garage_buckets:
   - name: "gossip-collector-packet-captures"
     write_key: "packet-capture-sync"
     verify_key: "packet-capture-verify"
-  - name: "gossip-graph-dumps"
+  - name: "gossip-graph-dump"
     write_key: "graph-dump-sync"
     verify_key: "graph-dump-verify"
+  - name: "gossip-graph-dump-staging"
+    write_key: "graph-dump-staging-sync"
+    verify_key: "graph-dump-staging-verify"
 
 # Public/prod bucket that per-researcher reader keys are granted read access on.
 garage_public_bucket: "{{ garage_buckets[0].name }}"

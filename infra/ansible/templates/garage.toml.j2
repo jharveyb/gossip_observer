@@ -31,6 +31,8 @@ bootstrap_peers = [
 bootstrap_peers = []
 {% endif %}
 
+block_size = "{{ garage_block_size }}"
+
 # No root domain param., as it's optional and we'll use path-style requests
 # anyways.
 [s3_api]

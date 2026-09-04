@@ -3,3 +3,4 @@
 # The PG cluster was relocated (manually, pre-Ansible-management) onto the
 # DigitalOcean block volume that also holds the Parquet exports.
 postgresql_data_directory: "/mnt/volume_nyc1_01/postgresql/18/main"
+garage_data_dir: "/mnt/volume_nyc1_01/garage"
