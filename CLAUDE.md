@@ -12,7 +12,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 ## Commands
 - Build: `just build` (debug) / `just build-prod` (release). Workspace builds are offline by default (`SQLX_OFFLINE=true`).
 - Test + lint: `cargo test --workspace`, `cargo clippy --workspace`.
-- Integration test (controller ⇄ collector pair, ~10s): `just integration-test` — needs `bitcoind` and `nats-server` on PATH (or `BITCOIND_EXE`/`NATS_SERVER_EXE`).
+- Integration test (controller ⇄ collector pair, log janitor, artifact publishing; ~2 min): `just integration-test` — needs `bitcoind`, `nats-server` and `garage` on PATH (or `BITCOIND_EXE`/`NATS_SERVER_EXE`/`GARAGE_EXE`). The garage download one-liner is in the recipe comment.
 - SQL offline cache: `just gen-sql` (= `cargo sqlx prepare --workspace`) after changing any SQL; `just check-sql` to verify. Needs a DB with the TimescaleDB extension applied.
 - Deploy: Ansible playbooks in `infra/ansible/` (`collector_init.yml`, `archiver_init.yml`, `controller_init.yml`, `data_sharing_init.yml`). Dry-run with `--check --diff`; scope with `--limit`. Vault-encrypted secrets → `--ask-vault-pass`.
 
