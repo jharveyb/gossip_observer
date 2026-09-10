@@ -12,7 +12,7 @@ paths:
 ## Config precedence
 `Config::builder().set_default(...)` < `File::...required(false)` < `Environment::with_prefix("PREFIX")` — see each crate's `config.rs`. `Option<T>` fields need `#[serde(default)]`. Make `.env`/optional files non-fatal: `let _ = dotenvy::dotenv();`.
 
-- **Nested env keys need `.separator("__")` — which also silently overrides the *prefix* separator.** `config` 0.15 defaults `prefix_separator` to whatever you pass to `.separator(...)`, so `with_prefix("COLLECTOR").separator("__")` alone makes the prefix `COLLECTOR__` and the flat `COLLECTOR_UUID`/`COLLECTOR_MODE` reads deserialize as *missing fields*. Pin both: `.prefix_separator("_").separator("__")`. Only the **collector** does this (so the bitcoind RPC password can be set via `COLLECTOR_LDK__CHAIN_SOURCE__RPC_PASSWORD` instead of the `0640` config file); the archiver and controller use plain `with_prefix` with no nested-env override.
+- **Nested env keys need `.separator("__")` — which also silently overrides the *prefix* separator.** `config` 0.15 defaults `prefix_separator` to whatever you pass to `.separator(...)`, so `with_prefix("COLLECTOR").separator("__")` alone makes the prefix `COLLECTOR__` and the flat `COLLECTOR_UUID`/`COLLECTOR_MODE` reads deserialize as *missing fields*. Pin both: `.prefix_separator("_").separator("__")`. **All three crates now do this** — the archiver and controller used plain `with_prefix` until 2026-08, which meant no nested key was *ever* settable from the environment there (`ARCHIVER_NATS_SERVER_ADDR` deserialized as `nats_server_addr` and was silently ignored). Single-segment keys don't split, so the flat `*_UUID`/`*_MODE`/`ARCHIVER_DB_URL` reads are unaffected.
 
 ## Type conversions
 Define domain types in `observer_common/src/types.rs` with `From`/`TryFrom` for their proto counterparts (e.g. `OpenChannelCommand` ⇄ `common::OpenChannelRequest`, using `util::convert_required_field` for required fields). gRPC client/server code then just calls `Request::new(cmd.into())` / `req.try_into()` — no inline conversion in handlers. Import frequently-used types (`use tonic::Request;`) rather than repeating full paths.
@@ -69,6 +69,79 @@ RSS ≈ *task-spawn rate × retention*, with no ceiling. Measured on the collect
 - **Compression runs in one `spawn_blocking` with sync `std::fs` + `zstd` and a 256 KiB buffer** — never `tokio::fs` in a copy loop, which dispatches a blocking task per 8 KiB (see the tokio-console section above). `startup_delay_max_secs` jitters the first sweep so compression never overlaps startup or runs in lockstep across sibling instances; `max_compressions_per_pass` spreads a backlog over sweeps.
 - **A leftover `{file}.zst.tmp` is a poison-pill marker, not garbage.** `compress_file` removes its own temp on error, so one surviving a restart means the *process died* compressing that file. While the source still exists the janitor skips it permanently and warns (delete the `.zst.tmp` to re-arm); the temp is only swept once its source is gone. The temp check runs **before** the age guard — an orphan has a fresh mtime and would otherwise be skipped forever.
 - The collector's LDK logger (`gossip_collector/src/logger.rs`) rolls to `ldk_node.<timestamp>` on the same cadence/naming as `tracing_appender` and writes **best-effort**: a failed open/write logs once to stderr and drops lines — a full disk must not panic inside an LDK thread.
+
+## Artifact uploads (`observer_common::uploader`)
+
+Publishing generated artifacts to Garage — the archiver's Parquet exports, the controller's
+gossip graph dumps — goes through one `ArtifactUploader` per process. `object_store` with
+`AmazonS3Builder`, path-style addressing (`with_virtual_hosted_style_request(false)`; Garage
+does not do virtual-hosted), `with_allow_http` for the plain-HTTP tailscale path.
+
+- **The key layout lives in code, not config.** Config exposes only `upload.key_prefix`; the
+  rest of the key comes from `chunk_archiver::export_rel_path` (archiver) or
+  `collector_manager::GraphArtifact` (controller). Those are unit-tested against the exact
+  strings already in the bucket, because a layout change orphans every existing object with no
+  error — just a `NoSuchKey` the retention pass reads as "don't drop". **Invariant: the local
+  relative path *is* the object key suffix**, which is what made the in-process uploader and the
+  manual `rclone copy` flow overlap as byte-identical overwrites during rollout.
+- **Nothing deletes a local file without an `UploadReceipt`**, which only `upload_file` builds,
+  and only after `head` confirms the remote size matches. Existence ≠ validity applies to
+  objects too: a truncated multipart can still be accepted. On failure the multipart is
+  `abort()`ed (Garage has no lifecycle expiry — orphan parts are forever) and the local file is
+  left alone.
+- **Memory ceiling ≈ `part_size × (2 + 1 + max_concurrency)` per upload**, `× workers`
+  process-wide. It does not scale with file size: a 112 MB graph and a multi-GB Parquet file
+  cost the same. The bridge is one `spawn_blocking` reader (sync `std::fs`) feeding the async
+  `WriteMultipart` over a 2-slot `Bytes` channel, where `blocking_send` *is* the backpressure.
+  Never `tokio::fs` in the read loop — same reason as everywhere else in this file.
+- **Uploads never fail a producer.** The archiver records `chunk_archive_log` *before* uploading
+  so a crash leaves `object_key IS NULL` — one cheap retry for `upload_pending_exports`, not a
+  re-run of a multi-minute DuckDB `COPY`. That sweep is also the backfill path, and its
+  `head_size` short-circuit is what stops the first tick after enabling uploads from
+  re-transferring the entire historical export set.
+- **The startup probe must be a signed request.** Caddy fronts Garage and 404s anything without
+  an `Authorization` header, so an unsigned GET "succeeds" as a 404 and proves nothing —
+  `probe()` uses `list_with_delimiter`. A failed probe logs and continues (it does *not* degrade
+  the uploader to `None`); `upload.required_on_startup` is the opt-in fail-fast.
+- **The retention read-back stays on DuckDB httpfs.** `parquet_file_metadata` reads `num_rows`
+  from the Parquet footer; `object_store` only moves bytes. Keeping it also keeps the least
+  privilege split: uploads use the read-write `*-sync` key, verification the read-only
+  `*-verify` key, so a bug in the deletion path can never mutate the bucket. The archiver
+  therefore holds two credential pairs and warns at startup if the two targets disagree.
+- The `--s3-sign-accept-encoding=false` rclone/Cloudflare gotcha does **not** apply:
+  `object_store`'s reqwest has no gzip/brotli feature, so it sends no `Accept-Encoding`, and the
+  daemons reach Garage over tailscale rather than through Cloudflare.
+- `upload.backend = "local"` builds a `LocalFileSystem` and exists for tests and `*_MODE=local`;
+  it is not the production off switch. `upload.enabled = false` is, and it leaves the callers'
+  plain `std::fs` paths untouched.
+- **Config lives in one place.** `UploadConfig` implements `Default` and exposes
+  `defaults_source()` (a `config::Config` built via `Config::try_from`, which works because
+  `Config` implements `Source`); each service adds it *before* its file and env sources instead
+  of repeating a `set_default` block. Credentials are `skip_serializing`, so the defaults source
+  can never carry one. There is deliberately no default `bucket` or `endpoint` — both are
+  deployment facts, and guessing would publish somewhere unintended.
+- **Validate once, in `ArtifactUploader::new`.** `UploadConfig::validate()` checks the endpoint
+  scheme, the bucket, `local_root`, and that `key_prefix` is a single segment; the uploader then
+  holds a parsed `Option<ObjectKey>` prefix and `key_for` returns an `ObjectKey`, so no method
+  re-parses or re-validates a config string. Distinguish the two failure modes: a *malformed*
+  config is an `Err` from `new()`, while *absent credentials* return `Ok(None)` and degrade —
+  "wrong endpoint" and "no creds yet" should not look alike.
+- **`AmazonS3Builder::with_client_options` replaces the whole `ClientOptions`** ("overriding any
+  already set"), and `with_allow_http` writes into that same field — so calling `with_allow_http`
+  *before* passing client options silently resets it. Set `allow_http` on the `ClientOptions` you
+  pass, never via the builder shortcut. The symptom is a request-time `URL scheme is not allowed`
+  after microseconds, with no socket ever opened. Pinned at two levels:
+  `plain_http_endpoints_are_permitted` is a fast unit-test tripwire (it only asserts the error
+  isn't a scheme complaint, with no server on the other end), and
+  `controller_publishes_graph_dumps_to_garage` is the proof — the real controller publishing to a
+  real Garage over plain HTTP. Reinstating the bad ordering fails both in under two seconds.
+- **`upload.endpoint` is a full URL and there is no `use_ssl` flag** — the scheme alone decides
+  whether plain HTTP is allowed, so the two can't contradict each other. Note the archiver's
+  older `export.verify_endpoint` is still a bare `host:port` paired with `verify_use_ssl`; the
+  startup consistency check compares *hosts* for exactly that reason.
+- **`upload.key_prefix` is a single path segment** (`"staging"`, not `"staging/"`), rejected at
+  startup if it contains `/`. Config may namespace an instance within a bucket; it may not
+  splice extra structure into a code-owned key layout.
 
 ## Resilience
 - **Reconnect loops, don't exit on disconnect.** The NATS client loops with 5s retry sleeps and reconnects on normal exit (`gossip_archiver/src/nats.rs`).
