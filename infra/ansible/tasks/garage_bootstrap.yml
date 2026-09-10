@@ -15,22 +15,46 @@
 # the show_keys task.
 #
 # To expand from 1 → N nodes later:
-#   1. Add new host(s) to [garage] and update garage_bootstrap_peers.
-#   2. Bump garage_replication_factor to match N (must be identical on every
-#      node).
-#   3. Re-run the playbook. The layout-version detection below will see the
-#      new node missing from the current layout, assign it, and apply
-#      version <current+1>.
+#   1. Add the host to [garage] and add a garage_nodes entry (zone, capacity,
+#      rpc_addr). Leave node_id out until the node has run once.
+#   2. Re-run the playbook, ideally with --limit <newhost>: the existing nodes'
+#      configs don't depend on the new entry, so nothing restarts. The
+#      layout-version detection below sees the new node missing from the
+#      current layout, assigns it, and applies version <current+1>.
+#   3. Fill in the new node's node_id from `garage node id -q` so the other
+#      nodes list it as a bootstrap peer on their next config deploy.
+#
+# Do NOT also bump garage_replication_factor as part of that: the factor is
+# stored in the cluster layout, and a node whose config disagrees with its
+# stored layout refuses to start. Growing redundancy is a separate offline
+# migration — see "Changing the replication factor" in DATA_SHARING.md.
 
+# check_mode: false so a --check run against a live cluster still reads real
+# node IDs. On a host where Garage isn't installed yet that command genuinely
+# cannot succeed, so under --check we tolerate the failure and leave
+# garage_node_id unset — the layout loop below skips hosts without it. Outside
+# check mode a missing node ID is still fatal.
 - name: Gather local Garage node ID
   ansible.builtin.command: garage node id -q
   register: garage_node_id_result
   changed_when: false
   check_mode: false
+  failed_when: garage_node_id_result.rc != 0 and not ansible_check_mode
 
 - name: Store node ID as fact
   ansible.builtin.set_fact:
     garage_node_id: "{{ garage_node_id_result.stdout.split('@')[0] }}"
+  when: garage_node_id_result.rc == 0
+
+- name: Report that this host's node ID is unavailable
+  ansible.builtin.debug:
+    msg: >-
+      Could not read a Garage node ID from {{ inventory_hostname }}
+      (`garage node id -q` rc={{ garage_node_id_result.rc }}). Garage is not
+      installed and running here yet, which --check cannot change, so this
+      host's layout assignment can't be previewed. Re-run without --check to
+      install it, then dry-run again.
+  when: garage_node_id_result.rc != 0
 
 - name: Bootstrap Garage cluster (layout + buckets + write keys)
   run_once: true
@@ -54,20 +78,29 @@
     - name: Assign each Garage node to the layout if missing
       ansible.builtin.command:
         cmd: >-
-          garage layout assign {{ hostvars[item].garage_node_id }}
-          --zone {{ garage_zone }}
-          --capacity {{ garage_node_capacity }}
-          --tag {{ item }}
-      loop: "{{ groups['garage'] }}"
+          garage layout assign {{ hostvars[item.host].garage_node_id }}
+          --zone {{ item.zone }}
+          --capacity {{ item.capacity }}
+          --tag {{ item.host }}
+      loop: "{{ garage_nodes }}"
+      loop_control:
+        label: "{{ item.host }}"
       register: garage_layout_assign
       changed_when: true
-      # Match on the first 16 hex chars (short form used by `layout show`).
-      when: hostvars[item].garage_node_id[:16] not in garage_layout_show.stdout
+      when:
+        # No fact = the host isn't in this play (--limit), or it failed before
+        # reaching the node-ID task. Skip it rather than templating an
+        # undefined into the command.
+        - hostvars[item.host].garage_node_id is defined
+        # Match on the first 16 hex chars (short form used by `layout show`).
+        - hostvars[item.host].garage_node_id[:16] not in garage_layout_show.stdout
 
+    # Ansible aggregates a top-level `changed` over all iterations of a looped
+    # task, so this covers "any node was newly assigned".
     - name: Apply layout if any node was newly assigned
       ansible.builtin.command:
         cmd: "garage layout apply --version {{ garage_current_layout_version | int + 1 }}"
-      when: garage_layout_assign.results | selectattr('changed', 'equalto', true) | list | length > 0
+      when: garage_layout_assign.changed
       changed_when: true
 
     # --- Buckets (one per environment; see garage_buckets in group_vars) ---

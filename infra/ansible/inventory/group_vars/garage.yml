@@ -38,20 +38,70 @@ garage_metadata_snapshot_interval: "6h"
 
 # --- Cluster ---
 # Replication factor: how many copies of each object to keep across nodes.
-# 1 = no redundancy (single-node default). Set to 3 if you run 3+ nodes.
-# Must be the SAME on every node in the cluster.
+# 1 = no redundancy (single-node default).
+#
+# DO NOT change this on a live cluster by editing this variable. Since Garage
+# 1.0 the factor is stored IN THE CLUSTER LAYOUT, and a node whose config
+# disagrees with its stored layout refuses to start:
+#
+#   Previous cluster layout has replication factor N, which is different than
+#   the one specified in the config file (M). The previous cluster layout can
+#   be purged [...] by deleting the `cluster_layout` file in your metadata
+#   directory.
+#
+# So bumping this and re-running the playbook does not grow redundancy — it
+# takes the running node down at the next restart. Upstream confirms there is
+# no in-place path, for increases as well as decreases:
+#   https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/#replication_factor
+#   https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/1173
+# Raising it is a whole-cluster migration (stop everything, purge the layout on
+# every node, rebuild it, rebalance) — see "Changing the replication factor" in
+# DATA_SHARING.md. tasks/garage.yml asserts config-vs-deployed before touching
+# /etc/garage.toml so this can't happen by accident.
 garage_replication_factor: 1
+# Escape hatch for that assert. Only ever passed on the command line during the
+# documented migration: -e garage_allow_replication_factor_change=true
+garage_allow_replication_factor_change: false
 # Read/write quorum behavior. "consistent" enforces read-after-write and is
 # the safe default. See the reference for degraded/dangerous modes.
 garage_consistency_mode: "consistent"
-# Bootstrap peers for multi-node discovery. Format: "<node_id>@<host>:<port>".
-# Obtain <node_id> with `garage node id` on each node. Leave empty for a
-# single-node cluster.
-garage_bootstrap_peers: []
-
-# --- Layout ---
-garage_zone: "dc1"
-garage_node_capacity: "250G"
+# --- Cluster nodes ---
+# One entry per node. This single list drives both the cluster layout
+# (garage_bootstrap assigns each node from it) and each node's
+# bootstrap_peers. Adding a node = an entry here + a line in the [garage]
+# inventory group; no task or template edits.
+#
+# host:     must match inventory_hostname.
+# zone:     replicas are spread across zones first, so nodes that can fail
+#           together belong in the same zone. Only meaningful at replication
+#           factor >= 2, but set it truthfully now — a node's zone is fixed at
+#           assign time, and changing it later means re-running
+#           `garage layout assign` for that node by hand.
+# capacity: relative weight AND a real cap on what the node stores. Keep it
+#           comfortably under the free space of the disk holding
+#           garage_data_dir.
+# rpc_addr: the node's Tailscale IP; it's what the node publishes as
+#           rpc_public_addr, so it's the address other nodes dial.
+# node_id:  from `garage node id -q` on that node, minus the @addr suffix.
+#           Only knowable once Garage runs there, so a brand-new node has no
+#           node_id until after its first real deploy. Peers without one are
+#           simply left out of everyone's bootstrap_peers.
+#
+# garage.toml.j2 renders each host's bootstrap_peers as "every OTHER node with
+# a node_id". Excluding the host's own entry is deliberate: it keeps a node's
+# config from churning when an unrelated node is added, so adding a node
+# doesn't restart the running cluster.
+garage_nodes:
+  - host: "do-medium"
+    zone: "dc1" # Matches the live layout — do not rename in place
+    capacity: "250G"
+    rpc_addr: "100.85.59.117"
+    node_id: "4d38659411275b4d17e3d7b37cb815c7fd11af058f13fec3b9457f14165adab0"
+  - host: "closet-full-indexer"
+    zone: "closet"
+    capacity: "250G"
+    rpc_addr: "100.102.164.115"
+    node_id: "6fac173c7f76086cc2a2a63d26e309c47ec4b84300b0a5d4e70607a0939b2e98"
 
 # We have mostly 'large files'
 garage_block_size: "10M"

@@ -63,6 +63,45 @@
     - garage_data_dir_mount.rc == 0
     - "'/' == (garage_data_dir_mount.stdout_lines[1].split() | first | default(''))"
 
+# The unit runs as User=garage, so EVERY directory on the way to data_dir must
+# be traversable (+x) by that user — not just data_dir itself. The task above
+# creates data_dir as root, which hides a restrictive ancestor (e.g. a mount
+# root at 0700 owned by another service's user). Without this check the first
+# symptom is a crash loop after deploy:
+- name: Probe whether the garage user can traverse to the external data_dir
+  ansible.builtin.command: "runuser -u garage -- test -x {{ garage_data_dir | dirname }}"
+  register: garage_data_dir_traverse
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: garage_data_dir_is_external
+
+- name: Collect the permission chain when traversal fails
+  ansible.builtin.command: "namei -l {{ garage_data_dir }}"
+  register: garage_data_dir_namei
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - garage_data_dir_is_external
+    - garage_data_dir_traverse.rc != 0
+
+- name: Assert the garage user can reach the external data_dir
+  ansible.builtin.assert:
+    that: garage_data_dir_traverse.rc == 0
+    fail_msg: |-
+      The garage service user cannot traverse to {{ garage_data_dir }} on
+      {{ inventory_hostname }}. Garage would start, fail to open its data
+      directory, and crash-loop:
+        Error: Unable to create Garage data directory: {{ garage_data_dir }}: Permission denied
+      This is a PARENT directory permission, not data_dir's own — data_dir is
+      created garage:garage by the task above. Chain:
+      {{ garage_data_dir_namei.stdout | default('(namei unavailable)') }}
+      Give the offending directory +x for the garage user (e.g.
+      `chmod 0755 {{ garage_data_dir | dirname }}`) and re-run.
+    success_msg: "garage can traverse to {{ garage_data_dir }}"
+  when: garage_data_dir_is_external
+
 # Pre-built musl binary from the upstream release.
 # https://garagehq.deuxfleurs.fr/download/
 - name: Download Garage binary
@@ -73,6 +112,40 @@
     group: root
     mode: "0755"
     force: false
+
+# Guard against the one config change that cannot be rolled out by redeploying
+# a template: the replication factor is stored in the cluster layout, so a node
+# whose new config disagrees with its existing layout refuses to start. Catch
+# it BEFORE the template task below notifies Restart Garage, otherwise the
+# first symptom is a node that never comes back. A host with no /etc/garage.toml
+# yet (a brand-new node) has nothing to disagree with and is skipped.
+- name: Read deployed Garage configuration (if any)
+  ansible.builtin.slurp:
+    src: /etc/garage.toml
+  register: garage_deployed_config
+  failed_when: false
+  check_mode: false
+
+- name: Assert the replication factor matches the deployed one
+  vars:
+    garage_deployed_replication_factor: >-
+      {{ (garage_deployed_config.content | b64decode
+          | regex_findall('^\s*replication_factor\s*=\s*(\d+)', multiline=True)
+          + ['0']) | first | int }}
+  ansible.builtin.assert:
+    that: garage_deployed_replication_factor | int == garage_replication_factor | int
+    fail_msg: >-
+      {{ inventory_hostname }} is running Garage with replication_factor
+      {{ garage_deployed_replication_factor }}, but garage_replication_factor is
+      {{ garage_replication_factor }}. Deploying that would restart Garage into a
+      config that disagrees with its stored cluster layout, and the node would
+      refuse to start. The factor cannot be changed in place — see "Changing the
+      replication factor" in DATA_SHARING.md for the offline migration, which
+      re-runs this play with -e garage_allow_replication_factor_change=true.
+    success_msg: "replication_factor {{ garage_replication_factor }} matches the deployed config"
+  when:
+    - not (garage_allow_replication_factor_change | default(false) | bool)
+    - garage_deployed_config.content is defined
 
 - name: Deploy Garage configuration
   ansible.builtin.template:

@@ -8,10 +8,11 @@ db_engine = "{{ garage_db_engine }}"
 metadata_fsync = {{ garage_metadata_fsync | string | lower }}
 metadata_auto_snapshot_interval = "{{ garage_metadata_snapshot_interval }}"
 
-# Replication factor must be identical on every node in the cluster. To grow
-# from 1 → 3 nodes in the future: set replication_factor = 3 in every node's
-# config, add the new nodes' bootstrap_peers entries below, then run
-# `garage layout assign` + `garage layout apply` once from any node.
+# Replication factor must be identical on every node in the cluster, and it is
+# also stored in the cluster layout: a node whose config disagrees with its
+# stored layout refuses to start. Adding a node does NOT require changing it —
+# add a garage_nodes entry and re-run the playbook. Changing the factor itself
+# is an offline whole-cluster migration; see DATA_SHARING.md.
 replication_factor = {{ garage_replication_factor }}
 consistency_mode = "{{ garage_consistency_mode }}"
 
@@ -21,10 +22,14 @@ rpc_bind_addr = "{{ tailscale_ip + ':' + (garage_rpc_bind_port | string) }}"
 rpc_public_addr = "{{ tailscale_ip + ':' + (garage_rpc_bind_port | string) }}"
 rpc_secret = "{{ garage_rpc_secret }}"
 
-{% if garage_bootstrap_peers | length > 0 %}
+{# Every OTHER node that has a known node_id. Self is excluded so that adding #}
+{# a node doesn't rewrite the existing nodes' configs and restart them.       #}
+{% set peers = garage_nodes | rejectattr('host', 'equalto', inventory_hostname)
+                            | selectattr('node_id', 'defined') | list %}
+{% if peers | length > 0 %}
 bootstrap_peers = [
-{% for peer in garage_bootstrap_peers %}
-    "{{ peer }}",
+{% for peer in peers %}
+    "{{ peer.node_id }}@{{ peer.rpc_addr }}:{{ garage_rpc_bind_port }}",
 {% endfor %}
 ]
 {% else %}
