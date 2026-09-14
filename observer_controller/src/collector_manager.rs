@@ -639,8 +639,127 @@ pub struct GossipDiffConfig {
     pub base_dir: String,
     pub cron: Cron,
     pub file_writer: mpsc::Sender<json_writer::WriteRequest>,
-    /// When true, finished dumps are also queued for upload by the writer.
-    pub upload: bool,
+}
+
+/// Which artifact family a dump belongs to.
+///
+/// Split out of [`GraphArtifact`] so a value recovered from a filename can be
+/// named without borrowing a uuid from anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GraphKind {
+    ControllerGraph,
+    CollectorDiffs,
+    Collector,
+}
+
+impl GraphKind {
+    /// Directory component of the object key; also the artifact family name.
+    pub fn dir(self) -> &'static str {
+        match self {
+            Self::ControllerGraph => "controller_graph",
+            Self::CollectorDiffs => "collector_diffs",
+            Self::Collector => "collector",
+        }
+    }
+
+    pub const ALL: [GraphKind; 3] = [
+        Self::ControllerGraph,
+        Self::CollectorDiffs,
+        Self::Collector,
+    ];
+}
+
+/// A historical dump recovered from its file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDump {
+    pub kind: GraphKind,
+    pub stamp: DateTime<Utc>,
+    /// Exactly what [`GraphArtifact::rel_key`] would have produced at `stamp`.
+    pub rel_key: PathBuf,
+}
+
+/// Width of the `%Y-%m-%d-%H-%M` stamp every dump file name ends with.
+const STAMP_LEN: usize = "2026-03-30-14-05".len();
+const STAMP_FMT: &str = "%Y-%m-%d-%H-%M";
+
+/// Recover the object key for a dump that is already on disk.
+///
+/// The inverse of [`GraphArtifact::file_name`] -- and provably so, because the
+/// last thing it does is rebuild the name from what it parsed and require it to
+/// match byte for byte. That check is what makes this a real inverse rather
+/// than a hand-maintained approximation: it subsumes rules for non-zero-padded
+/// components, dates chrono would silently normalize, and any future change to
+/// `file_name` that this function doesn't track.
+///
+/// Returns `None` for anything that is not one of our dumps. That matters more
+/// than it looks: a controller's storage directory also holds rotated logs,
+/// their compressed and staged forms, community CSVs, deployment inputs and
+/// whatever an operator left lying around. This is an allowlist.
+///
+/// Note rules 1 and 2 are the mirror of the invariant asserted in
+/// `graph_artifact_tests`: a dump's only dot is the terminal `.zst`. That is
+/// the same property that keeps the log janitor's strict `{prefix}.` match away
+/// from these files, read from the other side. The two must not drift.
+pub fn parse_dump_file_name(name: &str) -> Option<ParsedDump> {
+    // 1. Exactly one trailing `.zst`. Rejects live logs, `.zst.tmp` staging and
+    //    janitor poison pills, CSVs, TOML, and stray text files.
+    let stem = name.strip_suffix(".zst")?;
+    // 2. No dot may remain. Rejects `controller.2026-09-09-22.zst` rotated
+    //    logs, their `.1.zst` legacy forms, and the double-compressed
+    //    `...zst.zst` anomaly.
+    if stem.contains('.') {
+        return None;
+    }
+
+    // 3. One family prefix, most specific first.
+    let (kind, uuid) = if let Some(rest) = stem.strip_prefix("controller_graph-") {
+        (GraphKind::ControllerGraph, Some(rest))
+    } else if let Some(rest) = stem.strip_prefix("collector_diffs-") {
+        (GraphKind::CollectorDiffs, Some(rest))
+    } else if let Some(rest) = stem.strip_prefix("collector-") {
+        (GraphKind::Collector, Some(rest))
+    } else {
+        (GraphKind::Collector, None)
+    };
+    let rest = uuid?;
+
+    // 4. Parse the stamp. For a per-collector dump both the uuid and the stamp
+    //    contain dashes, so a left-to-right split is ambiguous -- take the
+    //    stamp from the right by its fixed width instead.
+    let (uuid, stamp_str) = match kind {
+        GraphKind::ControllerGraph | GraphKind::CollectorDiffs => ("", rest),
+        GraphKind::Collector => {
+            let split = rest.len().checked_sub(STAMP_LEN)?;
+            let (uuid, stamp) = rest.split_at(split);
+            // `split_at` on a char boundary only; the stamp is ASCII so a
+            // non-boundary index would have panicked -- guard by checking the
+            // separator instead, which also rejects an empty uuid.
+            let uuid = uuid.strip_suffix('-')?;
+            if uuid.is_empty() {
+                return None;
+            }
+            (uuid, stamp)
+        }
+    };
+    let stamp = chrono::NaiveDateTime::parse_from_str(stamp_str, STAMP_FMT)
+        .ok()?
+        .and_utc();
+
+    let artifact = match kind {
+        GraphKind::ControllerGraph => GraphArtifact::ControllerGraph,
+        GraphKind::CollectorDiffs => GraphArtifact::CollectorDiffs,
+        GraphKind::Collector => GraphArtifact::Collector(uuid),
+    };
+    // The round trip. Anything that survived the rules above but does not
+    // rebuild to the exact input is not a name we produced.
+    if artifact.file_name(stamp) != name {
+        return None;
+    }
+    Some(ParsedDump {
+        kind,
+        stamp,
+        rel_key: artifact.rel_key(stamp),
+    })
 }
 
 /// The gossip artifacts the differ emits each tick, and the one place their
@@ -658,13 +777,18 @@ pub enum GraphArtifact<'a> {
 }
 
 impl GraphArtifact<'_> {
+    /// Which family this is.
+    fn graph_kind(&self) -> GraphKind {
+        match self {
+            Self::ControllerGraph => GraphKind::ControllerGraph,
+            Self::CollectorDiffs => GraphKind::CollectorDiffs,
+            Self::Collector(_) => GraphKind::Collector,
+        }
+    }
+
     /// Directory component of the object key; also the artifact family name.
     fn kind(&self) -> &'static str {
-        match self {
-            Self::ControllerGraph => "controller_graph",
-            Self::CollectorDiffs => "collector_diffs",
-            Self::Collector(_) => "collector",
-        }
+        self.graph_kind().dir()
     }
 
     fn file_name(&self, now: DateTime<Utc>) -> String {
@@ -693,18 +817,20 @@ impl GraphArtifact<'_> {
 /// `SendError` carries the rejected `WriteRequest` back, and that holds a boxed
 /// `FnOnce` which is `Send` but not `Sync` — so it can't be converted into an
 /// `anyhow::Error` directly. The only failure here is a closed channel anyway.
+/// Always keyed: the writer ignores the key when it has no uploader, so a
+/// separate "are uploads on?" flag here was one more representation of the same
+/// fact and one more thing to keep in step.
 fn write_request<T: serde::Serialize + Send + 'static>(
     cfg: &GossipDiffConfig,
     artifact: GraphArtifact<'_>,
     now: DateTime<Utc>,
     value: T,
 ) -> json_writer::WriteRequest {
-    let path = artifact.local_path(&cfg.base_dir, now);
-    if cfg.upload {
-        json_writer::WriteRequest::new_with_key(path, artifact.rel_key(now), value)
-    } else {
-        json_writer::WriteRequest::new(path, value)
-    }
+    json_writer::WriteRequest::new_with_key(
+        artifact.local_path(&cfg.base_dir, now),
+        artifact.rel_key(now),
+        value,
+    )
 }
 
 async fn send_to_writer(
@@ -861,6 +987,122 @@ mod graph_artifact_tests {
             GraphArtifact::Collector("abc").rel_key(now),
             PathBuf::from("collector/2026/03/30/collector-abc-2026-03-30-14-05.zst")
         );
+    }
+
+    /// The round-trip property: for every family, every minute and every uuid
+    /// shape, parsing a produced name recovers exactly the key that produced
+    /// it. This is what makes the parser an inverse rather than a guess.
+    #[test]
+    fn parse_dump_file_name_round_trips_every_artifact() {
+        let uuids = [
+            // A real one from the production directory.
+            "019bfdbc-10b8-794f-91cb-132c5f4cc390",
+            // The integration test's.
+            "019c0000-0000-7000-8000-000000000001",
+            // Degenerate but legal, as the neighbouring tests already use.
+            "abc",
+        ];
+        let stamps = [
+            "2026-01-01T00:00:00Z",
+            "2026-02-12T23:40:00Z",
+            "2026-03-30T14:05:00Z",
+            // A leap day, and both ends of a year.
+            "2028-02-29T12:00:00Z",
+            "2026-12-31T23:59:00Z",
+        ];
+
+        for raw in stamps {
+            let now: DateTime<Utc> = raw.parse().expect("valid timestamp");
+            let mut artifacts = vec![GraphArtifact::ControllerGraph, GraphArtifact::CollectorDiffs];
+            for uuid in uuids {
+                artifacts.push(GraphArtifact::Collector(uuid));
+            }
+            for artifact in artifacts {
+                let name = artifact.file_name(now);
+                let parsed = parse_dump_file_name(&name)
+                    .unwrap_or_else(|| panic!("failed to parse our own name: {name}"));
+                assert_eq!(parsed.kind, artifact.graph_kind(), "{name}");
+                assert_eq!(parsed.stamp, now, "{name}");
+                assert_eq!(parsed.rel_key, artifact.rel_key(now), "{name}");
+            }
+        }
+    }
+
+    /// Everything else that really lives in a controller's storage directory.
+    /// An allowlist is the only safe design here: these sit alongside the dumps
+    /// and none of them may be published.
+    #[test]
+    fn parse_dump_file_name_rejects_every_interloper() {
+        let interlopers = [
+            // Live tracing logs, no extension.
+            "controller.2026-09-09-22",
+            // Janitor-compressed logs, and their legacy logrotate forms.
+            "controller.2026-08-26-14.zst",
+            "controller.2026-08-26-14.1.zst",
+            "controller.2026-02-06.1.zst",
+            // Staging files: json_writer's and the janitor's poison pill.
+            "controller_graph-2026-08-26-16-15.zst.tmp",
+            "controller.2026-08-26-14.zst.tmp",
+            // The one real double-compressed anomaly on the host.
+            "collector-019c26b8-3191-7fff-895f-5ed752c53bdc-2026-06-09-16-15.zst.zst",
+            // Startup output and deployment inputs.
+            "community_9854.csv",
+            "nodes_normalized_initial.csv",
+            "ln_communities_nested_all_levels.csv",
+            "collector_mapping.toml",
+            "diff_report_03_04.txt",
+            "ldk_node_data.sqlite",
+            // Malformed stamps.
+            "collector_diffs-2026-13-45-99-99.zst",
+            "controller_graph-2026-3-30-14-05.zst",
+            "controller_graph-2026-03-30-14.zst",
+            // Empty uuid.
+            "collector--2026-01-01-00-00.zst",
+            // Right family word, wrong shape.
+            "collector_graph-2026-03-30-14-05.zst",
+            "",
+            ".zst",
+        ];
+        for name in interlopers {
+            assert!(
+                parse_dump_file_name(name).is_none(),
+                "would have published an interloper: {name:?}"
+            );
+        }
+    }
+
+    /// The uuid and the stamp both contain dashes, so the split must come from
+    /// the right. A left-to-right split would land inside the uuid.
+    #[test]
+    fn parse_dump_file_name_recovers_uuids_containing_dashes() {
+        let uuid = "019bfdbc-10b8-794f-91cb-132c5f4cc390";
+        let now: DateTime<Utc> = "2026-02-13T02:15:00Z".parse().expect("valid timestamp");
+        let name = GraphArtifact::Collector(uuid).file_name(now);
+        assert_eq!(name, format!("collector-{uuid}-2026-02-13-02-15.zst"));
+
+        let parsed = parse_dump_file_name(&name).expect("parse");
+        assert_eq!(parsed.kind, GraphKind::Collector);
+        assert_eq!(
+            parsed.rel_key,
+            PathBuf::from(format!("collector/2026/02/13/{name}"))
+        );
+    }
+
+    /// Parser-side mirror of `object_key_ends_with_the_local_file_name`.
+    #[test]
+    fn parsed_rel_key_ends_with_the_input_file_name() {
+        for name in [
+            "controller_graph-2026-03-30-14-05.zst",
+            "collector_diffs-2026-03-30-14-05.zst",
+            "collector-019bfdbc-10b8-794f-91cb-132c5f4cc390-2026-03-30-14-05.zst",
+        ] {
+            let parsed = parse_dump_file_name(name).expect("parse");
+            assert_eq!(
+                parsed.rel_key.file_name().and_then(|n| n.to_str()),
+                Some(name)
+            );
+            assert!(parsed.rel_key.starts_with(parsed.kind.dir()));
+        }
     }
 
     /// The remote key always ends in the local filename, so an object can be

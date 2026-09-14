@@ -32,4 +32,5 @@ tracing = "0.1"
 zstd = "0.13"
 
 [dev-dependencies]
+filetime = "0.2.29"
 tempfile = "3"

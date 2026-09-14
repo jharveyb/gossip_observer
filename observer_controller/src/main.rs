@@ -175,44 +175,32 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
     // Publish graph dumps to Garage. Probe before spawning anything, on the
     // same eager-connect pattern the other external dependencies use.
     let uploader = ArtifactUploader::new(&cfg.upload)?;
-    let upload_tx = match &uploader {
-        Some(up) => {
-            match up.probe().await {
-                Ok(()) => info!(bucket = up.bucket(), "Artifact bucket reachable"),
-                Err(e) if cfg.upload.required_on_startup => {
-                    anyhow::bail!(
-                        "upload.required_on_startup is set and the bucket probe failed: {e:#}"
-                    )
-                }
-                // Transient unreachability must not stop the controller; the
-                // next cron tick retries.
-                Err(e) => error!(
-                    error = %e,
-                    bucket = up.bucket(),
-                    "Artifact bucket probe failed; graph dumps stay local and retry"
-                ),
+    match &uploader {
+        Some(up) => match up.probe().await {
+            Ok(()) => info!(bucket = up.bucket(), "Artifact bucket reachable"),
+            Err(e) if cfg.upload.required_on_startup => {
+                anyhow::bail!(
+                    "upload.required_on_startup is set and the bucket probe failed: {e:#}"
+                )
             }
-            let (tx, rx) = tokio::sync::mpsc::channel(16);
-            let _upload_worker = tokio::spawn(observer_common::uploader::upload_worker(
-                rx,
-                up.clone(),
-                cfg.upload.workers.max(1) as usize,
-                stop_signal.child_token(),
-            ));
-            Some(tx)
-        }
-        None => {
-            info!("Artifact upload disabled; graph dumps stay on local disk");
-            None
-        }
-    };
+            // Transient unreachability must not stop the controller; the
+            // backfill sweep retries whatever the live path could not publish.
+            Err(e) => error!(
+                error = %e,
+                bucket = up.bucket(),
+                "Artifact bucket probe failed; graph dumps stay local and retry"
+            ),
+        },
+        None => info!("Artifact upload disabled; graph dumps stay on local disk"),
+    }
 
-    // Spawn the JSON writer task for compressed file output.
+    // Compress and publish, one dump at a time, inline.
     let (write_tx, write_rx) = tokio::sync::mpsc::channel::<json_writer::WriteRequest>(32);
     let _json_writer = tokio::spawn(json_writer::json_writer_task(
         write_rx,
         cfg.controller.zstd_level,
-        upload_tx,
+        uploader.clone(),
+        cfg.upload.delete_local,
         stop_signal.child_token(),
     ));
 
@@ -221,11 +209,29 @@ async fn async_main(cfg: ControllerConfig) -> anyhow::Result<()> {
             .with_context(|| format!("creating graph_dir {}", cfg.controller.graph_dir))?;
     }
 
+    // Publish what the live path did not: the legacy storage_dir, plus any
+    // output-directory file old enough that its publish must have failed.
+    //
+    // Spawned, never awaited, on a child token: nothing here may delay the gRPC
+    // bind below, and a sweep failure must not cancel the root and boot-loop us.
+    if cfg.upload.backfill.enabled
+        && let Some(up) = uploader.as_ref()
+    {
+        let _graph_backfill = tokio::spawn(observer_controller::backfill::run_graph_backfill(
+            observer_controller::backfill::Dirs {
+                graph_dir: PathBuf::from(&cfg.controller.graph_dir),
+                storage_dir: PathBuf::from(&cfg.controller.storage_dir),
+            },
+            cfg.upload.backfill.clone(),
+            up.clone(),
+            stop_signal.child_token(),
+        ));
+    }
+
     let graph_diff_cfg = GossipDiffConfig {
         base_dir: cfg.controller.graph_dir.clone(),
         cron: Cron::from_str(&cfg.controller.graph_diff_cron)?,
         file_writer: write_tx.clone(),
-        upload: uploader.is_some(),
     };
     let _graph_differ = tokio::spawn(collector_gossip_differ(
         collector_manager.clone(),

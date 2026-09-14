@@ -1,3 +1,4 @@
+pub mod backfill;
 pub mod collector_manager;
 pub mod config;
 pub mod csv_reader;

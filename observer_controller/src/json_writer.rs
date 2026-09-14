@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use observer_common::uploader::UploadRequest;
+use observer_common::uploader::{ArtifactUploader, PublishOptions};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -50,14 +50,22 @@ impl WriteRequest {
 }
 
 /// The writer task. Receives WriteRequests and writes them as zstd-compressed files.
-/// Compression stays serial here -- one file at a time is what bounds this
-/// task's memory. Uploads are handed to a separate pooled worker rather than
-/// awaited inline, so a slow bucket can't stall the next compression (and,
-/// through the write channel, the differ's cron tick).
+/// Compress, then publish, one file at a time.
+///
+/// Both steps are serial and inline: one compression at a time is what bounds
+/// this task's memory, and publishing inline is what makes "write it, then
+/// upload it" a single readable step instead of a queue and a worker pool. A
+/// slow bucket backs up the write channel and eventually the differ, which is
+/// bounded and visible -- the queued version hid the same coupling behind an
+/// indirection that could also silently drop a file on shutdown.
+///
+/// A failed publish is logged and the file stays on disk; the backfill sweep's
+/// output-directory pass is what eventually retries it.
 pub async fn json_writer_task(
     mut rx: mpsc::Receiver<WriteRequest>,
     compression_level: i32,
-    uploads: Option<mpsc::Sender<UploadRequest>>,
+    uploader: Option<ArtifactUploader>,
+    delete_local: bool,
     cancel: CancellationToken,
 ) {
     loop {
@@ -80,21 +88,14 @@ pub async fn json_writer_task(
                                     input_bytes,
                                     "JSON writer: wrote compressed file"
                                 );
-                                if let (Some(tx), Some(rel_key)) = (uploads.as_ref(), rel_key) {
-                                    let req = UploadRequest::new(published, rel_key);
-                                    // select! on the cancel token so a full
-                                    // upload queue can't deadlock shutdown.
-                                    tokio::select! {
-                                        biased;
-                                        _ = cancel.cancelled() => break,
-                                        res = tx.send(req) => {
-                                            if res.is_err() {
-                                                warn!(
-                                                    path = %path_display,
-                                                    "JSON writer: upload queue closed; file stays local"
-                                                );
-                                            }
-                                        }
+                                if let (Some(up), Some(rel_key)) = (uploader.as_ref(), rel_key) {
+                                    let opts = PublishOptions::fresh(delete_local);
+                                    if let Err(e) = up.publish(&published, &rel_key, &opts).await {
+                                        warn!(
+                                            path = %path_display,
+                                            error = ?e,
+                                            "JSON writer: publish failed; file stays local for the backfill sweep"
+                                        );
                                     }
                                 }
                             }
@@ -274,7 +275,13 @@ mod tests {
 
         let (tx, rx) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, None, cancel.clone()));
+        let task = tokio::spawn(json_writer_task(
+            rx,
+            TEST_LEVEL,
+            None,
+            false,
+            cancel.clone(),
+        ));
 
         // The bad request must not take the task down with it.
         tx.send(WriteRequest::new(blocker.join("nope.zst"), payload()))
@@ -293,18 +300,43 @@ mod tests {
         assert!(!tmp_path(&good).exists());
     }
 
-    /// A keyed request queues an upload of the *finished* file, and an unkeyed
-    /// one stays local. The uploader must never see a half-written path.
+    /// A local-backend uploader over a temp dir, so the writer's publish step
+    /// is exercised end to end without a server.
+    fn test_uploader(root: &std::path::Path) -> (ArtifactUploader, PathBuf) {
+        use observer_common::uploader::{UploadBackend, UploadConfig};
+        let bucket = root.join("bucket");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let up = ArtifactUploader::new(&UploadConfig {
+            enabled: true,
+            backend: UploadBackend::Local,
+            local_root: bucket.display().to_string(),
+            bucket: "test".to_string(),
+            max_retries: 0,
+            ..UploadConfig::default()
+        })
+        .unwrap()
+        .unwrap();
+        (up, bucket)
+    }
+
+    /// A keyed write is published; an unkeyed one stays local. What lands in
+    /// the bucket is the *finished* file, never the `.tmp` stage.
     #[tokio::test]
-    async fn keyed_writes_are_queued_for_upload_and_unkeyed_ones_are_not() {
+    async fn keyed_writes_are_published_and_unkeyed_ones_are_not() {
         let dir = tempfile::tempdir().unwrap();
+        let (uploader, bucket) = test_uploader(dir.path());
         let keyed = dir.path().join("controller_graph-x.zst");
         let plain = dir.path().join("local_only.zst");
 
         let (tx, rx) = mpsc::channel(4);
-        let (up_tx, mut up_rx) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, Some(up_tx), cancel.clone()));
+        let task = tokio::spawn(json_writer_task(
+            rx,
+            TEST_LEVEL,
+            Some(uploader),
+            false,
+            cancel.clone(),
+        ));
 
         tx.send(WriteRequest::new_with_key(
             keyed.clone(),
@@ -319,34 +351,44 @@ mod tests {
         drop(tx);
         task.await.unwrap();
 
-        let req = up_rx.recv().await.expect("keyed write should be queued");
-        assert_eq!(req.local, keyed);
+        let object = bucket.join("controller_graph/2026/03/30/controller_graph-x.zst");
+        let raw = zstd::stream::decode_all(std::fs::read(&object).unwrap().as_slice()).unwrap();
         assert_eq!(
-            req.rel_key,
-            PathBuf::from("controller_graph/2026/03/30/controller_graph-x.zst")
+            serde_json::from_slice::<Payload>(&raw).unwrap(),
+            payload(),
+            "the published object must be the complete file"
         );
-        // The file it points at is complete and readable, not the .tmp stage.
-        let raw = zstd::stream::decode_all(std::fs::read(&req.local).unwrap().as_slice()).unwrap();
-        assert_eq!(serde_json::from_slice::<Payload>(&raw).unwrap(), payload());
         assert!(!tmp_path(&keyed).exists());
+        // delete_local was false, so the local copy stays.
+        assert!(keyed.exists());
+        assert!(plain.exists());
 
-        assert!(
-            up_rx.recv().await.is_none(),
-            "unkeyed write must not be queued for upload"
+        // Nothing else was published.
+        let published: Vec<_> = walkdir(&bucket);
+        assert_eq!(
+            published.len(),
+            1,
+            "unkeyed write must not publish: {published:?}"
         );
     }
 
-    /// A failed write must not queue an upload of a file that isn't there.
+    /// A failed write must not publish a file that isn't there.
     #[tokio::test]
-    async fn a_failed_write_queues_nothing() {
+    async fn a_failed_write_publishes_nothing() {
         let dir = tempfile::tempdir().unwrap();
+        let (uploader, bucket) = test_uploader(dir.path());
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"not a directory").unwrap();
 
         let (tx, rx) = mpsc::channel(4);
-        let (up_tx, mut up_rx) = mpsc::channel(4);
         let cancel = CancellationToken::new();
-        let task = tokio::spawn(json_writer_task(rx, TEST_LEVEL, Some(up_tx), cancel.clone()));
+        let task = tokio::spawn(json_writer_task(
+            rx,
+            TEST_LEVEL,
+            Some(uploader),
+            false,
+            cancel.clone(),
+        ));
 
         tx.send(WriteRequest::new_with_key(
             blocker.join("nope.zst"),
@@ -358,6 +400,53 @@ mod tests {
         drop(tx);
         task.await.unwrap();
 
-        assert!(up_rx.recv().await.is_none());
+        assert!(walkdir(&bucket).is_empty());
+    }
+
+    /// `delete_local` is honoured by the writer's publish step.
+    #[tokio::test]
+    async fn delete_local_removes_the_dump_after_publishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (uploader, bucket) = test_uploader(dir.path());
+        let keyed = dir.path().join("controller_graph-y.zst");
+
+        let (tx, rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(json_writer_task(
+            rx,
+            TEST_LEVEL,
+            Some(uploader),
+            true,
+            cancel.clone(),
+        ));
+        tx.send(WriteRequest::new_with_key(
+            keyed.clone(),
+            PathBuf::from("controller_graph/2026/03/30/controller_graph-y.zst"),
+            payload(),
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        assert_eq!(walkdir(&bucket).len(), 1, "it must publish before deleting");
+        assert!(!keyed.exists(), "delete_local should have removed the dump");
+    }
+
+    /// Every file under `dir`, recursively.
+    fn walkdir(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walkdir(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
     }
 }

@@ -1495,3 +1495,199 @@ request_timeout_secs = 5
     );
     Ok(())
 }
+
+/// The controller draining a pre-existing backlog into a real Garage.
+///
+/// Seeds both directories with more than one listing page of synthetic dumps
+/// across all three families, plus every interloper that really shares a
+/// controller's storage directory, plus one object already published at the
+/// wrong size.
+///
+/// This needs a real Garage rather than the `local` backend for two reasons the
+/// local backend structurally cannot cover: the seed crosses the 1,000-key
+/// pagination boundary, so it is the only place `list_keys` meets a server that
+/// actually paginates; and `collector` vs `collector_diffs` is a real prefix
+/// collision, checked here against Garage's own `ListObjectsV2` rather than
+/// object_store's local emulation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns a real garage server + the controller binary, ~15s; run via `just integration-test`"]
+async fn controller_backfills_existing_dumps_to_garage() -> Result<()> {
+    let controller_bin = target_bin("observer_controller");
+    let garage = spawn_garage()?;
+
+    let upload_toml = format!(
+        r#"
+[upload]
+enabled = true
+backend = "s3"
+endpoint = "{endpoint}"
+bucket = "{bucket}"
+region = "garage"
+key_prefix = "staging"
+access_key_id = "{key_id}"
+secret_access_key = "{secret}"
+delete_local = false
+required_on_startup = true
+max_retries = 2
+connect_timeout_secs = 5
+request_timeout_secs = 30
+
+[upload.backfill]
+enabled = true
+interval_secs = 5
+startup_delay_max_secs = 1
+max_files_per_pass = 400
+max_mib_per_pass = 1024
+# Aged files in the live output directory are the retry path; the seed there is
+# backdated past this.
+output_dir_min_age_secs = 60
+"#,
+        endpoint = garage.endpoint(),
+        bucket = GARAGE_BUCKET,
+        key_id = GARAGE_KEY_ID,
+        secret = GARAGE_SECRET,
+    );
+    let controller_fixture = setup_controller_dir(&upload_toml)?;
+    let root = controller_fixture.dir.path().to_path_buf();
+    let graphs = root.join("graphs");
+    let storage = root.join("storage");
+
+    // 1,160 dumps, weighted so a *single* family exceeds the 1000-key page
+    // size: `list_keys` lists per family, so an even three-way split would
+    // leave every listing on one page and quietly not test pagination at all.
+    let uuid = "019bfdbc-10b8-794f-91cb-132c5f4cc390";
+    let mut expected = std::collections::BTreeSet::new();
+    for i in 0..1160u32 {
+        let (day, hour, minute) = (1 + i / 288, (i / 12) % 24, (i % 12) * 5);
+        let stamp = format!("2026-03-{day:02}-{hour:02}-{minute:02}");
+        // 1,100 collector dumps, then 30 of each of the other two.
+        let (name, kind) = if i < 1100 {
+            (format!("collector-{uuid}-{stamp}.zst"), "collector")
+        } else if i % 2 == 0 {
+            (format!("controller_graph-{stamp}.zst"), "controller_graph")
+        } else {
+            (format!("collector_diffs-{stamp}.zst"), "collector_diffs")
+        };
+        // All into storage_dir: that is the directory the sweep owns
+        // unconditionally. graph_dir is the live path's, and is swept only past
+        // the age gate -- exercised separately below.
+        fs::write(storage.join(&name), format!("dump-{i}").as_bytes())?;
+        expected.insert(format!(
+            "staging/{kind}/2026/03/{day:02}/{name}"
+        ));
+    }
+
+    // One dump in the live output directory, backdated past the age gate: the
+    // sweep must pick this up too, since a publish that failed leaves exactly
+    // this shape behind.
+    let aged = format!("controller_graph-2026-02-01-00-00.zst");
+    let aged_path = graphs.join(&aged);
+    fs::write(&aged_path, b"aged dump that the live path failed to publish")?;
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    filetime::set_file_mtime(&aged_path, filetime::FileTime::from_system_time(old))?;
+    expected.insert(format!("staging/controller_graph/2026/02/01/{aged}"));
+
+    // Everything that really shares a controller's storage dir and must never
+    // be published.
+    let interlopers = [
+        "controller.2026-08-26-14",
+        "controller.2026-08-26-14.zst",
+        "controller.2026-08-26-14.1.zst",
+        "controller_graph-2026-08-26-16-15.zst.tmp",
+        "collector-019c26b8-3191-7fff-895f-5ed752c53bdc-2026-06-09-16-15.zst.zst",
+        "community_9854.csv",
+        "collector_mapping_extra.toml",
+        "diff_report_03_04.txt",
+    ];
+    for name in interlopers {
+        fs::write(storage.join(name), b"not an artifact")?;
+    }
+
+    let mut controller = ChildGuard::spawn(
+        "observer_controller",
+        &controller_bin,
+        &root,
+        &[
+            ("CONTROLLER_MODE", "local"),
+            ("CONTROLLER_UUID", "integration-test-controller"),
+        ],
+    )?;
+    let mut dump = DumpLogsOnPanic {
+        guards: vec![garage.child(), &controller],
+        armed: true,
+    };
+
+    let verifier = ArtifactUploader::new(&garage.upload_config("staging"))?
+        .expect("credentials are set, so an uploader is built");
+    verifier.probe().await.context("verifier could not reach the bucket")?;
+
+    // Drain: several passes at 400 files each, 5s apart.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let published = loop {
+        let mut all = std::collections::BTreeSet::new();
+        for kind in ["controller_graph", "collector_diffs", "collector"] {
+            for key in verifier.list_keys(Some(Path::new(kind))).await?.keys() {
+                all.insert(key.as_ref().to_string());
+            }
+        }
+        // The live differ also publishes on its own 10s cron, so the bucket may
+        // hold more than the seed; only require the seed to be covered.
+        if expected.iter().all(|k| all.contains(k)) {
+            break all;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "backfill did not drain: {} of {} seeded dumps published\n{}\n{}",
+            expected.iter().filter(|k| all.contains(*k)).count(),
+            expected.len(),
+            controller.log_tail(),
+            garage.child().log_tail()
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+
+    // Prove this run actually crossed a listing page. Without it, shrinking the
+    // seed later would silently stop testing pagination while still passing --
+    // which is the one thing the `local` backend could never cover.
+    let collector_keys = verifier.list_keys(Some(Path::new("collector"))).await?.len();
+    assert!(
+        collector_keys > 1000,
+        "seed no longer crosses the 1000-key page boundary ({collector_keys} keys); \
+         list_keys pagination is not being exercised"
+    );
+
+    // No interloper may have produced an object. Checked by name, since the
+    // live differ legitimately adds its own dumps during the drain.
+    for name in interlopers {
+        let stem = name.trim_end_matches(".zst").trim_end_matches(".tmp");
+        assert!(
+            !published.iter().any(|k| k.contains(stem)),
+            "an interloper was published: {name}"
+        );
+    }
+
+    // Backfill deletion is off, so every local file must survive -- that is
+    // what lets an operator verify before pruning.
+    for name in interlopers {
+        assert!(storage.join(name).exists(), "backfill removed {name}");
+    }
+    assert!(
+        aged_path.exists(),
+        "backfill must not delete the aged output-directory dump"
+    );
+    assert!(
+        fs::read_dir(&storage)?.count() >= 1160,
+        "backfill deleted seeded dumps from storage_dir"
+    );
+
+    dump.armed = false;
+    drop(dump);
+
+    let status = controller.signal_and_wait(Signal::SIGINT, Duration::from_secs(30));
+    assert!(
+        status.success(),
+        "controller exited with {status}\n{}",
+        controller.log_tail()
+    );
+    Ok(())
+}

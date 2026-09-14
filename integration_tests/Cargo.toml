@@ -22,3 +22,4 @@ observer_common = { path = "../observer_common" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
 tokio = { version = "1.47", features = ["full"] }
+filetime = "0.2.29"
