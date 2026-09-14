@@ -16,20 +16,22 @@
 //!   defaults (8 MiB parts, concurrency 4) about 56 MiB, and that figure does
 //!   not grow with file size. A multi-GB Parquet file and a 112 MB graph dump
 //!   cost the same. Process-wide the ceiling is `workers` times that; the
-//!   archiver awaits [`ArtifactUploader::upload_file`] inline so its ceiling is
+//!   archiver awaits [`ArtifactUploader::publish`] inline so its ceiling is
 //!   one upload.
 //! * **Nothing deletes a local file without an [`UploadReceipt`]**, which only
-//!   [`ArtifactUploader::upload_file`] can build, and only after the object's
+//!   [`ArtifactUploader::publish`] can build, and only after the object's
 //!   size on the remote has been read back and compared. Existence is not
 //!   validity — the same rule the Parquet export recovery path follows.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
+use futures_util::StreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::{
@@ -41,10 +43,8 @@ use object_store::{
 /// `object_store` themselves.
 pub use object_store::path::Path as ObjectKey;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Semaphore, mpsc, oneshot};
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
 /// S3 requires every non-final multipart part to be at least 5 MiB.
 const MIN_PART_MIB: u32 = 5;
@@ -65,6 +65,66 @@ pub enum UploadBackend {
     #[default]
     S3,
     Local,
+}
+
+/// Publishing artifacts that were written to disk before uploads were enabled,
+/// or whose upload failed, a bounded slice at a time.
+///
+/// **There is deliberately no deletion setting here.** A backfill sweep never
+/// removes a local file, whatever [`UploadConfig::delete_local`] says -- see
+/// [`ArtifactUploader::without_local_deletion`], which is how callers enforce
+/// it. An earlier design had its own flag, which meant a file whose *live*
+/// upload failed would be retried by the sweep and then deleted under a
+/// different policy than its siblings, depending on nothing more than which
+/// path happened to publish it. One unconditional rule is worth more than the
+/// flexibility: the asymmetry it leaves (a retried file lingers on disk when
+/// `delete_local` is on) errs toward keeping data, and a stale local file is
+/// harmless.
+///
+/// Nested under `[upload]` so one feature reads as one TOML section and
+/// [`UploadConfig::defaults_source`] carries it to every crate for free.
+/// Environment override: `CONTROLLER_UPLOAD__BACKFILL__ENABLED`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackfillConfig {
+    /// Master switch. Same posture as [`UploadConfig::enabled`]: merging must
+    /// change nothing on a deployed host.
+    pub enabled: bool,
+    /// Seconds between sweeps. The loop sleeps *after* a pass rather than
+    /// ticking, so an overrunning pass delays the next one instead of queueing.
+    pub interval_secs: u32,
+    /// Jitter on the first sweep, so a restart loop cannot drive a scan and
+    /// sibling instances on one host don't sweep in lockstep. Same reasoning as
+    /// `log_rotation.startup_delay_max_secs`.
+    pub startup_delay_max_secs: u32,
+    /// Upload attempts per pass. Caps request rate.
+    pub max_files_per_pass: u32,
+    /// Bytes per pass, in MiB. Caps bandwidth and pass wall-clock, and is what
+    /// lets one default serve crates whose artifacts differ ~60x in size: a
+    /// file count alone would authorize wildly different transfers.
+    pub max_mib_per_pass: u32,
+    /// Also sweep the live output directory, for files older than this many
+    /// seconds. `0` disables it.
+    ///
+    /// The live path publishes inline and has no other retry, so without this a
+    /// failed upload leaves a file unpublished forever. The age gate is what
+    /// keeps the sweep from racing a publish still in flight: an hour is orders
+    /// of magnitude wider than any write-then-publish window, so the two can
+    /// never contend for the same file. Filesystem-only: the sweep's other
+    /// directories are ones the live path never writes to, and need no gate.
+    pub output_dir_min_age_secs: u32,
+}
+
+impl Default for BackfillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 600,
+            startup_delay_max_secs: 300,
+            max_files_per_pass: 250,
+            max_mib_per_pass: 1024,
+            output_dir_min_age_secs: 3600,
+        }
+    }
 }
 
 /// Where generated artifacts are published, and whether the local staging copy
@@ -123,9 +183,6 @@ pub struct UploadConfig {
     pub multipart_mib: u32,
     /// Concurrent in-flight parts within one file.
     pub max_concurrency: u32,
-    /// Concurrent uploads in [`upload_worker`], so one slow artifact does not
-    /// head-of-line block a whole tick's worth of them.
-    pub workers: u32,
     /// Per-request timeout handed to `ClientOptions::with_timeout`.
     pub request_timeout_secs: u32,
     pub connect_timeout_secs: u32,
@@ -135,6 +192,10 @@ pub struct UploadConfig {
     /// a logged degradation. Default false: a transiently unreachable bucket
     /// must not boot-loop a data-collection daemon.
     pub required_on_startup: bool,
+
+    /// Publishing the backlog already on disk. See [`BackfillConfig`].
+    #[serde(default)]
+    pub backfill: BackfillConfig,
 }
 
 impl Default for UploadConfig {
@@ -156,12 +217,12 @@ impl Default for UploadConfig {
             delete_local: false,
             multipart_mib: 8,
             max_concurrency: 4,
-            workers: 2,
             // Generous: one part of a large Parquet file over tailscale.
             request_timeout_secs: 300,
             connect_timeout_secs: 15,
             max_retries: 3,
             required_on_startup: false,
+            backfill: BackfillConfig::default(),
         }
     }
 }
@@ -236,6 +297,21 @@ impl UploadConfig {
                 }
             }
         }
+        // Budgets are checked whenever uploads are on, NOT only when backfill
+        // is enabled: the archiver's pending-export sweep runs off these fields
+        // without consulting `backfill.enabled`, so gating the check there let
+        // a zero budget through and then disabled both guards at runtime.
+        if self.backfill.interval_secs == 0 {
+            bail!("upload.backfill.interval_secs must be greater than 0");
+        }
+        // Zero deliberately does not mean "unlimited". An unbounded sweep has
+        // no use case here and is exactly the footgun above.
+        if self.backfill.max_files_per_pass == 0 {
+            bail!("upload.backfill.max_files_per_pass must be greater than 0");
+        }
+        if self.backfill.max_mib_per_pass == 0 {
+            bail!("upload.backfill.max_mib_per_pass must be greater than 0");
+        }
         Ok(())
     }
 
@@ -268,18 +344,156 @@ impl fmt::Debug for UploadConfig {
             .field("delete_local", &self.delete_local)
             .field("multipart_mib", &self.multipart_mib)
             .field("max_concurrency", &self.max_concurrency)
-            .field("workers", &self.workers)
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
             .field("max_retries", &self.max_retries)
             .field("required_on_startup", &self.required_on_startup)
+            .field("backfill", &self.backfill)
             .finish()
+    }
+}
+
+/// What a caller already knows about an object's state on the remote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Presence {
+    /// Nothing known -- [`ArtifactUploader::publish`] issues one HEAD first.
+    #[default]
+    Unknown,
+    /// Known not to be there. Skips the HEAD; the right choice for a file that
+    /// was just written under a unique name.
+    Absent,
+    /// Known remote size, e.g. from a bulk [`ArtifactUploader::list_keys`]. A
+    /// match short-circuits the transfer at the cost of no requests at all.
+    Size(u64),
+}
+
+/// Per-publish policy.
+///
+/// `delete_local` lives here rather than on [`ArtifactUploader`] on purpose: it
+/// is a property of one publish, not of a connection to a bucket.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PublishOptions {
+    pub delete_local: bool,
+    pub presence: Presence,
+}
+
+impl PublishOptions {
+    /// A file just written locally: certainly not on the remote yet.
+    pub fn fresh(delete_local: bool) -> Self {
+        Self {
+            delete_local,
+            presence: Presence::Absent,
+        }
+    }
+}
+
+/// The outcome of a publish, distinguishing work done from work skipped.
+///
+/// Callers budget on this: a short-circuit costs nothing, which is what keeps a
+/// catch-up sweep cheap once everything is already published.
+#[derive(Debug, Clone)]
+pub enum Published {
+    /// Already on the remote at the right size; no bytes moved.
+    AlreadyPresent(UploadReceipt),
+    Transferred(UploadReceipt),
+}
+
+impl Published {
+    pub fn receipt(&self) -> &UploadReceipt {
+        match self {
+            Self::AlreadyPresent(r) | Self::Transferred(r) => r,
+        }
+    }
+
+    /// Bytes actually put on the wire -- zero for a short-circuit.
+    pub fn transferred_bytes(&self) -> u64 {
+        match self {
+            Self::AlreadyPresent(_) => 0,
+            Self::Transferred(r) => r.bytes,
+        }
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.receipt().uri
+    }
+}
+
+/// How much a single sweep may move.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    pub max_files: u32,
+    pub max_bytes: u64,
+}
+
+impl Budget {
+    pub fn from_config(cfg: &BackfillConfig) -> Self {
+        Self {
+            max_files: cfg.max_files_per_pass,
+            max_bytes: u64::from(cfg.max_mib_per_pass) * 1024 * 1024,
+        }
+    }
+}
+
+/// What one sweep did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchTally {
+    pub transferred: u32,
+    pub transferred_bytes: u64,
+    pub already_present: u32,
+    pub failed: u32,
+}
+
+/// Budget accounting for a bounded publish sweep.
+///
+/// * a transfer costs one file and its bytes,
+/// * an already-present object costs **nothing** -- this is what makes a
+///   drained pass free, and what stops a catch-up tick re-charging itself for
+///   work it did not do,
+/// * a failure costs one file and no bytes, so a permanently broken file
+///   consumes one slot per pass instead of stalling the sweep forever.
+///
+/// The budget is checked *before* each item, so a pass overshoots by at most
+/// one file.
+#[derive(Debug)]
+pub struct BudgetTracker {
+    budget: Budget,
+    tally: BatchTally,
+}
+
+impl BudgetTracker {
+    pub fn new(budget: Budget) -> Self {
+        Self {
+            budget,
+            tally: BatchTally::default(),
+        }
+    }
+
+    /// Whether there is budget left to attempt another item.
+    pub fn may_attempt(&self) -> bool {
+        let files = self.tally.transferred + self.tally.failed;
+        files < self.budget.max_files && self.tally.transferred_bytes < self.budget.max_bytes
+    }
+
+    /// Charge one item's outcome.
+    pub fn record(&mut self, outcome: &anyhow::Result<Published>) {
+        match outcome {
+            Ok(Published::Transferred(r)) => {
+                self.tally.transferred += 1;
+                self.tally.transferred_bytes += r.bytes;
+            }
+            Ok(Published::AlreadyPresent(_)) => self.tally.already_present += 1,
+            Err(_) => self.tally.failed += 1,
+        }
+    }
+
+    pub fn tally(&self) -> BatchTally {
+        self.tally
     }
 }
 
 /// Proof that an object exists on the remote at the expected size.
 ///
-/// Only [`ArtifactUploader::upload_file`] constructs one, and only after the
+/// Only [`ArtifactUploader::publish`] constructs one, and only after the
 /// read-back check. Callers record `uri` and may treat the artifact as
 /// published once they hold this.
 #[derive(Debug, Clone)]
@@ -301,11 +515,10 @@ pub struct ArtifactUploader {
     bucket: String,
     /// Parsed once in [`ArtifactUploader::new`]; `None` means keys start at the
     /// artifact root. Holding the parsed form is what lets `key_for`, `probe`
-    /// and `upload_file` stop re-parsing and re-validating a config string.
+    /// and `publish` stop re-parsing and re-validating a config string.
     key_prefix: Option<ObjectKey>,
     part_size: usize,
     max_concurrency: usize,
-    delete_local: bool,
 }
 
 impl fmt::Debug for ArtifactUploader {
@@ -315,7 +528,6 @@ impl fmt::Debug for ArtifactUploader {
             .field("key_prefix", &self.key_prefix.as_ref().map(|p| p.as_ref()))
             .field("part_size", &self.part_size)
             .field("max_concurrency", &self.max_concurrency)
-            .field("delete_local", &self.delete_local)
             .finish()
     }
 }
@@ -435,16 +647,11 @@ impl ArtifactUploader {
             key_prefix,
             part_size: part_mib * 1024 * 1024,
             max_concurrency: (cfg.max_concurrency.max(1)) as usize,
-            delete_local: cfg.delete_local,
         })
     }
 
     pub fn bucket(&self) -> &str {
         &self.bucket
-    }
-
-    pub fn delete_local(&self) -> bool {
-        self.delete_local
     }
 
     /// Verify the bucket is reachable and our credentials are accepted.
@@ -496,65 +703,135 @@ impl ArtifactUploader {
         }
     }
 
-    /// Stream `local` to the key derived from `rel_key`.
+    /// Every object under `rel_prefix`, as full keys mapped to their size in
+    /// bytes. `None` lists everything under the configured `key_prefix`.
     ///
-    /// Single PUT when the file fits in one part, multipart otherwise. On
-    /// success the object's size is read back and compared against the local
-    /// file; only then, and only if `delete_local` is set, is the local file
-    /// removed. On any failure the multipart upload is aborted and the local
-    /// file is left untouched.
-    pub async fn upload_file(
+    /// The bulk form of [`Self::head_size`], and the reason a backfill sweep is
+    /// affordable: the S3 client paginates internally at 1000 keys a request,
+    /// so tens of thousands of objects cost tens of signed GETs rather than
+    /// tens of thousands of HEADs.
+    ///
+    /// Three properties worth keeping:
+    ///
+    /// * **Full keys, not stripped relative ones.** [`Self::key_for`] is the
+    ///   one place `key_prefix` is applied, so a caller diffs with
+    ///   `listing.get(&self.key_for(rel)?)` and the prefix stays applied in one
+    ///   direction by one function. Stripping instead would add a failure
+    ///   branch that cannot happen and is therefore never tested.
+    /// * **Sizes, not just presence.** A truncated multipart leaves an object
+    ///   that exists at the wrong length; a presence-only check would adopt it
+    ///   forever. Same "existence is not validity" rule the rest of this module
+    ///   follows.
+    /// * **All-or-nothing.** A failed page aborts the call rather than
+    ///   returning a partial map: a partial listing is indistinguishable from
+    ///   "those objects do not exist", and the only caller answers that by
+    ///   re-uploading. Retrying next pass is cheap; re-sending the backlog is
+    ///   not.
+    ///
+    /// Like [`Self::probe`] this is a signed request, so the Caddy-404s-
+    /// unsigned-requests trap does not apply -- don't "optimize" it into one.
+    pub async fn list_keys(
+        &self,
+        rel_prefix: Option<&FsPath>,
+    ) -> anyhow::Result<HashMap<ObjectKey, u64>> {
+        let prefix = match rel_prefix {
+            Some(rel) => Some(self.key_for(rel)?),
+            None => self.key_prefix.clone(),
+        };
+        debug!(bucket = self.bucket, ?prefix, "Listing published objects");
+
+        let mut out = HashMap::new();
+        let mut stream = self.store.list(prefix.as_ref());
+        while let Some(meta) = stream.next().await {
+            let meta = meta.with_context(|| match &prefix {
+                Some(p) => format!("listing {} under {p}", self.bucket),
+                None => format!("listing {}", self.bucket),
+            })?;
+            out.insert(meta.location, meta.size);
+        }
+        Ok(out)
+    }
+
+    /// Publish `local` to the key derived from `rel_key`.
+    ///
+    /// The one upload primitive. Both the live path (publish what was just
+    /// written) and a backfill sweep (publish a backlog) go through here; they
+    /// differ only in the options they pass.
+    ///
+    /// Sequence: derive the key, stat the local file, decide from
+    /// `opts.presence` whether a transfer is needed at all, transfer if so,
+    /// read the size back, then optionally delete.
+    ///
+    /// The read-back is not optional and never skipped on a transfer: existence
+    /// is not validity -- a truncated multipart is still an object -- and it is
+    /// what earns the right to delete the local copy. Deletion runs for an
+    /// already-present object too, so a caller that short-circuits gets exactly
+    /// the same end state as one that transferred.
+    pub async fn publish(
         &self,
         local: &FsPath,
         rel_key: &FsPath,
-    ) -> anyhow::Result<UploadReceipt> {
+        opts: &PublishOptions,
+    ) -> anyhow::Result<Published> {
         let key = self.key_for(rel_key)?;
-
         let local_len = tokio::fs::metadata(local)
             .await
             .with_context(|| format!("stat {}", local.display()))?
             .len();
 
-        if local_len <= self.part_size as u64 {
-            self.put_whole(local, &key).await?;
-        } else {
-            self.put_multipart(local, &key).await?;
-        }
+        // Does anything actually need to move?
+        let remote_len = match opts.presence {
+            Presence::Absent => None,
+            Presence::Size(len) => Some(len),
+            Presence::Unknown => self.head_size(&key).await?,
+        };
+        let already_present = remote_len == Some(local_len);
 
-        // Existence is not validity: a truncated multipart can still be
-        // accepted. Compare sizes before anyone treats this as published.
-        let remote_len = self
-            .head_size(&key)
-            .await?
-            .ok_or_else(|| anyhow!("object {key} missing immediately after upload"))?;
-        if remote_len != local_len {
-            bail!(
-                "size mismatch for {key}: local {local_len} B, remote {remote_len} B; \
-                 leaving local file in place"
-            );
+        if !already_present {
+            if local_len <= self.part_size as u64 {
+                self.put_whole(local, &key).await?;
+            } else {
+                self.put_multipart(local, &key).await?;
+            }
+            let written = self
+                .head_size(&key)
+                .await?
+                .ok_or_else(|| anyhow!("object {key} missing immediately after upload"))?;
+            if written != local_len {
+                bail!(
+                    "size mismatch for {key}: local {local_len} B, remote {written} B; \
+                     leaving local file in place"
+                );
+            }
         }
 
         let mut deleted_local = false;
-        if self.delete_local {
+        if opts.delete_local {
             match tokio::fs::remove_file(local).await {
                 Ok(()) => deleted_local = true,
-                // A stale local file is harmless — the object is safely up, so
+                // A stale local file is harmless -- the object is safely up, so
                 // this is not worth failing the receipt over.
                 Err(e) => warn!(
                     path = %local.display(),
                     error = %e,
-                    "Uploaded but could not remove local staging file"
+                    "Published but could not remove the local file"
                 ),
             }
         }
 
-        info!(%key, bytes = local_len, deleted_local, "Published artifact");
-        Ok(UploadReceipt {
+        let receipt = UploadReceipt {
             uri: self.uri_for(&key),
             key: key.as_ref().to_string(),
             bytes: local_len,
             deleted_local,
-        })
+        };
+        if already_present {
+            debug!(%key, bytes = local_len, deleted_local, "Artifact already published");
+            Ok(Published::AlreadyPresent(receipt))
+        } else {
+            info!(%key, bytes = local_len, deleted_local, "Published artifact");
+            Ok(Published::Transferred(receipt))
+        }
     }
 
     /// Small file: one blocking read, one PUT.
@@ -659,98 +936,12 @@ async fn abort_quietly(writer: WriteMultipart, path: &ObjectKey) {
     }
 }
 
-/// One artifact to publish.
-///
-/// `done` is optional so a caller that needs the receipt can await it while one
-/// that does not (the controller's graph writer) can fire and forget.
-pub struct UploadRequest {
-    pub local: PathBuf,
-    pub rel_key: PathBuf,
-    pub done: Option<oneshot::Sender<anyhow::Result<UploadReceipt>>>,
-}
-
-impl UploadRequest {
-    pub fn new(local: PathBuf, rel_key: PathBuf) -> Self {
-        Self {
-            local,
-            rel_key,
-            done: None,
-        }
-    }
-}
-
-/// Upload artifacts off the producer's critical path, up to `workers` at a
-/// time.
-///
-/// A failed upload is logged and the loop continues — one bad artifact must not
-/// kill the pipeline. A closed channel is a normal exit, not an error: task
-/// teardown races the cancel signal.
-pub async fn upload_worker(
-    mut rx: mpsc::Receiver<UploadRequest>,
-    uploader: ArtifactUploader,
-    workers: usize,
-    cancel: CancellationToken,
-) {
-    let permits = Arc::new(Semaphore::new(workers.max(1)));
-    let mut tasks = JoinSet::new();
-
-    loop {
-        let req = tokio::select! {
-            biased;
-            () = cancel.cancelled() => break,
-            maybe = rx.recv() => match maybe {
-                Some(req) => req,
-                None => break,
-            },
-        };
-
-        // Bound concurrency here rather than in the channel so a slow artifact
-        // does not head-of-line block the ones behind it.
-        let permit = match Arc::clone(&permits).acquire_owned().await {
-            Ok(p) => p,
-            // The semaphore is never closed; this is unreachable in practice.
-            Err(e) => {
-                error!(error = %e, "Upload semaphore closed; worker exiting");
-                break;
-            }
-        };
-
-        let uploader = uploader.clone();
-        tasks.spawn(async move {
-            let _permit = permit;
-            let result = uploader.upload_file(&req.local, &req.rel_key).await;
-            if let Err(e) = &result {
-                warn!(
-                    path = %req.local.display(),
-                    error = ?e,
-                    "Failed to publish artifact; it stays on local disk"
-                );
-            }
-            if let Some(done) = req.done {
-                // Receiver dropped just means the caller stopped caring.
-                let _ = done.send(result);
-            }
-        });
-
-        // Reap finished uploads so the JoinSet does not grow without bound.
-        while let Some(Err(e)) = tasks.try_join_next() {
-            error!(error = %e, "Upload task panicked");
-        }
-    }
-
-    while let Some(res) = tasks.join_next().await {
-        if let Err(e) = res {
-            error!(error = %e, "Upload task panicked");
-        }
-    }
-    debug!("Upload worker stopped");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
     use std::io::Write;
+    use std::path::PathBuf;
 
     /// The S3 minimum part size, which is also the floor `from_store` clamps
     /// to — the smallest value that still exercises the real multipart path.
@@ -771,22 +962,33 @@ mod tests {
             delete_local,
             multipart_mib: TEST_PART_MIB,
             max_concurrency: 2,
-            workers: 2,
             request_timeout_secs: 30,
             connect_timeout_secs: 5,
             max_retries: 0,
             required_on_startup: false,
+            backfill: BackfillConfig::default(),
         }
     }
 
-    fn uploader(key_prefix: &str, delete_local: bool) -> (ArtifactUploader, Arc<InMemory>) {
+    fn uploader(key_prefix: &str) -> (ArtifactUploader, Arc<InMemory>) {
         let store = Arc::new(InMemory::new());
         let up = ArtifactUploader::from_store(
             Arc::clone(&store) as Arc<dyn ObjectStore>,
-            &cfg(key_prefix, delete_local),
+            &cfg(key_prefix, false),
         )
         .expect("build uploader");
         (up, store)
+    }
+
+    /// `publish` with the old `upload_file` shape: transfer unconditionally,
+    /// don't delete. Keeps the pre-existing round-trip tests expressing what
+    /// they always did.
+    async fn upload(up: &ArtifactUploader, local: &FsPath, rel: &FsPath) -> UploadReceipt {
+        up.publish(local, rel, &PublishOptions::fresh(false))
+            .await
+            .expect("publish")
+            .receipt()
+            .clone()
     }
 
     fn write_file(dir: &tempfile::TempDir, name: &str, len: usize) -> (PathBuf, Vec<u8>) {
@@ -802,12 +1004,14 @@ mod tests {
     async fn small_file_round_trips_via_single_put() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (local, body) = write_file(&dir, "small.parquet", 4096);
-        let (up, store) = uploader("", false);
+        let (up, store) = uploader("");
 
-        let receipt = up
-            .upload_file(&local, FsPath::new("timings/2026/03/30/timings.parquet"))
-            .await
-            .expect("upload");
+        let receipt = upload(
+            &up,
+            &local,
+            FsPath::new("timings/2026/03/30/timings.parquet"),
+        )
+        .await;
 
         assert_eq!(receipt.key, "timings/2026/03/30/timings.parquet");
         assert_eq!(
@@ -833,12 +1037,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // 2.5 parts: exercises full parts plus a short final one.
         let (local, body) = write_file(&dir, "big.zst", TEST_PART * 2 + TEST_PART / 2);
-        let (up, store) = uploader("", false);
+        let (up, store) = uploader("");
 
-        let receipt = up
-            .upload_file(&local, FsPath::new("controller_graph/g.zst"))
-            .await
-            .expect("upload");
+        let receipt = upload(&up, &local, FsPath::new("controller_graph/g.zst")).await;
         assert_eq!(receipt.bytes, body.len() as u64);
 
         let got = store
@@ -856,14 +1057,107 @@ mod tests {
     async fn delete_local_removes_the_staging_file_only_after_success() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (local, _) = write_file(&dir, "small.parquet", 1024);
-        let (up, _store) = uploader("", true);
+        let (up, _store) = uploader("");
 
-        let receipt = up
-            .upload_file(&local, FsPath::new("timings/t.parquet"))
+        let published = up
+            .publish(
+                &local,
+                FsPath::new("timings/t.parquet"),
+                &PublishOptions::fresh(true),
+            )
             .await
-            .expect("upload");
-        assert!(receipt.deleted_local);
+            .expect("publish");
+        assert!(published.receipt().deleted_local);
         assert!(!local.exists(), "staging file should be gone");
+    }
+
+    /// Deletion is a property of the publish, not of the uploader: the same
+    /// handle keeps or removes the file purely on what the caller asks for.
+    /// This is what replaced `without_local_deletion`.
+    #[tokio::test]
+    async fn deletion_is_per_call_not_per_uploader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("");
+
+        let (keep, _) = write_file(&dir, "keep.zst", 64);
+        up.publish(
+            &keep,
+            FsPath::new("g/keep.zst"),
+            &PublishOptions::fresh(false),
+        )
+        .await
+        .expect("publish");
+        assert!(keep.exists(), "delete_local was false for this call");
+
+        let (drop, _) = write_file(&dir, "drop.zst", 64);
+        up.publish(
+            &drop,
+            FsPath::new("g/drop.zst"),
+            &PublishOptions::fresh(true),
+        )
+        .await
+        .expect("publish");
+        assert!(!drop.exists(), "delete_local was true for this call");
+    }
+
+    /// A short-circuit must reach the same end state as a transfer, or a caller
+    /// that skips the upload would silently keep a file the transferring path
+    /// would have removed.
+    #[tokio::test]
+    async fn an_already_present_object_still_honours_delete_local() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("");
+        let rel = FsPath::new("timings/t.parquet");
+        let (local, body) = write_file(&dir, "t.parquet", 512);
+
+        up.publish(&local, rel, &PublishOptions::fresh(false))
+            .await
+            .expect("first publish");
+        assert!(local.exists());
+
+        let published = up
+            .publish(
+                &local,
+                rel,
+                &PublishOptions {
+                    delete_local: true,
+                    presence: Presence::Size(body.len() as u64),
+                },
+            )
+            .await
+            .expect("second publish");
+        assert!(
+            matches!(published, Published::AlreadyPresent(_)),
+            "a matching known size must short-circuit"
+        );
+        assert_eq!(published.transferred_bytes(), 0);
+        assert!(
+            !local.exists(),
+            "short-circuit must still delete when asked"
+        );
+    }
+
+    /// A stale `Presence::Size` must not be trusted into skipping a needed
+    /// upload -- a mismatch falls through to a real transfer.
+    #[tokio::test]
+    async fn a_mismatched_known_size_still_transfers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("");
+        let (local, body) = write_file(&dir, "t.parquet", 512);
+
+        let published = up
+            .publish(
+                &local,
+                FsPath::new("timings/t.parquet"),
+                &PublishOptions {
+                    delete_local: false,
+                    presence: Presence::Size(9999),
+                },
+            )
+            .await
+            .expect("publish");
+        assert!(matches!(published, Published::Transferred(_)));
+        assert_eq!(published.transferred_bytes(), body.len() as u64);
     }
 
     #[tokio::test]
@@ -885,7 +1179,11 @@ mod tests {
         let up = ArtifactUploader::from_store(store as Arc<dyn ObjectStore>, &cfg("", true))
             .expect("build uploader");
         let err = up
-            .upload_file(&local, FsPath::new("timings/t.parquet"))
+            .publish(
+                &local,
+                FsPath::new("timings/t.parquet"),
+                &PublishOptions::fresh(true),
+            )
             .await
             .expect_err("write to a read-only root must fail");
 
@@ -899,13 +1197,13 @@ mod tests {
     async fn key_prefix_is_applied() {
         let rel = FsPath::new("timings/2026/03/30/timings_2026-03-30.parquet");
 
-        let (bare, _) = uploader("", false);
+        let (bare, _) = uploader("");
         assert_eq!(
             bare.key_for(rel).expect("key").as_ref(),
             "timings/2026/03/30/timings_2026-03-30.parquet"
         );
 
-        let (prefixed, _) = uploader("staging", false);
+        let (prefixed, _) = uploader("staging");
         assert_eq!(
             prefixed.key_for(rel).expect("key").as_ref(),
             "staging/timings/2026/03/30/timings_2026-03-30.parquet"
@@ -914,7 +1212,7 @@ mod tests {
 
     #[tokio::test]
     async fn key_for_rejects_parent_traversal() {
-        let (up, _) = uploader("staging", false);
+        let (up, _) = uploader("staging");
         assert!(up.key_for(FsPath::new("../escape.parquet")).is_err());
     }
 
@@ -977,10 +1275,131 @@ mod tests {
         assert!(!built.enabled);
         assert!(!built.delete_local);
         assert_eq!(built.multipart_mib, want.multipart_mib);
-        assert_eq!(built.workers, want.workers);
+        assert_eq!(built.max_concurrency, want.max_concurrency);
         assert_eq!(built.region, want.region);
         assert!(built.access_key_id.is_none());
         assert!(built.secret_access_key.is_none());
+    }
+
+    /// The nested section must survive the defaults round-trip too -- it is
+    /// serialized through the same path and would silently vanish if the
+    /// `#[serde(default)]` or the Serialize derive were wrong.
+    #[test]
+    fn defaults_source_carries_the_backfill_section() {
+        let built: UploadConfig = config::Config::builder()
+            .add_source(UploadConfig::defaults_source().expect("defaults"))
+            .build()
+            .expect("build")
+            .get("upload")
+            .expect("deserialize [upload]");
+
+        let want = BackfillConfig::default();
+        assert!(!built.backfill.enabled);
+        assert_eq!(built.backfill.interval_secs, want.interval_secs);
+        assert_eq!(built.backfill.max_files_per_pass, want.max_files_per_pass);
+        assert_eq!(built.backfill.max_mib_per_pass, want.max_mib_per_pass);
+    }
+
+    /// Three-level env nesting (`PREFIX_UPLOAD__BACKFILL__ENABLED`).
+    ///
+    /// Worth an explicit test: nested env keys were silently ignored on two of
+    /// these crates until the separators were pinned, and the failure mode is
+    /// that the field quietly falls back to its default. This adds a level
+    /// nobody had exercised.
+    #[test]
+    fn three_level_env_nesting_reaches_the_backfill_section() {
+        let source = config::Environment::with_prefix("UPTEST")
+            .prefix_separator("_")
+            .separator("__")
+            .source(Some(
+                [
+                    (
+                        "UPTEST_UPLOAD__BACKFILL__ENABLED".to_string(),
+                        "true".to_string(),
+                    ),
+                    (
+                        "UPTEST_UPLOAD__BACKFILL__MAX_FILES_PER_PASS".to_string(),
+                        "7".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ));
+
+        let built: UploadConfig = config::Config::builder()
+            .add_source(UploadConfig::defaults_source().expect("defaults"))
+            .add_source(source)
+            .build()
+            .expect("build")
+            .get("upload")
+            .expect("deserialize [upload]");
+
+        assert!(built.backfill.enabled, "three-level env key was ignored");
+        assert_eq!(built.backfill.max_files_per_pass, 7);
+        // Untouched neighbours still come from the defaults.
+        assert_eq!(
+            built.backfill.interval_secs,
+            BackfillConfig::default().interval_secs
+        );
+    }
+
+    /// A zero budget is a config mistake, not a way to pause -- and it is
+    /// checked whether or not `backfill.enabled` is set, because the archiver's
+    /// sweep reads these fields without consulting that flag. Gating the check
+    /// on it is what let a zero budget through and then disabled both guards.
+    #[test]
+    fn validate_rejects_a_budget_that_can_never_progress() {
+        let mut c = cfg("", false);
+        c.backend = UploadBackend::Local;
+        c.local_root = "/tmp".to_string();
+
+        for enabled in [false, true] {
+            c.backfill = BackfillConfig {
+                enabled,
+                max_files_per_pass: 0,
+                ..BackfillConfig::default()
+            };
+            let err = c
+                .validate()
+                .expect_err("a zero file budget must be rejected regardless of `enabled`");
+            assert!(err.to_string().contains("max_files_per_pass"), "{err}");
+
+            c.backfill.max_files_per_pass = 1;
+            c.backfill.max_mib_per_pass = 0;
+            let err = c
+                .validate()
+                .expect_err("a zero byte budget must be rejected");
+            assert!(err.to_string().contains("max_mib_per_pass"), "{err}");
+
+            c.backfill.max_mib_per_pass = 1;
+            c.validate().expect("both budgets positive is valid");
+
+            c.backfill.interval_secs = 0;
+            assert!(c.validate().is_err(), "a zero interval would spin");
+        }
+    }
+
+    /// The redacting Debug is hand-written, so a new field is invisible in the
+    /// startup config dump unless someone remembers to add it.
+    #[test]
+    fn debug_output_includes_backfill_and_still_hides_the_secret() {
+        let mut c = cfg("", false);
+        c.access_key_id = Some("GKsomething".to_string());
+        c.secret_access_key = Some("super-secret".to_string());
+        c.backfill.enabled = true;
+        let rendered = format!("{c:?}");
+        assert!(
+            rendered.contains("backfill"),
+            "backfill missing from Debug: {rendered}"
+        );
+        assert!(
+            !rendered.contains("super-secret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("GKsomething"),
+            "key id leaked: {rendered}"
+        );
     }
 
     /// A config file must be able to override the defaults source.
@@ -989,7 +1408,7 @@ mod tests {
         let built: UploadConfig = config::Config::builder()
             .add_source(UploadConfig::defaults_source().expect("defaults"))
             .add_source(config::File::from_str(
-                "[upload]\nenabled = true\nbucket = \"b\"\nworkers = 7\n",
+                "[upload]\nenabled = true\nbucket = \"b\"\nmax_concurrency = 7\n",
                 config::FileFormat::Toml,
             ))
             .build()
@@ -999,7 +1418,7 @@ mod tests {
 
         assert!(built.enabled);
         assert_eq!(built.bucket, "b");
-        assert_eq!(built.workers, 7);
+        assert_eq!(built.max_concurrency, 7);
         // Untouched keys still come from the defaults.
         assert_eq!(built.multipart_mib, UploadConfig::default().multipart_mib);
     }
@@ -1008,14 +1427,11 @@ mod tests {
     async fn head_size_reports_absence_and_presence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (local, body) = write_file(&dir, "small.parquet", 777);
-        let (up, _store) = uploader("prod", false);
+        let (up, _store) = uploader("prod");
 
         let absent = up.key_for(FsPath::new("nope.parquet")).expect("key");
         assert_eq!(up.head_size(&absent).await.expect("head"), None);
-        let receipt = up
-            .upload_file(&local, FsPath::new("timings/t.parquet"))
-            .await
-            .expect("upload");
+        let receipt = upload(&up, &local, FsPath::new("timings/t.parquet")).await;
         let present = ObjectKey::parse(&receipt.key).expect("key");
         assert_eq!(
             up.head_size(&present).await.expect("head"),
@@ -1024,8 +1440,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_keys_returns_every_object_with_its_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("");
+
+        let mut want = Vec::new();
+        for (i, len) in [(0, 100usize), (1, 2048), (2, 64)] {
+            let (local, _) = write_file(&dir, &format!("g{i}.zst"), len);
+            let rel = PathBuf::from(format!("controller_graph/2026/03/30/g{i}.zst"));
+            upload(&up, &local, &rel).await;
+            want.push((up.key_for(&rel).expect("key"), len as u64));
+        }
+
+        let listing = up
+            .list_keys(Some(FsPath::new("controller_graph")))
+            .await
+            .expect("list");
+        assert_eq!(listing.len(), want.len());
+        for (key, len) in want {
+            assert_eq!(listing.get(&key), Some(&len), "wrong size for {key}");
+        }
+    }
+
+    /// The pin for "return full keys, not stripped relative ones": a caller
+    /// looks up exactly what `key_for` produces. Breaks the moment someone
+    /// "helpfully" strips the prefix back off.
+    #[tokio::test]
+    async fn list_keys_returns_keys_that_match_key_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("staging");
+        let rel = PathBuf::from("controller_graph/2026/03/30/g.zst");
+        let (local, body) = write_file(&dir, "g.zst", 512);
+        upload(&up, &local, &rel).await;
+
+        let listing = up
+            .list_keys(Some(FsPath::new("controller_graph")))
+            .await
+            .expect("list");
+        let key = up.key_for(&rel).expect("key");
+        assert_eq!(key.as_ref(), "staging/controller_graph/2026/03/30/g.zst");
+        assert_eq!(listing.get(&key), Some(&(body.len() as u64)));
+    }
+
+    /// `collector` must not pick up `collector_diffs`.
+    ///
+    /// object_store documents prefix matching as segment-aware, and these two
+    /// artifact families are exactly that edge case. A leak here would inflate
+    /// the published count a backfill reports progress from.
+    #[tokio::test]
+    async fn list_keys_does_not_leak_across_sibling_prefixes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("");
+        let (local, _) = write_file(&dir, "x.zst", 64);
+
+        let collector = PathBuf::from("collector/2026/03/30/collector-abc-2026-03-30-14-05.zst");
+        let diffs =
+            PathBuf::from("collector_diffs/2026/03/30/collector_diffs-2026-03-30-14-05.zst");
+        upload(&up, &local, &collector).await;
+        upload(&up, &local, &diffs).await;
+
+        let listing = up
+            .list_keys(Some(FsPath::new("collector")))
+            .await
+            .expect("list");
+        assert_eq!(
+            listing.len(),
+            1,
+            "collector_diffs leaked into collector: {listing:?}"
+        );
+        assert!(listing.contains_key(&up.key_for(&collector).expect("key")));
+    }
+
+    /// A `None` prefix must still stay inside the configured `key_prefix`.
+    #[tokio::test]
+    async fn list_keys_confines_itself_to_the_key_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(InMemory::new());
+        let up = ArtifactUploader::from_store(
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            &cfg("staging", false),
+        )
+        .expect("build uploader");
+
+        let (local, _) = write_file(&dir, "g.zst", 32);
+        upload(&up, &local, FsPath::new("controller_graph/g.zst")).await;
+        // Straight into the store, outside our prefix.
+        store
+            .put(
+                &ObjectKey::parse("other/z.zst").expect("key"),
+                PutPayload::from(vec![0u8; 8]),
+            )
+            .await
+            .expect("put");
+
+        let listing = up.list_keys(None).await.expect("list");
+        assert_eq!(listing.len(), 1, "listing escaped key_prefix: {listing:?}");
+    }
+
+    #[tokio::test]
+    async fn list_keys_on_an_empty_prefix_is_empty_not_an_error() {
+        let (up, _store) = uploader("");
+        let listing = up
+            .list_keys(Some(FsPath::new("controller_graph")))
+            .await
+            .expect("an empty prefix is not an error");
+        assert!(listing.is_empty());
+    }
+
+    /// Ties the bulk path to the single path so the two cannot drift.
+    #[tokio::test]
+    async fn list_keys_agrees_with_head_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (up, _store) = uploader("prod");
+        for i in 0..3 {
+            let (local, _) = write_file(&dir, &format!("g{i}.zst"), 128 * (i + 1));
+            upload(
+                &up,
+                &local,
+                FsPath::new(&format!("collector/2026/03/30/g{i}.zst")),
+            )
+            .await;
+        }
+
+        let listing = up
+            .list_keys(Some(FsPath::new("collector")))
+            .await
+            .expect("list");
+        assert_eq!(listing.len(), 3);
+        for (key, size) in &listing {
+            assert_eq!(up.head_size(key).await.expect("head"), Some(*size));
+        }
+    }
+
+    fn receipt(bytes: u64) -> UploadReceipt {
+        UploadReceipt {
+            key: "k".to_string(),
+            uri: "s3://b/k".to_string(),
+            bytes,
+            deleted_local: false,
+        }
+    }
+
+    /// The charging policy, which is the whole reason this is shared: two
+    /// sweeps hand-rolled it, drifted, and one ended up able to disable both
+    /// its guards.
+    #[test]
+    fn budget_charges_transfers_and_failures_but_not_short_circuits() {
+        let mut t = BudgetTracker::new(Budget {
+            max_files: 2,
+            max_bytes: 1024,
+        });
+        assert!(t.may_attempt());
+
+        // A short circuit is free: neither budget moves.
+        t.record(&Ok(Published::AlreadyPresent(receipt(500))));
+        assert!(
+            t.may_attempt(),
+            "an already-published file must not cost budget"
+        );
+        assert_eq!(t.tally().already_present, 1);
+        assert_eq!(t.tally().transferred_bytes, 0);
+
+        // A transfer costs a file and its bytes.
+        t.record(&Ok(Published::Transferred(receipt(100))));
+        assert_eq!(t.tally().transferred, 1);
+        assert_eq!(t.tally().transferred_bytes, 100);
+        assert!(t.may_attempt());
+
+        // A failure costs a slot but no bandwidth, so one broken file cannot
+        // stall a sweep forever.
+        t.record(&Err(anyhow!("boom")));
+        assert_eq!(t.tally().failed, 1);
+        assert_eq!(t.tally().transferred_bytes, 100);
+        assert!(!t.may_attempt(), "two files spent against a budget of two");
+    }
+
+    #[test]
+    fn budget_stops_on_bytes_as_well_as_files() {
+        let mut t = BudgetTracker::new(Budget {
+            max_files: 100,
+            max_bytes: 1000,
+        });
+        t.record(&Ok(Published::Transferred(receipt(999))));
+        assert!(t.may_attempt(), "under the byte budget");
+        t.record(&Ok(Published::Transferred(receipt(2))));
+        assert!(!t.may_attempt(), "over the byte budget");
+        // Checked before each item, so a pass overshoots by at most one file.
+        assert_eq!(t.tally().transferred_bytes, 1001);
+    }
+
+    #[test]
+    fn budget_from_config_converts_mib() {
+        let b = Budget::from_config(&BackfillConfig {
+            max_files_per_pass: 7,
+            max_mib_per_pass: 3,
+            ..BackfillConfig::default()
+        });
+        assert_eq!(b.max_files, 7);
+        assert_eq!(b.max_bytes, 3 * 1024 * 1024);
+    }
+
+    #[tokio::test]
     async fn probe_succeeds_against_a_reachable_store() {
-        let (up, _store) = uploader("prod", false);
+        let (up, _store) = uploader("prod");
         up.probe().await.expect("probe");
     }
 
@@ -1097,39 +1714,5 @@ mod tests {
         c.access_key_id = Some("k".to_string());
         c.secret_access_key = Some("s".to_string());
         assert!(ArtifactUploader::new(&c).is_err());
-    }
-
-    #[tokio::test]
-    async fn worker_uploads_queued_artifacts_and_reports_receipts() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (up, store) = uploader("prod", false);
-        let (tx, rx) = mpsc::channel(4);
-        let cancel = CancellationToken::new();
-        let worker = tokio::spawn(upload_worker(rx, up, 2, cancel.clone()));
-
-        let mut waiters = Vec::new();
-        for i in 0..3 {
-            let (local, _) = write_file(&dir, &format!("a{i}.zst"), 2048);
-            let (done, rx_done) = oneshot::channel();
-            tx.send(UploadRequest {
-                local,
-                rel_key: PathBuf::from(format!("graphs/a{i}.zst")),
-                done: Some(done),
-            })
-            .await
-            .expect("queue upload");
-            waiters.push(rx_done);
-        }
-        drop(tx);
-        worker.await.expect("worker");
-
-        for w in waiters {
-            let receipt = w.await.expect("receipt delivered").expect("upload ok");
-            assert!(receipt.key.starts_with("prod/graphs/"));
-            store
-                .head(&ObjectKey::parse(&receipt.key).expect("key"))
-                .await
-                .expect("object present");
-        }
     }
 }

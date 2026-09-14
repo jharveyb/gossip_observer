@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = [
 itertools = "0.14.0"
 object_store = { version = "0.14.1", features = ["aws"] }
 config = { version = "0.15.19", features = ["toml"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
