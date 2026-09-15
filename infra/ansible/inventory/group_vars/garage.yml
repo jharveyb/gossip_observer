@@ -58,7 +58,7 @@ garage_metadata_snapshot_interval: "6h"
 # every node, rebuild it, rebalance) — see "Changing the replication factor" in
 # DATA_SHARING.md. tasks/garage.yml asserts config-vs-deployed before touching
 # /etc/garage.toml so this can't happen by accident.
-garage_replication_factor: 1
+garage_replication_factor: 2
 # Escape hatch for that assert. Only ever passed on the command line during the
 # documented migration: -e garage_allow_replication_factor_change=true
 garage_allow_replication_factor_change: false
@@ -94,12 +94,12 @@ garage_consistency_mode: "consistent"
 garage_nodes:
   - host: "do-medium"
     zone: "dc1" # Matches the live layout — do not rename in place
-    capacity: "250G"
+    capacity: "350G"
     rpc_addr: "100.85.59.117"
     node_id: "4d38659411275b4d17e3d7b37cb815c7fd11af058f13fec3b9457f14165adab0"
   - host: "closet-full-indexer"
     zone: "closet"
-    capacity: "250G"
+    capacity: "350G"
     rpc_addr: "100.102.164.115"
     node_id: "6fac173c7f76086cc2a2a63d26e309c47ec4b84300b0a5d4e70607a0939b2e98"
 
@@ -118,6 +118,11 @@ garage_block_size: "10M"
 # creds in vault as archiver_verify_s3_keys, keyed by the archiver instance UUID.
 # The FIRST entry is treated as the public/prod bucket that researcher reader keys
 # are granted read on (see garage_reader_keys below).
+#
+# Each writer gets its own bucket and its own key — staging and prod are separate.
+# Write secrets go in the Ansible vault as archiver_sync_s3_keys /
+# controller_sync_s3_keys, keyed by instance UUID. See the example vault for an
+# example.
 garage_buckets:
   - name: "gossip-observer-data"
     write_key: "archiver-sync"

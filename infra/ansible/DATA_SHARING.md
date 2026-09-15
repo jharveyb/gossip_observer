@@ -109,17 +109,22 @@ The default keeps both metadata and data under `/var/lib/garage/`, fine for a si
 
 The playbook detects that the path is outside `/var/lib/garage/`, pre-creates it with `garage:garage` ownership, and extends the systemd unit's `ReadWritePaths=` so `ProtectSystem=strict` doesn't make it read-only. It does **not** mount the disk for you. It will warn if the configured path is still on the root filesystem when it should not be.
 
+**Every parent directory must be traversable by the `garage` user.** The unit runs as `User=garage`, but Ansible creates `data_dir` as root, so a restrictive ancestor doesn't bite until the service starts — and then it crash-loops with `Unable to create Garage data directory: <path>: Permission denied` even though `data_dir` itself is correctly owned. This is easy to hit when the disk is shared with another service whose mount root is private (`closet-full-indexer` had `/mnt/hdd` at `0700 goss:goss`; it's `0755` now, with each subdirectory keeping its own mode). The playbook asserts this before installing anything and prints the `namei -l` chain identifying the offending directory. The fix is `+x` for `garage` on that directory — typically `chmod 0755` on the mount root.
+
 Metadata always lives under `/var/lib/garage/meta` (managed by systemd's `StateDirectory=garage`). Keep metadata on fast storage if you can — it's a SQLite DB and benefits from SSD latency.
 
 ### Step 5: review group_vars
 
 `inventory/group_vars/garage.yml`:
 
-- `garage_replication_factor` — leave at `1` for a single-node cluster;
-  bump to `3` if you expand to 3+ nodes.
-- `garage_bootstrap_peers` — empty for single-node; populate with
-  `<node_id>@<host>:<port>` entries to let multi-node clusters find
-  each other at startup.
+- `garage_replication_factor` — `1` for a single-node cluster. **Do not bump
+  this to grow the cluster**: adding a node needs only a `garage_nodes` entry,
+  and changing the factor on a live cluster takes it offline. See "Changing the
+  replication factor" below.
+- `garage_nodes` — one entry per cluster node (`host`, `zone`, `capacity`,
+  `rpc_addr`, `node_id`). This one list drives both the cluster layout and
+  every node's `bootstrap_peers`, so there is no separate peer list to keep in
+  sync. Each node's config gets *the other* nodes as peers, never itself.
 - `garage_admin_bind_port` — defaults to `3903`. Binds to the Tailscale IP by
   default.
 - `garage_reader_keys` — list of researcher names. Start empty; see
@@ -253,28 +258,113 @@ sudo garage key delete reader-<name>
 
 Also remove the name from `garage_reader_keys` in group_vars so future playbook runs don't recreate it.
 
-### Scaling to multiple Garage nodes
+### Adding a Garage node
 
-Current single-node limits replication_factor to 1. To grow to 3 nodes:
+Adding storage nodes does **not** involve the replication factor. Leave
+`garage_replication_factor` alone (see the next section for why) and:
 
-1. Install and start Garage on two additional hosts; add them to the
-   `[garage]` group in `hosts.ini`.
-2. Set `garage_replication_factor: 3` in `group_vars/garage.yml`.
-3. Populate `garage_bootstrap_peers` on every node with the peer list
-   (one entry per node): `<node_id>@<rpc_public_addr>`, where you get
-   `<node_id>` from `garage node id` on each host.
-4. Change every node's `garage_rpc_public_addr` to a reachable address
-   (Tailscale IP, private LAN).
-5. Re-run the playbook. The bootstrap task is guarded by the sentinel on
-   the first host, so it won't re-bootstrap; the new hosts just get
-   Garage installed and join the cluster via bootstrap_peers.
-6. On the first host, manually add the new nodes to the layout:
+1. Add the host to the `[garage]` group in `hosts.ini`, and set
+   `garage_data_dir` for it in `host_vars` if the data disk isn't under
+   `/var/lib/garage/`.
+2. Add an entry to `garage_nodes` in `group_vars/garage.yml`:
+
+   ```yaml
+   - host: "closet-full-indexer" # Must match inventory_hostname
+     zone: "closet"              # Nodes that can fail together share a zone
+     capacity: "250G"            # Keep well under the data disk's free space
+   ```
+
+3. Leave `node_id` out of the new entry for now — you can't know it until
+   Garage has run there. It still finds the cluster, because its own config
+   lists the *existing* nodes as bootstrap peers, and Garage learns the reverse
+   direction from that connection (persisted in `meta/peer_list`).
+4. Run the playbook, scoped to the new host:
 
    ```bash
-   sudo garage layout assign <new-node-id> --zone dc1 --capacity 500G \
-     --tag <inventory-hostname>
-   sudo garage layout apply --version <current-version-plus-one>
+   ansible-playbook data_sharing_init.yml -t garage -t garage_bootstrap \
+     --limit <newhost> --ask-vault-pass
    ```
+
+   Scoping is safe here and worth doing: no existing node's config depends on
+   the new entry, so `--limit` keeps the running cluster from restarting. The
+   layout tasks still run — they're `run_once` + `delegate_to` the first
+   `[garage]` host — and the new node gets assigned with its zone and capacity
+   from `garage_nodes`, applying layout version `<current+1>`. Buckets, keys and
+   grants short-circuit. Nodes that aren't in the play are skipped by the
+   assign loop's `is defined` guard, which is correct: they're already in the
+   layout.
+5. Fill in the new node's `node_id` in `garage_nodes` from `garage node id -q`
+   (drop the `@addr` suffix). The other nodes pick it up as a bootstrap peer on
+   their next config deploy, so discovery survives whichever node reboots first.
+6. Verify from any node: `garage status` shows both as healthy, and
+   `garage layout show` lists both with the expected zones.
+
+A dry run (`--check --diff`) against a host where Garage isn't installed yet
+can't preview steps 4 onward — it reports that the node ID is unavailable and
+skips the layout assignment, because `garage node id` needs a running Garage.
+
+### Changing the replication factor
+
+**This cannot be done by editing `garage_replication_factor` and re-running the
+playbook.** Since Garage 1.0 the factor is stored in the cluster layout, and a
+node whose config disagrees with its stored layout refuses to start:
+
+> Previous cluster layout has replication factor N, which is different than the
+> one specified in the config file (M). The previous cluster layout can be
+> purged [...] by deleting the `cluster_layout` file in your metadata directory.
+
+So the "just bump it" approach doesn't grow redundancy — it takes the cluster
+down at the next restart. `tasks/garage.yml` asserts the configured factor
+against each node's deployed `/etc/garage.toml` before rewriting it, so this
+fails the play instead of the cluster.
+
+Upstream's only supported path is an offline rebuild, for increases as much as
+decreases ([config reference][gf-cfg], [issue #1173][gf-1173]):
+
+1. **Preconditions.** Every node on Garage ≥ 2.1.0 — earlier versions could wipe
+   the bucket, alias and key tables on a layout reset ([#1107][gf-1107], fixed in
+   2.1.0). All nodes joined, healthy and synced first: grow the cluster, *then*
+   change the factor.
+2. **Stop public access**, then stop Garage on **every** node:
+   `systemctl stop caddy cloudflared` on the proxy host, then
+   `systemctl stop garage` everywhere. Upstream recommends keeping the cluster
+   private until the rebalance finishes.
+3. **Back up and purge, per node**, with Garage stopped:
+
+   ```bash
+   sudo ./scripts/garage_purge_layout.sh --purge-layout
+   ```
+
+   It copies the metadata dir for real, hardlink-copies the data dir (cheap:
+   Garage blocks are immutable), removes `cluster_layout`, and prints the
+   rollback commands. Read its header comment before running it — it explains
+   why the two directories are treated differently, and what the hardlink copy
+   does and does not protect against.
+4. **Set the new factor** in `group_vars/garage.yml` and re-run the play with
+   the assert's escape hatch, which redeploys every config and restarts every
+   node:
+
+   ```bash
+   ansible-playbook data_sharing_init.yml -t garage \
+     -e garage_allow_replication_factor_change=true --ask-vault-pass
+   ```
+
+5. **Rebuild the layout**: re-run with `-t garage_bootstrap`. With no stored
+   layout the version detection reads 0, every node in `garage_nodes` is
+   assigned in its own zone, and it applies version 1. Buckets, keys and grants
+   survive in the metadata tables, so those tasks short-circuit.
+6. **Watch the rebalance** (`garage status`, the admin metrics), verify reads
+   against the buckets, then restore public access and delete the backups the
+   script printed.
+
+Note that zones matter once the factor is above 1: Garage spreads replicas
+across zones first, and tolerates losing one node, or several nodes in a single
+zone when there are at least two zones. Nodes that can fail together (same host,
+same rack, same provider region) belong in the same `zone` in `garage_nodes`.
+
+[gf-cfg]: https://garagehq.deuxfleurs.fr/documentation/reference-manual/configuration/#replication_factor
+[gf-1173]: https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/1173
+[gf-1107]: https://git.deuxfleurs.fr/Deuxfleurs/garage/issues/1107
 
 ## Troubleshooting pointers
 
