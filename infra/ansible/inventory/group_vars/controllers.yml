@@ -24,6 +24,10 @@ observer_controllers:
     upload_bucket: "gossip-graph-dump-staging"
     upload_max_concurrency: 1
     upload_required_on_startup: true
+    upload_delete_local: true
+    upload_backfill_enabled: true
+    upload_backfill_max_files: 10240
+    upload_backfill_max_mib: 15360
 
   # Production controller
   - uuid: "019c26ea-281a-71eb-b14a-dce305b168c8"
@@ -34,9 +38,13 @@ observer_controllers:
     node_clusterings_file: "{{ playbook_dir }}/files/controller/nodes_normalized_initial.csv"
     node_communities_file: "{{ playbook_dir }}/files/controller/ln_communities_nested_all_levels.csv"
     collector_mapping_file: "{{ playbook_dir }}/files/controller/prod/collector_mapping.toml"
-    # Disabled by default
-    upload_enabled: false
+    upload_enabled: true
     upload_endpoint: "http://do-medium:3939"
     upload_bucket: "gossip-graph-dump"
+    upload_required_on_startup: true
+    upload_delete_local: false
+    upload_backfill_enabled: true
+    upload_backfill_max_files: 10240
+    upload_backfill_max_mib: 15360
 
 # Read+write Garage S3 creds for publishing graph dumps are in the vault.

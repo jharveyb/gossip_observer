@@ -34,10 +34,9 @@ bucket = "{{ item.upload_bucket | default('') }}"
 region = "{{ item.upload_region | default('garage') }}"
 key_prefix = "{{ item.upload_key_prefix | default('') }}"
 delete_local = {{ item.upload_delete_local | default(false) | lower }}
-# Concurrent in-flight parts within one file, and concurrent uploads. Graph
-# dumps are large and infrequent, so low values keep the memory ceiling small.
+# Concurrent in-flight parts within one file. Graph dumps are large and
+# infrequent, so a low value keeps the memory ceiling small.
 max_concurrency = {{ item.upload_max_concurrency | default(4) }}
-workers = {{ item.upload_workers | default(2) }}
 # Fail startup rather than logging and retrying when the bucket is unreachable
 # or the credentials are missing.
 required_on_startup = {{ item.upload_required_on_startup | default(false) | lower }}
@@ -46,3 +45,20 @@ required_on_startup = {{ item.upload_required_on_startup | default(false) | lowe
 access_key_id = "{{ controller_sync_s3_keys[item.uuid].key_id }}"
 secret_access_key = "{{ controller_sync_s3_keys[item.uuid].secret }}"
 {% endif %}
+
+[upload.backfill]
+# Publish what the live path did not, a bounded slice per sweep: the legacy
+# storage_dir (which the live path never writes to, so nothing can race), plus
+# output-directory files old enough that their publish must have failed.
+enabled = {{ item.upload_backfill_enabled | default(false) | lower }}
+interval_secs = {{ item.upload_backfill_interval_secs | default(300) }}
+startup_delay_max_secs = {{ item.upload_backfill_startup_delay_max_secs | default(120) }}
+# Two budgets: files caps request rate, MiB caps bandwidth and pass duration.
+# The byte budget is what really binds when artifacts vary in size.
+max_files_per_pass = {{ item.upload_backfill_max_files | default(1024) }}
+max_mib_per_pass = {{ item.upload_backfill_max_mib | default(10240) }}
+# Also sweep the live output directory, for files older than this. That is the
+# retry path for a publish that failed -- the live path publishes inline and has
+# no other -- and the age gate is what keeps the sweep from contending with a
+# publish still in flight. 0 disables it.
+output_dir_min_age_secs = {{ item.upload_backfill_output_dir_min_age_secs | default(3600) }}
