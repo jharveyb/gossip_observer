@@ -8,13 +8,52 @@
   ansible.builtin.set_fact:
     tailscale_ip: "{{ ansible_facts['tailscale0']['ipv4']['address'] }}"
 
+# `archiver_uuids` optionally narrows a run to specific instances, e.g.
+#   ansible-playbook ... -e '{"archiver_uuids": ["<staging-uuid>"]}'
+# Staging and prod instances share a host, so --limit cannot separate them; and
+# the restart handlers loop over `host_archivers`, so narrowing here also stops a
+# sibling instance from being restarted. Unset means every instance, as before.
+- name: Fail on an unknown archiver_uuids entry
+  ansible.builtin.fail:
+    msg: >-
+      archiver_uuids contains UUIDs that are not in gossip_archivers:
+      {{ archiver_uuids | difference(gossip_archivers | map(attribute='uuid') | list) | join(', ') }}
+  when:
+    - archiver_uuids is defined
+    - archiver_uuids | difference(gossip_archivers | map(attribute='uuid') | list) | length > 0
+
 - name: Filter archivers for this host
   ansible.builtin.set_fact:
-    host_archivers: "{{ gossip_archivers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+    host_archivers: >-
+      {{ gossip_archivers
+         | selectattr('host', 'equalto', inventory_hostname)
+         | selectattr('uuid', 'in', archiver_uuids | default(gossip_archivers | map(attribute='uuid') | list))
+         | list }}
 
 - name: Skip host if no archivers assigned
   ansible.builtin.meta: end_host
   when: host_archivers | length == 0
+
+# The config template omits the creds block when `archiver_sync_s3_keys` has no entry
+# for an instance, which yields a config that starts fine and publishes
+# nothing. Catch it here instead.
+- name: Require upload credentials for any instance with uploads enabled
+  ansible.builtin.assert:
+    that: >-
+      archiver_sync_s3_keys is defined
+      and item.uuid in archiver_sync_s3_keys
+      and archiver_sync_s3_keys[item.uuid].key_id | default('') | length > 0
+      and archiver_sync_s3_keys[item.uuid].secret | default('') | length > 0
+    fail_msg: >-
+      {{ item.uuid }} has upload_enabled but no usable archiver_sync_s3_keys
+      entry. Add one to vault.yml (key_id + secret from
+      `garage key info --show-secret <write-key>`), and check the playbook
+      loads vault.yml.
+  loop: "{{ host_archivers }}"
+  loop_control:
+    label: "{{ item.uuid }}"
+  when: item.upload_enabled | default(false)
+  no_log: true
 
 - name: Create base gossip archiver directories
   ansible.builtin.file:

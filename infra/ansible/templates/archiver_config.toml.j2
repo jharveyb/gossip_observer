@@ -62,3 +62,40 @@ verify_region = "{{ item.verify_region | default('garage') }}"
 verify_access_key_id = "{{ archiver_verify_s3_keys[item.uuid].key_id }}"
 verify_secret_access_key = "{{ archiver_verify_s3_keys[item.uuid].secret }}"
 {% endif %}
+[upload]
+enabled = {{ item.upload_enabled | default(false) | lower }}
+# Defaults to the retention-verify endpoint/bucket: uploading to one bucket
+# while verifying against another would let the retention pass drop chunks on
+# the strength of stale objects. The binary logs an error if they disagree.
+endpoint = "{{ item.upload_endpoint | default('') }}"
+bucket = "{{ item.upload_bucket | default(item.verify_bucket) }}"
+region = "{{ item.upload_region | default(item.verify_region | default('garage')) }}"
+# A single path segment (no '/'), for instances sharing one bucket.
+key_prefix = "{{ item.upload_key_prefix | default('') }}"
+delete_local = {{ item.upload_delete_local | default(false) | lower }}
+{% if item.upload_required_on_startup is defined %}
+# Fail startup (rather than logging and retrying) if the bucket is unreachable.
+required_on_startup = {{ item.upload_required_on_startup | lower }}
+{% endif %}
+{% if archiver_sync_s3_keys is defined and item.uuid in archiver_sync_s3_keys %}
+# Read+WRITE Garage creds for publishing, from vault, keyed by instance UUID
+# (same pattern as archiver_db_urls / archiver_verify_s3_keys). Deliberately
+# distinct from the read-only verify_* pair above: a bug in the chunk-deletion
+# path can then never mutate the bucket. A missing entry leaves the creds unset,
+# which disables uploads regardless of `enabled`.
+access_key_id = "{{ archiver_sync_s3_keys[item.uuid].key_id }}"
+secret_access_key = "{{ archiver_sync_s3_keys[item.uuid].secret }}"
+{% endif %}
+
+[upload.backfill]
+# The pending-export sweep: publishes any chunk_archive_log row without an
+# object_key, a bounded slice per interval. `enabled` gates it -- this sweep is
+# this crate's backfill, and it used to run regardless, which meant one config
+# section quietly meant two different things in two crates.
+enabled = {{ item.upload_backfill_enabled | default(false) | lower }}
+interval_secs = {{ item.upload_backfill_interval_secs | default(600) }}
+startup_delay_max_secs = {{ item.upload_backfill_startup_delay_max_secs | default(300) }}
+# Two budgets: files caps request rate, MiB caps bandwidth and pass duration.
+# The byte budget is what really binds when artifacts vary in size.
+max_files_per_pass = {{ item.upload_backfill_max_files | default(250) }}
+max_mib_per_pass = {{ item.upload_backfill_max_mib | default(1024) }}
