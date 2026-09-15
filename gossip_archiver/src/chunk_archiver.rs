@@ -6,7 +6,9 @@ use anyhow::Context;
 use anyhow::anyhow;
 use async_duckdb::ClientBuilder;
 use chrono::{DateTime, NaiveDate, Utc};
-use observer_common::uploader::ArtifactUploader;
+use observer_common::uploader::{
+    ArtifactUploader, Budget, BudgetTracker, Presence, PublishOptions, Published,
+};
 use sqlx::PgPool;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -112,7 +114,13 @@ pub async fn chunk_archiver_task(
                 };
                 // Catch up anything exported but not yet published: a failed
                 // upload, or uploads that were only just enabled.
-                if let Some(up) = uploader.as_ref() {
+                // `upload_pending_exports` is this crate's backfill, so it
+                // honours the same flag the controller's sweep does. It used to
+                // run whenever an uploader existed, which meant one config
+                // section quietly meant two different things in two crates.
+                if cfg.upload.backfill.enabled
+                    && let Some(up) = uploader.as_ref()
+                {
                     match upload_pending_exports(&pool, &cfg, up).await {
                         Ok(0) => {}
                         Ok(n) => info!(published = n, "Published pending Parquet exports"),
@@ -227,7 +235,16 @@ async fn archive_pending_chunks(
                     path = %file_path.display(),
                     "Archived timings chunk"
                 );
-                publish_export(pool, uploader, range_start, range_end, "timings", &file_path).await;
+                publish_export(
+                    pool,
+                    cfg,
+                    uploader,
+                    range_start,
+                    range_end,
+                    "timings",
+                    &file_path,
+                )
+                .await;
                 archived += 1;
             }
             Err(e) => {
@@ -238,8 +255,16 @@ async fn archive_pending_chunks(
         }
 
         // Export companion tables (messages, metadata, message_hashes, message_first_seen)
-        archive_missing_companions(pool, &duckdb, range_start, range_end, &archive_dir, uploader)
-            .await?;
+        archive_missing_companions(
+            pool,
+            cfg,
+            &duckdb,
+            range_start,
+            range_end,
+            &archive_dir,
+            uploader,
+        )
+        .await?;
 
         cleanup_temp_duckdb(duckdb, cfg).await;
     }
@@ -303,6 +328,7 @@ async fn archive_pending_chunks(
             };
             if let Err(e) = archive_missing_companions(
                 pool,
+                cfg,
                 &duckdb,
                 range_start,
                 range_end,
@@ -336,6 +362,7 @@ async fn archive_pending_chunks(
 /// for the given range. Already-archived companions are skipped.
 async fn archive_missing_companions(
     pool: &PgPool,
+    cfg: &ArchiverConfig,
     duckdb: &async_duckdb::Client,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
@@ -391,6 +418,7 @@ async fn archive_missing_companions(
                 );
                 publish_export(
                     pool,
+                    cfg,
                     uploader,
                     range_start,
                     range_end,
@@ -451,6 +479,7 @@ async fn record_archive(
 /// the next tick. Losing an upload must not cost us a re-export.
 async fn publish_export(
     pool: &PgPool,
+    cfg: &ArchiverConfig,
     uploader: Option<&ArtifactUploader>,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
@@ -460,7 +489,6 @@ async fn publish_export(
     let Some(uploader) = uploader else {
         return;
     };
-    let rel = export_rel_path(table_name, range_start.date_naive());
     if let Err(e) = upload_and_record(
         pool,
         uploader,
@@ -468,9 +496,10 @@ async fn publish_export(
         range_end,
         table_name,
         local_path,
-        &rel,
+        cfg.upload.delete_local,
     )
     .await
+    .map(|_published| ())
     {
         warn!(
             error = %e,
@@ -494,30 +523,27 @@ async fn upload_and_record(
     range_end: DateTime<Utc>,
     table_name: &str,
     local_path: &Path,
-    rel: &Path,
-) -> anyhow::Result<()> {
-    let key = uploader.key_for(rel)?;
-    let local_len = tokio::fs::metadata(local_path)
-        .await
-        .with_context(|| format!("stat {}", local_path.display()))?
-        .len();
-
-    let uri = match uploader.head_size(&key).await? {
-        Some(remote_len) if remote_len == local_len => {
-            info!(%key, bytes = local_len, "Export already published, recording key");
-            // Keep the end state identical to the upload path so a backfilled
-            // row is indistinguishable from a freshly-uploaded one.
-            if uploader.delete_local()
-                && let Err(e) = tokio::fs::remove_file(local_path).await
-            {
-                warn!(path = %local_path.display(), error = %e, "Could not remove local staging file");
-            }
-            uploader.uri_for(&key)
-        }
-        _ => uploader.upload_file(local_path, rel).await?.uri,
+    delete_local: bool,
+) -> anyhow::Result<Published> {
+    let rel = export_rel_path(table_name, range_start.date_naive());
+    // `Unknown` asks the remote once and short-circuits when it already matches.
+    // That short-circuit is what stops the first tick after enabling uploads
+    // from re-sending the entire historical archive, which is why it must stay
+    // free of the caller's budget.
+    let opts = PublishOptions {
+        delete_local,
+        presence: Presence::Unknown,
     };
-
-    record_object_key(pool, range_start, range_end, table_name, &uri).await
+    let published = uploader.publish(local_path, &rel, &opts).await?;
+    if matches!(published, Published::AlreadyPresent(_)) {
+        info!(
+            key = published.receipt().key,
+            bytes = published.receipt().bytes,
+            "Export already published, recording key"
+        );
+    }
+    record_object_key(pool, range_start, range_end, table_name, published.uri()).await?;
+    Ok(published)
 }
 
 /// Mark a `chunk_archive_log` row as published.
@@ -579,11 +605,35 @@ async fn upload_pending_exports(
     if rows.is_empty() {
         return Ok(0);
     }
-    info!(pending = rows.len(), "Found exports not yet published");
+    info!(
+        pending = rows.len(),
+        max_files = cfg.upload.backfill.max_files_per_pass,
+        max_mib = cfg.upload.backfill.max_mib_per_pass,
+        "Found exports not yet published"
+    );
 
     let archive_dir = PathBuf::from(&cfg.export.dir);
     let mut published = 0u32;
-    for row in rows {
+    // Shared accounting, so this sweep and the controller's charge identically:
+    // a transfer costs a file and its bytes, an already-published export costs
+    // nothing, a failure costs one slot. A whole backlog in one tick would
+    // otherwise monopolize the interval -- an export here averages two orders
+    // of magnitude larger than a graph dump, so the byte budget is what binds.
+    //
+    // Bounded in Rust rather than with SQL `LIMIT` on purpose: the predicate
+    // runs over one row per table per day, so `LIMIT` would save microseconds
+    // while costing a `.sqlx/` cache regeneration against a live TimescaleDB --
+    // and it could not express "count only rows that transferred". If this
+    // table ever grows large, that trade flips.
+    let mut tracker = BudgetTracker::new(Budget::from_config(&cfg.upload.backfill));
+    for (idx, row) in rows.iter().enumerate() {
+        if !tracker.may_attempt() {
+            info!(
+                deferred = rows.len() - idx,
+                "Pending-export upload budget reached, deferring the rest to the next interval"
+            );
+            break;
+        }
         // Prefer the recorded local path, but fall back to the layout function
         // for rows written before export.dir moved.
         let rel = export_rel_path(&row.range_table, row.range_start.date_naive());
@@ -605,18 +655,18 @@ async fn upload_pending_exports(
             continue;
         }
 
-        match upload_and_record(
+        let outcome = upload_and_record(
             pool,
             uploader,
             row.range_start,
             row.range_end,
             &row.range_table,
             &local,
-            &rel,
+            cfg.upload.delete_local,
         )
-        .await
-        {
-            Ok(()) => published += 1,
+        .await;
+        match &outcome {
+            Ok(_) => published += 1,
             Err(e) => warn!(
                 error = %e,
                 path = %local.display(),
@@ -624,6 +674,7 @@ async fn upload_pending_exports(
                 "Failed to publish pending export; will retry next interval"
             ),
         }
+        tracker.record(&outcome);
     }
 
     Ok(published)
@@ -729,8 +780,10 @@ async fn archive_companion_table(
     archive_dir: &Path,
     companion: &CompanionTableDef,
 ) -> anyhow::Result<(PathBuf, u64, u64)> {
-    let out_path =
-        archive_dir.join(export_rel_path(companion.table_name, range_start.date_naive()));
+    let out_path = archive_dir.join(export_rel_path(
+        companion.table_name,
+        range_start.date_naive(),
+    ));
 
     if out_path.try_exists()? {
         let file_size = tokio::fs::metadata(&out_path).await?.len();
@@ -1198,9 +1251,7 @@ mod tests {
         );
         assert_eq!(
             export_rel_path("message_first_seen", day),
-            PathBuf::from(
-                "message_first_seen/2026/03/30/message_first_seen_2026-03-30.parquet"
-            )
+            PathBuf::from("message_first_seen/2026/03/30/message_first_seen_2026-03-30.parquet")
         );
     }
 
