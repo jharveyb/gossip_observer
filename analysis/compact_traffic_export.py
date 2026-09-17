@@ -2,9 +2,11 @@
 Export a compact, simulator-friendly Parquet of one row per unique outer_hash.
 
 Reads the existing daily Parquet exports (`metadata`, `message_first_seen`)
-under `--data-dir`, joins them, filters to gossip message types (1/2/3),
-decodes the 8-byte little-endian BLOB columns (outer_hash, inner_hash, scid)
-to u64, and writes a single zstd-compressed Parquet.
+under `--data-dir`, joins them, filters to gossip message types (1/2/3), and writes a single
+zstd-compressed Parquet.
+
+The hash/scid columns arrive as u64 already: `load_range` normalises both export
+formats to that shape, decoding v1's 8-byte little-endian BLOBs on the way in.
 
 Usage:
     cd analysis && uv run python compact_traffic_export.py <end-date> \\
@@ -16,7 +18,7 @@ from datetime import date as date_type, timedelta
 
 import duckdb
 
-from parquet_queries import le_blob_to_u64, load_range
+from parquet_queries import load_range
 
 
 def export_compact(conn: duckdb.DuckDBPyConnection, output_path: str) -> int:
@@ -24,12 +26,12 @@ def export_compact(conn: duckdb.DuckDBPyConnection, output_path: str) -> int:
     COPY (
         SELECT
             mfs.first_seen                    AS first_seen_timestamp,
-            {le_blob_to_u64("m.hash")}        AS outer_hash,
-            {le_blob_to_u64("m.inner_hash")}  AS inner_hash,
+            m.hash                            AS outer_hash,
+            m.inner_hash                      AS inner_hash,
             m.type,
             m.size,
             m.orig_node,
-            {le_blob_to_u64("m.scid")}        AS scid
+            m.scid                            AS scid
         FROM metadata m
         JOIN message_first_seen mfs ON m.hash = mfs.hash
         WHERE m.type IN (1, 2, 3)

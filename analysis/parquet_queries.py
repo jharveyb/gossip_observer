@@ -18,9 +18,10 @@ Sections:
 
 With no section arguments, all sections are run.
 
-Expects Parquet files at:
-    {data_dir}/{table}/YYYY/MM/DD/{table}_YYYY-MM-DD.parquet
-where table is: timings, metadata, messages, message_hashes
+Accepts either export layout, chosen per day (v2 preferred):
+    v1: {data_dir}/{table}/YYYY/MM/DD/{table}_YYYY-MM-DD.parquet
+    v2: {data_dir}/v2/table={table}/year=YYYY/month=MM/{table}_{start}_{end}.parquet
+where table is: timings, metadata, messages, message_hashes, message_first_seen
 """
 
 import argparse
@@ -58,39 +59,147 @@ def parquet_path(data_dir: str, table: str, date: str) -> str:
     return os.path.join(data_dir, table, y, m, d, f"{table}_{date}.parquet")
 
 
+# The shape every query in this file expects, regardless of which export format
+# a day is stored in:
+#
+#   hash / inner_hash / outer_hash / scid   UBIGINT
+#   collector / peer / orig_node            lowercase-hex VARCHAR
+#   timestamps                              TIMESTAMPTZ
+#
+# That is v2's types for the hash columns and v1's for everything else, chosen
+# because it is what the queries actually want: the hashes were only ever
+# decoded to integers at the point of use, while collector/peer are compared
+# against the hex keys in COLLECTOR_SCIDS.
+#
+# Normalising the hashes *forward* to UBIGINT matters beyond tidiness. The
+# reverse direction needs a u64 -> little-endian-hex inverse of
+# le_blob_to_u64's byte swap, which is fiddly, easy to get wrong, and would put
+# every query back on the slower BLOB decode (measured 4.2x on hash-heavy
+# queries). Going forward, no inverse exists to get wrong.
+_U64_COLUMNS = {
+    "timings": ("hash", "inner_hash"),
+    "metadata": ("hash", "inner_hash", "scid"),
+    "message_hashes": ("outer_hash", "inner_hash"),
+    "message_first_seen": ("hash",),
+    "messages": ("hash",),
+}
+_HEX_COLUMNS = {
+    "timings": ("collector", "peer"),
+    "metadata": ("orig_node",),
+}
+# v2 stores this as epoch seconds; the queries do timestamp arithmetic on it.
+_EPOCH_SECOND_COLUMNS = {"timings": ("orig_timestamp",)}
+
+
+def _normalising_select(
+    conn: duckdb.DuckDBPyConnection, table: str, paths_sql: str
+) -> str:
+    """A SELECT list presenting either export format in the canonical shape.
+
+    Decides per column from the actual type rather than from the path, so a
+    range that mixes formats -- some days backfilled, some not -- still loads.
+
+    Reads with `hive_partitioning = false`: the v2 tree's `table=`/`year=`/
+    `month=` directories would otherwise be added as virtual columns that v1
+    files do not have, and one of them is named `table`, a reserved word.
+    """
+    types = {
+        c[0]: c[1]
+        for c in conn.execute(
+            f"DESCRIBE SELECT * FROM read_parquet({paths_sql}, hive_partitioning = false)"
+        ).fetchall()
+    }
+    parts = []
+    for col, typ in types.items():
+        if col in _U64_COLUMNS.get(table, ()) and typ == "BLOB":
+            parts.append(f"{le_blob_to_u64(col)} AS {col}")
+        elif col in _HEX_COLUMNS.get(table, ()) and typ == "BLOB":
+            parts.append(f"lower(hex({col})) AS {col}")
+        elif col in _EPOCH_SECOND_COLUMNS.get(table, ()) and typ.startswith("UINTEGER"):
+            parts.append(f"to_timestamp({col}) AS {col}")
+        else:
+            parts.append(col)
+    return ", ".join(parts)
+
+
+def parquet_path_v2(data_dir: str, table: str, date: str) -> str:
+    """v2 layout, mirroring `export_rel_path_v2` in gossip_archiver.
+
+    Hive-style directories with an explicitly named file carrying the day's
+    half-open range.
+    """
+    nxt = (date_type.fromisoformat(date) + timedelta(days=1)).isoformat()
+    y, m = date[:4], date[5:7]
+    return os.path.join(
+        data_dir,
+        "v2",
+        f"table={table}",
+        f"year={y}",
+        f"month={m}",
+        f"{table}_{date}_{nxt}.parquet",
+    )
+
+
 def load_range(
     conn: duckdb.DuckDBPyConnection,
     data_dir: str,
     end_date: str,
     num_days: int,
+    tables: list[str] | None = None,
 ) -> None:
     """Register Parquet files for a date range as DuckDB views.
 
-    Reads `num_days` consecutive daily Parquet files backwards starting from
-    `end_date` (inclusive) and unions them into one view per table.
-    Missing files are warned about but do not abort loading.
+    Reads `num_days` consecutive daily files backwards from `end_date`
+    (inclusive) and unions them into one view per table. Missing files are
+    warned about but do not abort loading.
+
+    Accepts either export format, chosen per day (v2 preferred where both
+    exist), and presents both in the canonical shape above -- so every query
+    below is written once and runs against either tree.
     """
     end = date_type.fromisoformat(end_date)
     dates = [(end - timedelta(days=i)).isoformat() for i in range(num_days)]
 
-    for table in ["timings", "metadata", "message_first_seen"]:
-        paths = []
+    for table in tables or ["timings", "metadata", "message_first_seen"]:
+        paths, formats = [], []
         for d in dates:
-            path = parquet_path(data_dir, table, d)
-            if os.path.exists(path):
-                paths.append(path)
+            v2, v1 = (
+                parquet_path_v2(data_dir, table, d),
+                parquet_path(data_dir, table, d),
+            )
+            if os.path.exists(v2):
+                paths.append(v2)
+                formats.append("v2")
+            elif os.path.exists(v1):
+                paths.append(v1)
+                formats.append("v1")
             else:
-                print(f"  WARNING: missing {path}")
+                print(f"  WARNING: missing {table} for {d} (checked v2 and v1)")
         if not paths:
             print(f"  WARNING: no files found for {table}, skipping")
             continue
-        # DuckDB's read_parquet accepts a list literal of paths and unions them.
-        paths_sql = "[" + ", ".join(f"'{p}'" for p in paths) + "]"
+
+        # A mixed range cannot be unioned directly -- the column types differ --
+        # so normalise each format's files separately and union the results.
+        groups: dict[str, list[str]] = {}
+        for path, fmt in zip(paths, formats):
+            groups.setdefault(fmt, []).append(path)
+        selects = []
+        for group in groups.values():
+            group_sql = "[" + ", ".join(f"'{p}'" for p in group) + "]"
+            cols = _normalising_select(conn, table, group_sql)
+            selects.append(
+                f"SELECT {cols} FROM read_parquet({group_sql}, hive_partitioning = false)"
+            )
         conn.execute(
-            f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet({paths_sql})"
+            f"CREATE OR REPLACE VIEW {table} AS " + " UNION ALL BY NAME ".join(selects)
         )
+
         row_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(f"  loaded {table}: {row_count:,} rows from {len(paths)} file(s)")
+        fmts = "+".join(f"{len(g)} {f}" for f, g in groups.items())
+        print(
+            f"  loaded {table}: {row_count:,} rows from {len(paths)} file(s) ({fmts})"
+        )
 
 
 def run_query(conn: duckdb.DuckDBPyConnection, sql: str) -> pl.DataFrame:
@@ -370,7 +479,7 @@ def query_collector_originated_propagation(
         JOIN metadata m ON t.hash = m.hash
         LEFT JOIN owned o
             ON o.collector = t.collector
-            AND o.scid_u64 = {le_blob_to_u64("m.scid")}
+            AND o.scid_u64 = m.scid
         WHERE t.dir = 2
           AND m.type IN (1, 2, 3)
           {type_filter}
@@ -520,7 +629,7 @@ def query_collector_origination(
             m.orig_node,
             t.hash,
             t.inner_hash,
-            {le_blob_to_u64("m.scid")} AS scid_u64
+            m.scid AS scid_u64
         FROM timings t
         JOIN metadata m ON t.hash = m.hash
         WHERE t.dir = 2                       -- collector transmitted it
@@ -617,7 +726,7 @@ def query_collector_fanout_originated(
         JOIN metadata m ON t.hash = m.hash
         LEFT JOIN owned o
             ON o.collector = t.collector
-            AND o.scid_u64 = {le_blob_to_u64("m.scid")}
+            AND o.scid_u64 = m.scid
         WHERE t.dir = 2
           AND m.type IN (1, 2, 3)
           {type_filter}
@@ -741,7 +850,7 @@ def query_peer_count(conn: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         SELECT
             time_bucket(INTERVAL '10 minutes', net_timestamp) AS bucket,
             collector,
-            COUNT(DISTINCT peer_hash) AS peer_count
+            COUNT(DISTINCT peer) AS peer_count
         FROM timings
         WHERE dir = 1
         GROUP BY bucket, collector
