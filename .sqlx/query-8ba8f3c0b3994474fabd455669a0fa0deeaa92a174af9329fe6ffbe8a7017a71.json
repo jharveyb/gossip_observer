@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT range_start, range_end, range_table, file_path\n        FROM chunk_archive_log\n        WHERE object_key IS NULL\n        ORDER BY range_start\n        ",
+  "query": "\n        SELECT range_start, range_end, range_table, format_version, file_path\n        FROM chunk_archive_log\n        WHERE object_key IS NULL\n        ORDER BY range_start\n        ",
   "describe": {
     "columns": [
       {
@@ -20,6 +20,11 @@
       },
       {
         "ordinal": 3,
+        "name": "format_version",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 4,
         "name": "file_path",
         "type_info": "Text"
       }
@@ -31,8 +36,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "20c73c440fa447a29d97af4efde0b6a0fa013cddbc520fa239503e1e69f4b5fe"
+  "hash": "8ba8f3c0b3994474fabd455669a0fa0deeaa92a174af9329fe6ffbe8a7017a71"
 }

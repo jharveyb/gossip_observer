@@ -1,6 +1,8 @@
 use config::{Config, Environment, File};
 use observer_common::logging::{ConsoleConfig, LogRotationConfig};
 use observer_common::uploader::UploadConfig;
+
+use crate::export_format::{FormatVersion, ParquetOptions};
 use serde::Deserialize;
 use std::env;
 
@@ -31,6 +33,25 @@ pub struct DataExport {
     pub soft_memory_limit: u32,
     /// DuckDB total thread count
     pub threads: u32,
+    /// Exported-Parquet layout new chunks are written in: 1 = the original
+    /// per-day layout, 2 = the narrowed `v2/` layout. Validated at startup, so
+    /// an unknown value is a hard error rather than a silent fall back to 1.
+    pub format_version: u16,
+    /// DuckDB `COPY` options for v2 exports. Each field is optional and falls
+    /// back to the per-table default in `export_format` -- which is how one
+    /// config block still yields the per-table `PARQUET_VERSION` and
+    /// `COMPRESSION_LEVEL` that benchmarking picked. v1 exports ignore this
+    /// entirely.
+    #[serde(default)]
+    pub parquet: ParquetOptions,
+    /// Before writing a v2 export, verify the source holds no rows that the v2
+    /// transforms would silently lose. Costs one extra scan of the chunk.
+    ///
+    /// Defaults on because the failure it guards against is invisible
+    /// downstream: retention verifies row counts and byte sizes, neither of
+    /// which changes when a timestamp is truncated, so a lossy export would be
+    /// blessed and its source chunk dropped.
+    pub v2_precheck: bool,
 
     // --- Data retention: drop old timings chunks after verifying their export ---
     /// Master switch for the retention pass. When false, nothing is ever dropped.
@@ -151,6 +172,14 @@ impl ArchiverConfig {
             // to disk during export is fine, it just makes export a bit slower.
             .set_default("export.soft_memory_limit", 2048)?
             .set_default("export.threads", 3)?
+            // New chunks stay on v1 until an instance opts in, so deploying the
+            // binary changes nothing on its own.
+            .set_default("export.format_version", 1)?
+            // Only the codec has a default: level, parquet version and row group
+            // size are deliberately absent so each table's benchmarked default
+            // applies unless an operator overrides it globally.
+            .set_default("export.parquet.compression", "zstd")?
+            .set_default("export.v2_precheck", true)?
             // Data retention: off + dry-run by default; both must be explicitly
             // set (and read-only S3 creds provided) before any chunk is dropped.
             .set_default("export.deletion_enabled", false)?
@@ -174,6 +203,138 @@ impl ArchiverConfig {
             )
             .build()?;
 
-        cfg.try_deserialize().map_err(anyhow::Error::new)
+        let archiver: ArchiverConfig = cfg.try_deserialize()?;
+        archiver.export.validate()?;
+        Ok(archiver)
+    }
+}
+
+impl DataExport {
+    /// Reject a config that would produce a broken or unsafe export.
+    ///
+    /// Called once from `ArchiverConfig::new`, mirroring `UploadConfig::validate`.
+    /// The compression allowlist is load-bearing rather than cosmetic: every one
+    /// of these values is interpolated into a `format!`-built `COPY` statement.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        FormatVersion::try_from(self.format_version)
+            .map_err(|e| anyhow::anyhow!("export.format_version: {e}"))?;
+        self.parquet.validate()?;
+        Ok(())
+    }
+
+    /// The layout new chunks are written in.
+    ///
+    /// Infallible because `validate()` has already rejected anything else at
+    /// startup; the fallback exists only so a future caller cannot panic here.
+    pub fn format(&self) -> FormatVersion {
+        FormatVersion::try_from(self.format_version).unwrap_or(FormatVersion::V1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn export(format_version: u16, parquet: ParquetOptions) -> DataExport {
+        DataExport {
+            dir: "/tmp/x".into(),
+            after_days: 14,
+            interval_secs: 21600,
+            enabled: true,
+            soft_memory_limit: 2048,
+            threads: 1,
+            format_version,
+            parquet,
+            v2_precheck: true,
+            deletion_enabled: false,
+            deletion_dry_run: true,
+            retention_after_days: 45,
+            verify_endpoint: String::new(),
+            verify_use_ssl: false,
+            verify_bucket: "b".into(),
+            verify_region: "garage".into(),
+            verify_access_key_id: None,
+            verify_secret_access_key: None,
+        }
+    }
+
+    #[test]
+    fn known_format_versions_are_accepted() {
+        for (v, expected) in [(1u16, FormatVersion::V1), (2, FormatVersion::V2)] {
+            let e = export(v, ParquetOptions::default());
+            assert!(e.validate().is_ok(), "format_version {v} should validate");
+            assert_eq!(e.format(), expected);
+        }
+    }
+
+    /// An unrecognised format must fail at startup rather than silently writing
+    /// v1 files while the log claims otherwise -- the retention pass rebuilds
+    /// object keys from that number.
+    #[test]
+    fn unknown_format_version_fails_startup() {
+        for v in [0u16, 3, 99] {
+            let err = export(v, ParquetOptions::default()).validate().unwrap_err();
+            assert!(
+                err.to_string().contains("export.format_version"),
+                "unexpected error for {v}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parquet_options_are_validated_through_data_export() {
+        let bad = ParquetOptions {
+            compression: "'; DROP TABLE timings; --".into(),
+            ..Default::default()
+        };
+        assert!(export(2, bad).validate().is_err());
+    }
+
+    /// `export.parquet.*` adds a third nesting level, so its env override needs
+    /// the separator applied twice. This crate has shipped a bug where nested
+    /// keys were silently ignored because the prefix and nesting separators were
+    /// conflated, so pin the shape rather than trusting it.
+    #[test]
+    fn nested_parquet_keys_are_settable_from_the_environment() {
+        use config::{Config, Environment};
+        use std::collections::HashMap;
+
+        let env: HashMap<String, String> = [
+            ("ARCHIVER_EXPORT__PARQUET__COMPRESSION_LEVEL".to_string(), "7".to_string()),
+            ("ARCHIVER_EXPORT__PARQUET__ROW_GROUP_SIZE".to_string(), "4096".to_string()),
+            ("ARCHIVER_EXPORT__FORMAT_VERSION".to_string(), "2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        #[derive(Debug, serde::Deserialize)]
+        struct OnlyExport {
+            export: ExportProbe,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct ExportProbe {
+            format_version: u16,
+            parquet: ParquetOptions,
+        }
+
+        let cfg = Config::builder()
+            .set_default("export.format_version", 1)
+            .expect("default")
+            .set_default("export.parquet.compression", "zstd")
+            .expect("default")
+            .add_source(
+                Environment::with_prefix("ARCHIVER")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .source(Some(env)),
+            )
+            .build()
+            .expect("build");
+        let parsed: OnlyExport = cfg.try_deserialize().expect("deserialize");
+
+        assert_eq!(parsed.export.format_version, 2);
+        assert_eq!(parsed.export.parquet.compression_level, Some(7));
+        assert_eq!(parsed.export.parquet.row_group_size, Some(4096));
+        assert_eq!(parsed.export.parquet.compression, "zstd");
     }
 }

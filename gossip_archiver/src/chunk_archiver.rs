@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::anyhow;
+use anyhow::bail;
 use async_duckdb::ClientBuilder;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use observer_common::uploader::{
     ArtifactUploader, Budget, BudgetTracker, Presence, PublishOptions, Published,
 };
@@ -15,62 +16,47 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::ArchiverConfig;
+use crate::export_format::{
+    COMPANION_TABLES, ExportTableDef, FormatVersion, ParquetOptions, TIMINGS_TABLE, V2_MACROS,
+    rel_path_for,
+};
 
-/// Tables exported alongside each timings chunk. Each entry defines the SQL
-/// query (run via DuckDB's postgres scanner) and the subdirectory for output.
-/// All companion tables are filtered by `first_seen` from `message_first_seen`,
-/// using the same time range as the timings chunk.
-const COMPANION_TABLES: &[CompanionTableDef] = &[
-    CompanionTableDef {
-        table_name: "messages",
-        select_sql: "SELECT m.hash, m.raw, mfs.first_seen \
-                      FROM pg.messages m \
-                      JOIN pg.message_first_seen mfs ON m.hash = mfs.hash",
-    },
-    CompanionTableDef {
-        table_name: "metadata",
-        select_sql: "SELECT md.hash, md.inner_hash, md.type, md.size, md.orig_node, md.scid, mfs.first_seen \
-                      FROM pg.metadata md \
-                      JOIN pg.message_first_seen mfs ON md.hash = mfs.hash",
-    },
-    CompanionTableDef {
-        table_name: "message_hashes",
-        select_sql: "SELECT mh.outer_hash, mh.inner_hash, mfs.first_seen \
-                      FROM pg.message_hashes mh \
-                      JOIN pg.message_first_seen mfs ON mh.outer_hash = mfs.hash",
-    },
-    CompanionTableDef {
-        table_name: "message_first_seen",
-        select_sql: "SELECT mfs.hash, mfs.first_seen \
-                      FROM pg.message_first_seen mfs",
-    },
-];
-
-/// THE definition of the exported-Parquet layout, relative to `export.dir`:
+/// Identity of one exported file.
 ///
-///   {table}/{YYYY}/{MM}/{DD}/{table}_{YYYY-MM-DD}.parquet
-///
-/// Used for the local staging path, the Garage object key, and the retention
-/// read-back, so those three agree by construction rather than by three copies
-/// of the same `format!`. The relative path is *also* the object key suffix --
-/// that invariant is what makes these keys identical to the ones the manual
-/// `rclone copy {export.dir} garage-archiver-write:{bucket}` flow produced, so
-/// the two can overlap during rollout instead of forking the bucket.
-///
-/// Changing this orphans every previously-exported object. Don't.
-fn export_rel_path(table: &str, day: NaiveDate) -> PathBuf {
-    PathBuf::from(table)
-        .join(day.format("%Y").to_string())
-        .join(day.format("%m").to_string())
-        .join(day.format("%d").to_string())
-        .join(format!("{table}_{}.parquet", day.format("%Y-%m-%d")))
+/// These four values are exactly `chunk_archive_log`'s primary key.
+#[derive(Debug, Clone, Copy)]
+struct ExportId<'a> {
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    table: &'a str,
+    version: FormatVersion,
 }
 
-struct CompanionTableDef {
-    table_name: &'static str,
-    /// SELECT clause (without WHERE). The time-range filter is appended at
-    /// export time using the `first_seen` column from the JOIN.
-    select_sql: &'static str,
+/// How to write an export: which layout, with which DuckDB `COPY` options, and
+/// whether to run the lossiness pre-check first. Derived from config once per
+/// pass so the individual export calls cannot disagree about it.
+#[derive(Debug, Clone, Copy)]
+struct ExportSettings<'a> {
+    version: FormatVersion,
+    opts: &'a ParquetOptions,
+    precheck: bool,
+}
+
+impl<'a> ExportSettings<'a> {
+    fn from_config(cfg: &'a ArchiverConfig) -> Self {
+        Self {
+            version: cfg.export.format(),
+            opts: &cfg.export.parquet,
+            precheck: cfg.export.v2_precheck,
+        }
+    }
+}
+
+impl ExportId<'_> {
+    /// The object key / local path suffix for this export, in its own layout.
+    fn rel_path(&self) -> PathBuf {
+        rel_path_for(self.version, self.table, self.range_start, self.range_end)
+    }
 }
 
 /// Long-running task that periodically exports old `timings` chunks to Parquet
@@ -157,8 +143,11 @@ struct EligibleChunk {
     file_path: String,
     /// Where the export was published, recorded at publish time. NULL for rows
     /// predating the uploader (the rclone era), which fall back to the layout
-    /// function -- so even that branch goes through `export_rel_path`.
+    /// function -- so even that branch goes through `rel_path_for`.
     object_key: Option<String>,
+    /// Which layout the verified object uses. Always read from the row; see the
+    /// comment at the reconstruction site.
+    format_version: i16,
 }
 
 async fn archive_pending_chunks(
@@ -189,6 +178,9 @@ async fn archive_pending_chunks(
     .fetch_all(pool)
     .await?;
 
+    let settings = ExportSettings::from_config(cfg);
+    let version = settings.version;
+
     if rows.is_empty() {
         return Ok(0);
     }
@@ -211,22 +203,28 @@ async fn archive_pending_chunks(
         let archive_dir = PathBuf::from(&cfg.export.dir);
 
         // Export timings data first, before data from any other tables
-        match archive_timings_chunk(&duckdb, range_start, range_end, &archive_dir).await {
+        match archive_table(
+            &duckdb,
+            &TIMINGS_TABLE,
+            settings,
+            range_start,
+            range_end,
+            &archive_dir,
+        )
+        .await
+        {
             Ok((file_path, row_count, file_size)) => {
                 // Record first, publish second. A crash in between leaves a
                 // row with object_key = NULL, which the pending-upload sweep
                 // fixes for the price of one upload. The other order would
                 // leave an object with no row and re-run the whole DuckDB COPY.
-                record_archive(
-                    pool,
+                let id = ExportId {
                     range_start,
                     range_end,
-                    "timings",
-                    row_count,
-                    &file_path,
-                    file_size,
-                )
-                .await?;
+                    table: "timings",
+                    version,
+                };
+                record_archive(pool, id, row_count, &file_path, file_size).await?;
                 info!(
                     %range_start,
                     %range_end,
@@ -235,16 +233,7 @@ async fn archive_pending_chunks(
                     path = %file_path.display(),
                     "Archived timings chunk"
                 );
-                publish_export(
-                    pool,
-                    cfg,
-                    uploader,
-                    range_start,
-                    range_end,
-                    "timings",
-                    &file_path,
-                )
-                .await;
+                publish_export(pool, cfg, uploader, id, &file_path).await;
                 archived += 1;
             }
             Err(e) => {
@@ -369,6 +358,8 @@ async fn archive_missing_companions(
     archive_dir: &Path,
     uploader: Option<&ArtifactUploader>,
 ) -> anyhow::Result<()> {
+    let settings = ExportSettings::from_config(cfg);
+    let version = settings.version;
     for companion in COMPANION_TABLES {
         // Skip if already archived for this range. The 'as "exists!"' bit
         // after the query here is a SQLx type override for the output, that's
@@ -394,19 +385,24 @@ async fn archive_missing_companions(
             continue;
         }
 
-        match archive_companion_table(duckdb, range_start, range_end, archive_dir, companion).await
+        match archive_table(
+            duckdb,
+            companion,
+            settings,
+            range_start,
+            range_end,
+            archive_dir,
+        )
+        .await
         {
             Ok((file_path, row_count, file_size)) => {
-                record_archive(
-                    pool,
+                let id = ExportId {
                     range_start,
                     range_end,
-                    companion.table_name,
-                    row_count,
-                    &file_path,
-                    file_size,
-                )
-                .await?;
+                    table: companion.table_name,
+                    version,
+                };
+                record_archive(pool, id, row_count, &file_path, file_size).await?;
                 info!(
                     %range_start,
                     %range_end,
@@ -416,16 +412,7 @@ async fn archive_missing_companions(
                     path = %file_path.display(),
                     "Archived companion table"
                 );
-                publish_export(
-                    pool,
-                    cfg,
-                    uploader,
-                    range_start,
-                    range_end,
-                    companion.table_name,
-                    &file_path,
-                )
-                .await;
+                publish_export(pool, cfg, uploader, id, &file_path).await;
             }
             Err(e) => {
                 error!(
@@ -444,9 +431,7 @@ async fn archive_missing_companions(
 /// Record a successful export in `chunk_archive_log`.
 async fn record_archive(
     pool: &PgPool,
-    range_start: DateTime<Utc>,
-    range_end: DateTime<Utc>,
-    table_name: &str,
+    id: ExportId<'_>,
     row_count: u64,
     file_path: &Path,
     file_size: u64,
@@ -455,13 +440,15 @@ async fn record_archive(
     sqlx::query!(
         r#"
         INSERT INTO chunk_archive_log
-            (range_start, range_end, range_table, row_count, file_path, file_size_bytes)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (range_start, range_end, range_table, format_version, row_count, file_path,
+             file_size_bytes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT DO NOTHING
         "#,
-        &range_start,
-        &range_end,
-        table_name,
+        &id.range_start,
+        &id.range_end,
+        id.table,
+        id.version.as_i16(),
         row_count as i64,
         &file_path_str,
         file_size as i64
@@ -481,29 +468,19 @@ async fn publish_export(
     pool: &PgPool,
     cfg: &ArchiverConfig,
     uploader: Option<&ArtifactUploader>,
-    range_start: DateTime<Utc>,
-    range_end: DateTime<Utc>,
-    table_name: &str,
+    id: ExportId<'_>,
     local_path: &Path,
 ) {
     let Some(uploader) = uploader else {
         return;
     };
-    if let Err(e) = upload_and_record(
-        pool,
-        uploader,
-        range_start,
-        range_end,
-        table_name,
-        local_path,
-        cfg.upload.delete_local,
-    )
-    .await
-    .map(|_published| ())
+    if let Err(e) = upload_and_record(pool, uploader, id, local_path, cfg.upload.delete_local)
+        .await
+        .map(|_published| ())
     {
         warn!(
             error = %e,
-            %range_start, %range_end, table = table_name,
+            range_start = %id.range_start, range_end = %id.range_end, table = id.table,
             path = %local_path.display(),
             "Failed to publish export; will retry on the next tick"
         );
@@ -519,13 +496,14 @@ async fn publish_export(
 async fn upload_and_record(
     pool: &PgPool,
     uploader: &ArtifactUploader,
-    range_start: DateTime<Utc>,
-    range_end: DateTime<Utc>,
-    table_name: &str,
+    id: ExportId<'_>,
     local_path: &Path,
     delete_local: bool,
 ) -> anyhow::Result<Published> {
-    let rel = export_rel_path(table_name, range_start.date_naive());
+    // Rebuild the key in the layout *this row* was written in, never the one
+    // config currently names: a v2 export whose first upload failed must retry
+    // at its v2 key, not land on top of the v1 object for the same day.
+    let rel = id.rel_path();
     // `Unknown` asks the remote once and short-circuits when it already matches.
     // That short-circuit is what stops the first tick after enabling uploads
     // from re-sending the entire historical archive, which is why it must stay
@@ -542,32 +520,49 @@ async fn upload_and_record(
             "Export already published, recording key"
         );
     }
-    record_object_key(pool, range_start, range_end, table_name, published.uri()).await?;
+    record_object_key(pool, id, published.uri()).await?;
     Ok(published)
 }
 
 /// Mark a `chunk_archive_log` row as published.
 async fn record_object_key(
     pool: &PgPool,
-    range_start: DateTime<Utc>,
-    range_end: DateTime<Utc>,
-    table_name: &str,
+    id: ExportId<'_>,
     object_key: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query!(
+    // format_version is part of the key here, not just a filter: the log can
+    // hold a v1 and a v2 row for the same range (the backfill creates exactly
+    // that), and writing a v2 object's key onto the v1 row would leave retention
+    // verifying v2 bytes against the v1 row's row_count and file_size_bytes.
+    let updated = sqlx::query!(
         r#"
         UPDATE chunk_archive_log
-        SET object_key = $4
+        SET object_key = $5
         WHERE range_start = $1 AND range_end = $2 AND range_table = $3
+          AND format_version = $4
         "#,
-        &range_start,
-        &range_end,
-        table_name,
+        &id.range_start,
+        &id.range_end,
+        id.table,
+        id.version.as_i16(),
         object_key,
     )
     .execute(pool)
     .await
-    .context("Failed to record chunk_archive_log object_key")?;
+    .context("Failed to record chunk_archive_log object_key")?
+    .rows_affected();
+
+    // A silent no-op here means the export row vanished or never existed, and
+    // the pending-upload sweep would keep re-uploading the same object forever.
+    if updated != 1 {
+        bail!(
+            "chunk_archive_log update for {} {}..{} ({}) affected {updated} rows, expected 1",
+            id.table,
+            id.range_start,
+            id.range_end,
+            id.version,
+        );
+    }
     Ok(())
 }
 
@@ -577,6 +572,10 @@ struct PendingUpload {
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     range_table: String,
+    /// Which layout this row's file was written in. Read back per row rather
+    /// than taken from config, so flipping `export.format_version` cannot make
+    /// the sweep rebuild a historical key in the new layout.
+    format_version: i16,
     file_path: String,
 }
 
@@ -593,7 +592,7 @@ async fn upload_pending_exports(
     let rows: Vec<PendingUpload> = sqlx::query_as!(
         PendingUpload,
         r#"
-        SELECT range_start, range_end, range_table, file_path
+        SELECT range_start, range_end, range_table, format_version, file_path
         FROM chunk_archive_log
         WHERE object_key IS NULL
         ORDER BY range_start
@@ -636,7 +635,26 @@ async fn upload_pending_exports(
         }
         // Prefer the recorded local path, but fall back to the layout function
         // for rows written before export.dir moved.
-        let rel = export_rel_path(&row.range_table, row.range_start.date_naive());
+        // An unrecognised format must be a loud skip, never a silent fall back
+        // to the v1 builder: that would publish a v2 export at a v1 key.
+        let version = match FormatVersion::try_from(row.format_version) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    %row.range_start, table = row.range_table,
+                    "Unknown export format_version in chunk_archive_log; skipping"
+                );
+                continue;
+            }
+        };
+        let id = ExportId {
+            range_start: row.range_start,
+            range_end: row.range_end,
+            table: &row.range_table,
+            version,
+        };
+        let rel = id.rel_path();
         let local = PathBuf::from(&row.file_path);
         let local = if local.is_absolute() {
             local
@@ -655,16 +673,7 @@ async fn upload_pending_exports(
             continue;
         }
 
-        let outcome = upload_and_record(
-            pool,
-            uploader,
-            row.range_start,
-            row.range_end,
-            &row.range_table,
-            &local,
-            cfg.upload.delete_local,
-        )
-        .await;
+        let outcome = upload_and_record(pool, uploader, id, &local, cfg.upload.delete_local).await;
         match &outcome {
             Ok(_) => published += 1,
             Err(e) => warn!(
@@ -680,31 +689,45 @@ async fn upload_pending_exports(
     Ok(published)
 }
 
-/// Export a single 24-hour timings chunk to a Parquet file.
+/// Export one table's rows for a time range to a Parquet file.
+///
+/// Covers both `timings` and the companion tables, and both export formats: the
+/// SELECT list, the range column, the ordering and the `COPY` options all come
+/// from the [`ExportTableDef`], so there is exactly one place where those are
+/// interpolated into a statement.
 ///
 /// Returns `(file_path, row_count, file_size_bytes)` on success.
-async fn archive_timings_chunk(
+async fn archive_table(
     duckdb: &async_duckdb::Client,
+    table: &ExportTableDef,
+    settings: ExportSettings<'_>,
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     archive_dir: &Path,
 ) -> anyhow::Result<(PathBuf, u64, u64)> {
-    let out_path = archive_dir.join(export_rel_path("timings", range_start.date_naive()));
+    let ExportSettings {
+        version,
+        opts,
+        precheck,
+    } = settings;
+    let table_name = table.table_name;
+    let out_path = archive_dir.join(rel_path_for(version, table_name, range_start, range_end));
 
-    // If the file already exists (e.g. a crash after export but before
-    // chunk_archive_log insert), try to record it without re-exporting.
-    // If the file is corrupt (e.g. interrupted mid-write), delete it and
-    // fall through to re-export.
+    // If the file already exists (e.g. a crash after export but before the
+    // chunk_archive_log insert), try to record it without re-exporting. If it is
+    // corrupt (interrupted mid-write) delete it and fall through: existence is
+    // not validity.
     if out_path.try_exists()? {
         let file_size = tokio::fs::metadata(&out_path).await?.len();
         match count_parquet_rows(duckdb, &out_path).await {
             Ok(row_count) => {
-                warn!(path = %out_path.display(), "Parquet file already exists, recording in log");
+                warn!(path = %out_path.display(), table = table_name, "Parquet file already exists, recording in log");
                 return Ok((out_path, row_count, file_size));
             }
             Err(e) => {
                 warn!(
                     path = %out_path.display(),
+                    table = table_name,
                     error = %e,
                     "Existing Parquet file is corrupt, deleting and re-exporting"
                 );
@@ -719,128 +742,46 @@ async fn archive_timings_chunk(
             .with_context(|| format!("Failed to create archive directory: {}", parent.display()))?;
     }
 
-    let out_path_str = out_path.to_string_lossy().into_owned();
-    // RFC 3339 timestamps are valid PostgreSQL TIMESTAMPTZ literals.
-    let range_start_str = range_start.to_rfc3339();
-    let range_end_str = range_end.to_rfc3339();
-
-    let row_count: u64 = duckdb
-        .conn(move |conn| {
-            // Leave this as a runtime query since it has some DuckDB-specific
-            // syntax. Default ROW_GROUP_SIZE is 122880, which is the 'unit' of
-            // parallelism for reading. Given that there are ~millions of timings
-            // rows per day, this should be fine.
-            let copy_sql = format!(
-                "COPY (
-                    SELECT net_timestamp, row_inc, hash, inner_hash, collector,
-                           peer, dir, peer_hash, orig_timestamp
-                    FROM pg.timings
-                    WHERE net_timestamp >= '{range_start_str}'::timestamptz
-                      AND net_timestamp < '{range_end_str}'::timestamptz
-                ) TO '{out_path_str}'
-                (FORMAT 'parquet', COMPRESSION 'zstd', COMPRESSION_LEVEL 10);"
+    // Refuse to write a v2 file whose transforms would lose data. Runs before
+    // the COPY so a tripped check costs a scan rather than a bad export, and
+    // leaves the chunk exportable as v1.
+    if version == FormatVersion::V2
+        && precheck
+        && let Some(sql) = table.precheck_sql(range_start, range_end)
+    {
+        let lossy: i64 = duckdb
+            .conn(move |conn| conn.query_row(&sql, [], |row| row.get(0)))
+            .await
+            .map_err(anyhow::Error::from)?;
+        if lossy != 0 {
+            bail!(
+                "{table_name} {range_start}..{range_end}: {lossy} rows would be lossily \
+                 transformed by the v2 format; refusing to export (set \
+                 export.v2_precheck = false to override)"
             );
-
-            if let Err(e) = conn.execute_batch(&copy_sql) {
-                let _ = std::fs::remove_file(&out_path_str);
-                error!(error = %e, "Failed to export Parquet file");
-                return Err(e);
-            }
-
-            // Verify the export by reading back the row count from the
-            // Parquet metadata (no full scan needed — Parquet stores row
-            // counts in footer metadata).
-            let parquet_count = conn.query_row(
-                &format!("SELECT COUNT(*) FROM read_parquet('{out_path_str}')"),
-                [],
-                |row| row.get(0),
-            );
-            // TODO: remove parquet file here?
-            if parquet_count.is_err() {
-                error!(error = ?parquet_count, "Failed to count Parquet rows");
-            }
-
-            parquet_count
-        })
-        .await?;
-
-    let file_size = tokio::fs::metadata(&out_path).await?.len();
-
-    Ok((out_path, row_count, file_size))
-}
-
-/// Export a companion table (messages, metadata, or message_hashes) for a given
-/// time range by JOINing through `message_first_seen`.
-///
-/// Returns `(file_path, row_count, file_size_bytes)` on success.
-async fn archive_companion_table(
-    duckdb: &async_duckdb::Client,
-    range_start: DateTime<Utc>,
-    range_end: DateTime<Utc>,
-    archive_dir: &Path,
-    companion: &CompanionTableDef,
-) -> anyhow::Result<(PathBuf, u64, u64)> {
-    let out_path = archive_dir.join(export_rel_path(
-        companion.table_name,
-        range_start.date_naive(),
-    ));
-
-    if out_path.try_exists()? {
-        let file_size = tokio::fs::metadata(&out_path).await?.len();
-        match count_parquet_rows(duckdb, &out_path).await {
-            Ok(row_count) => {
-                warn!(path = %out_path.display(), table = companion.table_name, "Parquet file already exists, recording in log");
-                return Ok((out_path, row_count, file_size));
-            }
-            Err(e) => {
-                warn!(
-                    path = %out_path.display(),
-                    table = companion.table_name,
-                    error = %e,
-                    "Existing Parquet file is corrupt, deleting and re-exporting"
-                );
-                tokio::fs::remove_file(&out_path).await?;
-            }
         }
     }
 
-    if let Some(parent) = out_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("Failed to create archive directory: {}", parent.display()))?;
-    }
-
     let out_path_str = out_path.to_string_lossy().into_owned();
-    let range_start_str = range_start.to_rfc3339();
-    let range_end_str = range_end.to_rfc3339();
-    let select_sql = companion.select_sql.to_string();
+    let copy_sql = table.copy_sql(version, opts, range_start, range_end, &out_path_str);
 
     let row_count: u64 = duckdb
         .conn(move |conn| {
-            // Use a ROW_GROUP_SIZE smaller than the default of 122880 here, since we want
-            // the total row count always be greater than this parameter.
-            let copy_sql = format!(
-                "COPY (
-                    {select_sql}
-                    WHERE mfs.first_seen >= '{range_start_str}'::timestamptz
-                      AND mfs.first_seen < '{range_end_str}'::timestamptz
-                ) TO '{out_path_str}'
-                (FORMAT 'parquet', COMPRESSION 'zstd', COMPRESSION_LEVEL 10, ROW_GROUP_SIZE 61440);"
-            );
-
             if let Err(e) = conn.execute_batch(&copy_sql) {
                 let _ = std::fs::remove_file(&out_path_str);
-                error!(error = %e, "Failed to export companion Parquet file");
+                error!(error = %e, table = table_name, "Failed to export Parquet file");
                 return Err(e);
             }
 
+            // Verify the export by reading the row count back from the Parquet
+            // footer (no full scan needed).
             let parquet_count = conn.query_row(
                 &format!("SELECT COUNT(*) FROM read_parquet('{out_path_str}')"),
                 [],
                 |row| row.get(0),
             );
             if parquet_count.is_err() {
-                error!(error = ?parquet_count, "Failed to count companion Parquet rows");
+                error!(error = ?parquet_count, table = table_name, "Failed to count Parquet rows");
             }
 
             parquet_count
@@ -889,7 +830,12 @@ async fn init_temp_duckdb(cfg: &ArchiverConfig) -> anyhow::Result<async_duckdb::
                         SET threads = '{db_threads}';
                      SET temp_directory = '{tmp_dir_str}';
                      ATTACH '{db_url}' AS pg (TYPE postgres, READ_ONLY);"
-                ))
+                ))?;
+                // The v2 column transforms. Installed unconditionally: they are
+                // a few macro definitions, and defining them here rather than
+                // inlining the expressions is what keeps the COPY statement down
+                // to table, range, path and options.
+                conn.execute_batch(V2_MACROS)
             })
             .await
             .map_err(anyhow::Error::from)?;
@@ -964,11 +910,19 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
 
     // Eligible: compressed timings chunks older than retention_after_days that
     // already have a 'timings' export logged. Oldest first.
+    //
+    // DISTINCT ON keeps this 1:1 now that a range can hold both a v1 and a v2
+    // row (the backfill creates exactly that). `format_version ASC` is the safe
+    // tiebreak: a chunk is dropped on the strength of the copy that has existed
+    // longest, never one nobody has read yet. Consequence worth knowing: once v1
+    // objects are deleted from the bucket, retention stalls loudly on the
+    // read-back rather than silently switching to the v2 copy.
     let rows: Vec<EligibleChunk> = sqlx::query_as!(
         EligibleChunk,
         r#"
-        SELECT c.range_start, c.range_end, l.row_count, l.file_size_bytes, l.file_path,
-               l.object_key
+        SELECT DISTINCT ON (c.range_start, c.range_end)
+               c.range_start, c.range_end, l.row_count, l.file_size_bytes, l.file_path,
+               l.object_key, l.format_version
         FROM timescaledb_information.chunks c
         JOIN chunk_archive_log l
           ON l.range_start = c.range_start AND l.range_end = c.range_end
@@ -976,7 +930,7 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
         WHERE c.hypertable_name = 'timings'
           AND c.is_compressed = true
           AND c.range_end < NOW() - ($1::integer * INTERVAL '1 day')
-        ORDER BY c.range_start
+        ORDER BY c.range_start, c.range_end, l.format_version ASC
         "#,
         cfg.export.retention_after_days as i32
     )
@@ -1016,13 +970,36 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
 
         // (2) Garage Parquet metadata (num_rows + file_size_bytes); a successful
         //     read also proves the file is present and readable.
+        // Rebuild from the *row's* format, never config's: reading
+        // cfg.export.format_version here would make flipping that setting point
+        // retention at the wrong key for every pre-uploader row, and a NoSuchKey
+        // reads as "don't drop" -- an unbounded-growth failure, not a loud one.
+        let version = match FormatVersion::try_from(row.format_version) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    error = %e, %range_start, %range_end,
+                    "Unknown export format_version in chunk_archive_log; NOT dropping chunk"
+                );
+                continue;
+            }
+        };
         let uri = match row.object_key.as_deref() {
             Some(uri) => uri.to_string(),
-            None => format!(
-                "s3://{}/{}",
-                cfg.export.verify_bucket,
-                export_rel_path("timings", range_start.date_naive()).display()
-            ),
+            None => {
+                let rel = ExportId {
+                    range_start,
+                    range_end,
+                    table: "timings",
+                    version,
+                }
+                .rel_path();
+                warn!(
+                    %range_start, %range_end, %version,
+                    "chunk_archive_log row has no object_key; reconstructing it from the layout"
+                );
+                format!("s3://{}/{}", cfg.export.verify_bucket, rel.display())
+            }
         };
         let (parquet_rows, parquet_bytes) = match parquet_s3_metadata(&duckdb, &uri).await {
             Ok(m) => m,
@@ -1072,6 +1049,7 @@ async fn drop_verified_chunks(pool: &PgPool, cfg: &ArchiverConfig) -> anyhow::Re
             range_start,
             range_end,
             "timings",
+            version,
             db_count,
             parquet_rows as i64,
             row.row_count,
@@ -1203,6 +1181,7 @@ async fn record_deletion(
     range_start: DateTime<Utc>,
     range_end: DateTime<Utc>,
     range_table: &str,
+    format_version: FormatVersion,
     db_row_count: i64,
     parquet_row_count: i64,
     log_row_count: i64,
@@ -1213,14 +1192,15 @@ async fn record_deletion(
     sqlx::query!(
         r#"
         INSERT INTO chunk_deletion_log
-            (range_start, range_end, range_table, db_row_count, parquet_row_count,
-             log_row_count, file_size_bytes, file_path, object_key)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (range_start, range_end, range_table, format_version, db_row_count,
+             parquet_row_count, log_row_count, file_size_bytes, file_path, object_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT DO NOTHING
         "#,
         range_start,
         range_end,
         range_table,
+        format_version.as_i16(),
         db_row_count,
         parquet_row_count,
         log_row_count,
@@ -1232,56 +1212,4 @@ async fn record_deletion(
     .await
     .context("Failed to insert chunk_deletion_log entry")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The regression gate for collapsing the three hand-written copies of this
-    /// layout into one function. These exact strings are what the manual rclone
-    /// flow already wrote into the bucket and what the retention read-back
-    /// looks for; if they change, every historical object is orphaned.
-    #[test]
-    fn export_rel_path_matches_the_deployed_layout() {
-        let day = NaiveDate::from_ymd_opt(2026, 3, 30).expect("valid date");
-        assert_eq!(
-            export_rel_path("timings", day),
-            PathBuf::from("timings/2026/03/30/timings_2026-03-30.parquet")
-        );
-        assert_eq!(
-            export_rel_path("message_first_seen", day),
-            PathBuf::from("message_first_seen/2026/03/30/message_first_seen_2026-03-30.parquet")
-        );
-    }
-
-    /// Every companion table has to round-trip through the same layout, since
-    /// the retention pass and the pending-upload sweep both rebuild keys from
-    /// (table, date) alone.
-    #[test]
-    fn export_rel_path_covers_every_companion_table() {
-        let day = NaiveDate::from_ymd_opt(2026, 12, 1).expect("valid date");
-        for companion in COMPANION_TABLES {
-            let name = companion.table_name;
-            assert_eq!(
-                export_rel_path(name, day),
-                PathBuf::from(format!("{name}/2026/12/01/{name}_2026-12-01.parquet"))
-            );
-        }
-    }
-
-    /// The retention pass derives its key from a `DateTime<Utc>` while the
-    /// export derives it from the same value's `date_naive()`. They must agree.
-    #[test]
-    fn export_rel_path_agrees_across_datetime_and_date() {
-        let ts: DateTime<Utc> = "2026-03-30T00:00:00Z".parse().expect("valid timestamp");
-        assert_eq!(
-            export_rel_path("timings", ts.date_naive()),
-            PathBuf::from(format!(
-                "timings/{}/timings_{}.parquet",
-                ts.format("%Y/%m/%d"),
-                ts.format("%Y-%m-%d")
-            ))
-        );
-    }
 }
