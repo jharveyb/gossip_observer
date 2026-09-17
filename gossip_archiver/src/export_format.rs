@@ -175,11 +175,25 @@ pub struct ExportTableDef {
     pub table_name: &'static str,
     /// v1 SELECT list + FROM/JOIN, without the WHERE clause.
     select_v1: &'static str,
-    /// v2 equivalent. Every transformed column is aliased back to its v1 name.
-    select_v2: &'static str,
-    /// Column the time-range filter is applied to.
+    /// v2 column list, written against the **source shape** -- the flat set of
+    /// columns `select_v1` produces -- using unqualified names, and aliasing
+    /// every transformed column back to its v1 name.
+    ///
+    /// Writing it against the source shape rather than against `pg.*` is what
+    /// lets one definition serve both producers: the archiver wraps
+    /// `select_v1` in a subquery, and the backfill substitutes a v1 Parquet
+    /// file. Previously this needed two near-identical projections (one with
+    /// JOIN aliases, one without), which is exactly the duplication that lets
+    /// the two drift apart.
+    projection_v2: &'static str,
+    /// Range column as v1 writes it -- qualified by the JOIN alias where the
+    /// companion tables need it.
+    range_column_v1: &'static str,
+    /// Range column in the source shape: the unqualified output name, which is
+    /// what both v2 paths see through the subquery.
     range_column: &'static str,
-    /// Column the v2 export is ordered by, if any. `timings` needs none.
+    /// Column the v2 export is ordered by, if any, in the source shape.
+    /// `timings` needs none.
     v2_order_by: Option<&'static str>,
     /// `PARQUET_VERSION` for v2. **Per table, deliberately.** V2 changes the
     /// INT64 fallback encoding from `PLAIN` to `DELTA_BINARY_PACKED`; where a
@@ -213,14 +227,14 @@ pub const TIMINGS_TABLE: ExportTableDef = ExportTableDef {
                 FROM pg.timings",
     // row_inc (a BIGSERIAL no query reads) and peer_hash (XXH3-64 of the `peer`
     // hex string, so exactly recomputable) are dropped: together 20% of the file.
-    select_v2: "SELECT net_timestamp, \
-                le_blob_u64(hash) AS hash, \
-                le_blob_u64(inner_hash) AS inner_hash, \
-                hexkey_blob(collector) AS collector, \
-                hexkey_blob(peer) AS peer, \
-                dir, \
-                epoch_secs(orig_timestamp) AS orig_timestamp \
-                FROM pg.timings",
+    projection_v2: "net_timestamp, \
+                    le_blob_u64(hash) AS hash, \
+                    le_blob_u64(inner_hash) AS inner_hash, \
+                    hexkey_blob(collector) AS collector, \
+                    hexkey_blob(peer) AS peer, \
+                    dir, \
+                    epoch_secs(orig_timestamp) AS orig_timestamp",
+    range_column_v1: "net_timestamp",
     range_column: "net_timestamp",
     v2_order_by: None,
     v2_parquet_version: 2,
@@ -238,13 +252,12 @@ pub const COMPANION_TABLES: &[ExportTableDef] = &[
         select_v1: "SELECT m.hash, m.raw, mfs.first_seen \
                     FROM pg.messages m \
                     JOIN pg.message_first_seen mfs ON m.hash = mfs.hash",
-        select_v2: "SELECT le_blob_u64(m.hash) AS hash, \
-                    b64url_blob(m.raw) AS raw, \
-                    mfs.first_seen \
-                    FROM pg.messages m \
-                    JOIN pg.message_first_seen mfs ON m.hash = mfs.hash",
-        range_column: "mfs.first_seen",
-        v2_order_by: Some("mfs.first_seen"),
+        projection_v2: "le_blob_u64(hash) AS hash, \
+                        b64url_blob(raw) AS raw, \
+                        first_seen",
+        range_column_v1: "mfs.first_seen",
+        range_column: "first_seen",
+        v2_order_by: Some("first_seen"),
         v2_parquet_version: 2,
         v2_compression_level: 19,
         v2_precheck: None,
@@ -254,16 +267,15 @@ pub const COMPANION_TABLES: &[ExportTableDef] = &[
         select_v1: "SELECT md.hash, md.inner_hash, md.type, md.size, md.orig_node, md.scid, mfs.first_seen \
                     FROM pg.metadata md \
                     JOIN pg.message_first_seen mfs ON md.hash = mfs.hash",
-        select_v2: "SELECT le_blob_u64(md.hash) AS hash, \
-                    le_blob_u64(md.inner_hash) AS inner_hash, \
-                    md.type, md.size, \
-                    hexkey_blob(md.orig_node) AS orig_node, \
-                    le_blob_u64(md.scid) AS scid, \
-                    mfs.first_seen \
-                    FROM pg.metadata md \
-                    JOIN pg.message_first_seen mfs ON md.hash = mfs.hash",
-        range_column: "mfs.first_seen",
-        v2_order_by: Some("mfs.first_seen"),
+        projection_v2: "le_blob_u64(hash) AS hash, \
+                        le_blob_u64(inner_hash) AS inner_hash, \
+                        type, size, \
+                        hexkey_blob(orig_node) AS orig_node, \
+                        le_blob_u64(scid) AS scid, \
+                        first_seen",
+        range_column_v1: "mfs.first_seen",
+        range_column: "first_seen",
+        v2_order_by: Some("first_seen"),
         // V1: `inner_hash` has 140,800 distinct values over 527,400 rows, so its
         // dictionary is abandoned and V2's delta fallback costs 19%.
         v2_parquet_version: 1,
@@ -275,13 +287,12 @@ pub const COMPANION_TABLES: &[ExportTableDef] = &[
         select_v1: "SELECT mh.outer_hash, mh.inner_hash, mfs.first_seen \
                     FROM pg.message_hashes mh \
                     JOIN pg.message_first_seen mfs ON mh.outer_hash = mfs.hash",
-        select_v2: "SELECT le_blob_u64(mh.outer_hash) AS outer_hash, \
-                    le_blob_u64(mh.inner_hash) AS inner_hash, \
-                    mfs.first_seen \
-                    FROM pg.message_hashes mh \
-                    JOIN pg.message_first_seen mfs ON mh.outer_hash = mfs.hash",
-        range_column: "mfs.first_seen",
-        v2_order_by: Some("mfs.first_seen"),
+        projection_v2: "le_blob_u64(outer_hash) AS outer_hash, \
+                        le_blob_u64(inner_hash) AS inner_hash, \
+                        first_seen",
+        range_column_v1: "mfs.first_seen",
+        range_column: "first_seen",
+        v2_order_by: Some("first_seen"),
         // V1 for the same reason as `metadata`, and more sharply: `outer_hash`
         // is unique per row, so nothing here is dictionary-compressible.
         v2_parquet_version: 1,
@@ -292,10 +303,10 @@ pub const COMPANION_TABLES: &[ExportTableDef] = &[
         table_name: "message_first_seen",
         select_v1: "SELECT mfs.hash, mfs.first_seen \
                     FROM pg.message_first_seen mfs",
-        select_v2: "SELECT le_blob_u64(mfs.hash) AS hash, mfs.first_seen \
-                    FROM pg.message_first_seen mfs",
-        range_column: "mfs.first_seen",
-        v2_order_by: Some("mfs.first_seen"),
+        projection_v2: "le_blob_u64(hash) AS hash, first_seen",
+        range_column_v1: "mfs.first_seen",
+        range_column: "first_seen",
+        v2_order_by: Some("first_seen"),
         v2_parquet_version: 2,
         v2_compression_level: 19,
         v2_precheck: None,
@@ -303,17 +314,106 @@ pub const COMPANION_TABLES: &[ExportTableDef] = &[
 ];
 
 impl ExportTableDef {
-    fn select_sql(&self, version: FormatVersion) -> &'static str {
+    /// The v1 export query: also the definition of the "source shape" that
+    /// `projection_v2` is written against.
+    fn select_v1(&self) -> &'static str {
+        self.select_v1
+    }
+
+    /// `COPY ... TO ...` for one table and range, exported from the attached
+    /// Postgres scanner. This is what the archiver runs.
+    ///
+    /// v1 filters `select_v1` directly, exactly as the deployed archiver always
+    /// has. v2 wraps it in a subquery and applies `projection_v2` on top, so the
+    /// projection sees the flat source shape rather than JOIN aliases -- the
+    /// same shape a v1 Parquet file has, which is what lets the backfill reuse
+    /// it verbatim.
+    pub fn copy_sql(
+        &self,
+        version: FormatVersion,
+        opts: &ParquetOptions,
+        range_start: DateTime<Utc>,
+        range_end: DateTime<Utc>,
+        out_path: &str,
+    ) -> String {
         match version {
-            FormatVersion::V1 => self.select_v1,
-            FormatVersion::V2 => self.select_v2,
+            FormatVersion::V1 => {
+                let (start, end) = (range_start.to_rfc3339(), range_end.to_rfc3339());
+                format!(
+                    "COPY ({select} WHERE {range} >= '{start}'::timestamptz \
+                     AND {range} < '{end}'::timestamptz) TO '{out_path}' ({options});",
+                    select = self.select_v1(),
+                    range = self.range_column_v1,
+                    options = self.copy_options(version, opts),
+                )
+            }
+            FormatVersion::V2 => self.v2_copy_sql(
+                opts,
+                &format!("({})", self.select_v1()),
+                range_start,
+                range_end,
+                out_path,
+            ),
         }
+    }
+
+    /// `COPY ... TO ...` re-exporting an existing **v1 Parquet file** as v2.
+    ///
+    /// The backfill's only difference from the archiver is where the rows come
+    /// from, so it shares the projection, the macros, the per-table options and
+    /// the key layout rather than reimplementing them.
+    pub fn backfill_copy_sql(
+        &self,
+        opts: &ParquetOptions,
+        v1_parquet: &str,
+        range_start: DateTime<Utc>,
+        range_end: DateTime<Utc>,
+        out_path: &str,
+    ) -> String {
+        self.v2_copy_sql(
+            opts,
+            // hive_partitioning is off: a v1 path has no key=value directories,
+            // but the *output* tree does, and a future re-read of v2 files must
+            // not silently gain virtual columns.
+            &format!("read_parquet('{v1_parquet}', hive_partitioning = false)"),
+            range_start,
+            range_end,
+            out_path,
+        )
+    }
+
+    /// Shared v2 statement builder. `source` is any table expression yielding
+    /// the source shape.
+    fn v2_copy_sql(
+        &self,
+        opts: &ParquetOptions,
+        source: &str,
+        range_start: DateTime<Utc>,
+        range_end: DateTime<Utc>,
+        out_path: &str,
+    ) -> String {
+        // RFC 3339 timestamps are valid PostgreSQL TIMESTAMPTZ literals.
+        let start = range_start.to_rfc3339();
+        let end = range_end.to_rfc3339();
+        let order = match self.v2_order_by {
+            Some(col) => format!(" ORDER BY {col}"),
+            None => String::new(),
+        };
+        format!(
+            "COPY (SELECT {projection} FROM {source} src \
+             WHERE {range} >= '{start}'::timestamptz \
+             AND {range} < '{end}'::timestamptz{order}) TO '{out_path}' ({options});",
+            projection = self.projection_v2,
+            range = self.range_column,
+            options = self.copy_options(FormatVersion::V2, opts),
+        )
     }
 
     /// The `(...)` option list for a `COPY`.
     ///
     /// v1 is frozen at what the deployed archiver has always written, so the
-    /// legacy path cannot drift when the v2 defaults are retuned.
+    /// legacy path cannot drift when the v2 defaults are retuned -- and the
+    /// retention pass compares `file_size_bytes` exactly.
     pub fn copy_options(&self, version: FormatVersion, opts: &ParquetOptions) -> String {
         match version {
             FormatVersion::V1 => {
@@ -347,44 +447,16 @@ impl ExportTableDef {
         range_end: DateTime<Utc>,
     ) -> Option<String> {
         let predicate = self.v2_precheck?;
-        let from = self
-            .select_v1
-            .split_once(" FROM ")
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
         Some(format!(
-            "SELECT count(*) FROM {from} WHERE {range} >= '{start}'::timestamptz \
+            "SELECT count(*) FROM ({select}) src WHERE {range} >= '{start}'::timestamptz \
              AND {range} < '{end}'::timestamptz AND ({predicate})",
+            select = self.select_v1(),
             range = self.range_column,
             start = range_start.to_rfc3339(),
             end = range_end.to_rfc3339(),
         ))
     }
 
-    /// The full `COPY ... TO ...` statement for one table and time range.
-    pub fn copy_sql(
-        &self,
-        version: FormatVersion,
-        opts: &ParquetOptions,
-        range_start: DateTime<Utc>,
-        range_end: DateTime<Utc>,
-        out_path: &str,
-    ) -> String {
-        // RFC 3339 timestamps are valid PostgreSQL TIMESTAMPTZ literals.
-        let start = range_start.to_rfc3339();
-        let end = range_end.to_rfc3339();
-        let order = match (version, self.v2_order_by) {
-            (FormatVersion::V2, Some(col)) => format!(" ORDER BY {col}"),
-            _ => String::new(),
-        };
-        format!(
-            "COPY ({select} WHERE {range} >= '{start}'::timestamptz \
-             AND {range} < '{end}'::timestamptz{order}) TO '{out_path}' ({options});",
-            select = self.select_sql(version),
-            range = self.range_column,
-            options = self.copy_options(version, opts),
-        )
-    }
 }
 
 /// Look a table def up by name, for paths that only have the string (the
@@ -709,7 +781,7 @@ mod tests {
                 "/tmp/o.parquet",
             );
             assert!(
-                sql.contains("ORDER BY mfs.first_seen"),
+                sql.contains("ORDER BY first_seen"),
                 "{} must be ordered -- unordered costs up to 17 points: {sql}",
                 c.table_name
             );
@@ -725,7 +797,7 @@ mod tests {
         const DROPPED: &[&str] = &["row_inc", "peer_hash"];
         for t in all_tables() {
             let v1_cols = select_aliases(t.select_v1);
-            let v2_cols = select_aliases(t.select_v2);
+            let v2_cols = projection_aliases(t.projection_v2);
             let expected: Vec<&str> = v1_cols
                 .iter()
                 .copied()
@@ -739,15 +811,20 @@ mod tests {
         }
     }
 
-    /// Parse the output column names out of a SELECT list: the alias after
-    /// ` AS `, else the last dot-separated segment of the expression.
+    /// Parse the output column names out of a v1 `SELECT ... FROM ...`.
     fn select_aliases(select: &str) -> Vec<&str> {
         let body = select
             .trim_start()
             .strip_prefix("SELECT ")
-            .expect("select_sql must start with SELECT");
-        let body = body.split(" FROM ").next().unwrap();
-        body.split(',')
+            .expect("select_v1 must start with SELECT");
+        projection_aliases(body.split(" FROM ").next().unwrap())
+    }
+
+    /// Parse the output column names out of a bare projection: the alias after
+    /// ` AS `, else the last dot-separated segment of the expression.
+    fn projection_aliases(projection: &str) -> Vec<&str> {
+        projection
+            .split(',')
             .map(|part| {
                 let part = part.trim();
                 match part.rsplit_once(" AS ") {
@@ -968,7 +1045,9 @@ mod tests {
         let sql = TIMINGS_TABLE
             .precheck_sql(day(2026, 3, 30), day(2026, 3, 31))
             .expect("timings narrows orig_timestamp, so it needs a precheck");
-        assert!(sql.starts_with("SELECT count(*) FROM pg.timings"), "{sql}");
+        // Runs against the source shape, same as the v2 projection does.
+        assert!(sql.starts_with("SELECT count(*) FROM (SELECT"), "{sql}");
+        assert!(sql.contains("FROM pg.timings) src"), "{sql}");
         assert!(
             sql.contains("date_trunc('second', orig_timestamp) <> orig_timestamp"),
             "{sql}"
@@ -1014,5 +1093,74 @@ mod tests {
             )
             .expect("precheck");
         assert_eq!(lossy, 1, "exactly the sub-second row must be flagged");
+    }
+
+    /// The whole point of the source-shape restructure: the archiver and the
+    /// backfill must differ *only* in where rows come from. If these two
+    /// statements diverge anywhere else, the two producers can write different
+    /// bytes for the same day.
+    #[test]
+    fn backfill_and_archiver_differ_only_in_the_source() {
+        let opts = ParquetOptions::default();
+        for t in all_tables() {
+            let from_pg = t.copy_sql(
+                FormatVersion::V2,
+                &opts,
+                day(2026, 3, 30),
+                day(2026, 3, 31),
+                "/tmp/o.parquet",
+            );
+            let from_parquet = t.backfill_copy_sql(
+                &opts,
+                "/data/v1.parquet",
+                day(2026, 3, 30),
+                day(2026, 3, 31),
+                "/tmp/o.parquet",
+            );
+            let pg_source = format!("({})", t.select_v1);
+            let pq_source = "read_parquet('/data/v1.parquet', hive_partitioning = false)";
+            assert_eq!(
+                from_pg.replace(&pg_source, "SRC"),
+                from_parquet.replace(pq_source, "SRC"),
+                "{} statements differ beyond the source",
+                t.table_name
+            );
+        }
+    }
+
+    /// The v2 projection must be usable against a flat source: no JOIN aliases,
+    /// because a v1 Parquet file has none.
+    #[test]
+    fn v2_projection_uses_no_join_aliases() {
+        for t in all_tables() {
+            for alias in ["m.", "md.", "mh.", "mfs.", "src."] {
+                assert!(
+                    !t.projection_v2.contains(alias),
+                    "{} projection references the {alias} alias, which a v1 \
+                     Parquet source does not have: {}",
+                    t.table_name,
+                    t.projection_v2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn backfill_statement_reads_the_v1_file_and_writes_v2_options() {
+        let sql = TIMINGS_TABLE.backfill_copy_sql(
+            &ParquetOptions::default(),
+            "/exports/timings/2026/03/30/timings_2026-03-30.parquet",
+            day(2026, 3, 30),
+            day(2026, 3, 31),
+            "/out.parquet",
+        );
+        assert!(sql.contains(
+            "read_parquet('/exports/timings/2026/03/30/timings_2026-03-30.parquet', \
+             hive_partitioning = false)"
+        ), "{sql}");
+        assert!(sql.contains("PARQUET_VERSION V2"), "{sql}");
+        assert!(sql.contains("ROW_GROUP_SIZE 2048000"), "{sql}");
+        assert!(sql.contains("KV_METADATA { format_version: '2' }"), "{sql}");
+        assert!(!sql.contains("pg."), "backfill must not touch Postgres: {sql}");
     }
 }
