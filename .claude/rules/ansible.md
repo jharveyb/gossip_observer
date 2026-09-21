@@ -61,13 +61,25 @@ Holds: collector `gossip_collector_mnemonics` and `collector_chain_source` (the 
 
 - **Controllers do hold a secret now** (since the graph-dump uploader), so `controller_config.toml.j2` deploys `0640` + `no_log: true`, same as the collector and archiver. It was `0644` with no `no_log` while controllers were secret-free — don't let it drift back.
 - **The `*-sync` (write) and `*-verify` (read-only) keys of a bucket are deliberately separate credentials**, not one read-write key doing both jobs: the archiver's chunk-deletion path only ever gets read access, so a bug there cannot mutate the bucket. Both come from `garage key info --show-secret <name>` and are hand-copied into vault, keyed by instance UUID. A missing entry leaves the creds unset, which disables uploads regardless of `upload_enabled` — that is the intended safe default, not a misconfiguration to paper over.
-- Which service writes where is tabulated in `inventory/group_vars/garage.yml` above `garage_buckets`. Both controllers share the one `graph-dump-sync` key and are separated inside `gossip-graph-dumps` by `upload_key_prefix` (`staging/` vs `prod/`).
+- Which service writes where is tabulated in `inventory/group_vars/garage.yml` above `garage_buckets`. **One bucket + one key per writer per environment** — staging and prod are separated by the bucket (`gossip-graph-dump-staging` / `gossip-graph-dump`, set as `upload_bucket` per controller instance), not by a key prefix inside a shared bucket. `upload_key_prefix` still exists in the archiver/controller templates and defaults to empty, but nothing sets it.
 
 ## Deploying one instance, not a whole host
 `--limit` selects **hosts**, and staging + prod archivers (and both controllers) share `do-medium`, so it cannot separate them: `host_archivers`/`host_controllers` are built by matching `inventory_hostname`, and the restart handlers loop over those same facts — one changed config restarts every sibling instance on the host.
 
 - Pass `archiver_uuids` / `controller_uuids` to narrow a run: `-e '{"controller_uuids": ["<uuid>"]}'`. It filters the `host_*` fact, so restart scoping follows automatically. Unset = every instance. An unknown UUID fails the run rather than silently deploying nothing.
 - **Instances on a host cannot run different binary versions** — `/usr/local/bin/{svc}` is shared by the `{svc}@.service` template, and the binary copy notifies the host-wide restart handler. So a staged rollout scopes *config*, never code: ship the new binary to everything with the new behaviour defaulted off, then enable it per instance.
+
+- **`[upload.backfill]` publishes what is already on disk.** Off by default on every host. It is
+  independent of `upload.delete_local` — a sweep never removes a local file at all, whatever that
+  says, which is what lets an operator confirm a backlog landed before pruning. It sweeps the
+  legacy `storage_dir` unconditionally and the live output directory only past
+  `output_dir_min_age_secs`, so it cannot contend with a publish still in flight. Enabling it on a host with months of dumps starts a multi-hour transfer; the
+  `max_files_per_pass` / `max_mib_per_pass` budgets are what keep it from saturating the link.
+- **Host disk, not bucket disk, is the constraint when restoring an archive.**
+  `/var/lib/observer_controller` lives on `/` (79 G), while Garage's data sits on
+  `/mnt/volume_nyc1_01` (992 G). Rsync history back in batches sized against `df -h /`, not
+  against the bucket's free space. Re-rsyncing an already-published file is free (the sweep's diff
+  is a listing lookup, not a request), so batches may safely overlap.
 
 ## Data sharing stack (Garage + Caddy + Cloudflare Tunnel)
 Deployment/onboarding: `infra/ansible/DATA_SHARING.md`. Chain: Cloudflare Tunnel → Caddy (loopback + tailscale) → Garage S3. Hard-won gotchas:

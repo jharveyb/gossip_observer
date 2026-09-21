@@ -135,6 +135,44 @@ does not do virtual-hosted), `with_allow_http` for the plain-HTTP tailscale path
   isn't a scheme complaint, with no server on the other end), and
   `controller_publishes_graph_dumps_to_garage` is the proof — the real controller publishing to a
   real Garage over plain HTTP. Reinstating the bad ordering fails both in under two seconds.
+- **Backfill is the retry sweep, not just a migration tool.** `observer_controller::backfill`
+  scans `graph_dir` + `storage_dir`, diffs against one bulk `ArtifactUploader::list_keys` per
+  family, and publishes a bounded slice oldest-first. The controller has no other retry path — a
+  failed live upload is logged and the file sits there forever — so the task keeps running once
+  drained, where a pass costs one `read_dir` and a few listings. Filenames are recovered by
+  `collector_manager::parse_dump_file_name`, which is an **allowlist** and proves itself an
+  inverse of `GraphArtifact::file_name` by rebuilding the name and requiring byte equality; a
+  storage dir also holds rotated logs, staging files, CSVs and whatever an operator left there.
+- **`list_keys` is all-or-nothing and returns sizes.** A partial listing is indistinguishable from
+  "those objects don't exist", and the only caller answers that by re-uploading a backlog. Sizes,
+  not just presence, because a truncated multipart leaves an object at the wrong length — the bulk
+  form of the same `head_size` check.
+- **One primitive, two tasks.** `ArtifactUploader::publish(local, rel_key, opts)` is the only
+  upload path. The live writer calls it inline right after a write (`Presence::Absent` — a
+  uniquely-named new file is certainly not up yet); the backfill sweep calls it with
+  `Presence::Size` from a bulk `list_keys`; the archiver calls it with `Presence::Unknown` to get a
+  single HEAD short-circuit. There is no upload channel, worker pool or `workers` setting — the
+  writer is already its own task, and the indirection bought pipelining at the price of a shutdown
+  path that could silently drop a file's upload.
+- **`delete_local` is a per-call option, never a field.** It is a property of one publish, not of a
+  connection to a bucket. As a field it forced an accessor, a negating clone, and a second
+  hand-rolled deletion in the archiver. A sweep passes `false`, always: publish by sweep, prune by
+  hand.
+- **The sweep's directories are disjoint from the live path's, by construction.** It sweeps
+  `storage_dir` unconditionally (the live path never writes there) and the output directory only
+  past `backfill.output_dir_min_age_secs`. That is what makes a race impossible rather than
+  tolerated, and it is why there is no dedupe, no name-collision handling and no size-mismatch
+  branch — all of which existed only because one earlier design swept both directories uniformly.
+- **`BudgetTracker` owns the charging policy** for every bounded sweep: a transfer costs a file and
+  its bytes, an already-present object costs nothing (so a drained pass is free), a failure costs
+  one slot (so one broken file cannot stall a sweep forever). Two sweeps hand-rolled this, drifted,
+  and one ended up able to disable both its guards — hence also: a zero budget is rejected by
+  `validate`, and rejected whether or not `backfill.enabled` is set, because the archiver's sweep
+  reads those fields without consulting that flag.
+- **Backfill budgets count attempts; the archiver's counts only transferred bytes.** Both are
+  deliberate. Backfill has no poison-pill guard, so a permanently-failing file must cost one slot
+  rather than the whole pass; the archiver's `head_size` short-circuit must stay free or the one
+  cheap catch-up tick becomes several.
 - **`upload.endpoint` is a full URL and there is no `use_ssl` flag** — the scheme alone decides
   whether plain HTTP is allowed, so the two can't contradict each other. Note the archiver's
   older `export.verify_endpoint` is still a bare `host:port` paired with `verify_use_ssl`; the
