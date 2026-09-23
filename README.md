@@ -98,6 +98,36 @@ The data from that latest run is available on the `exported_data` branch, in the
 
 You should be able to [import](https://duckdb.org/docs/stable/sql/statements/export#import-database) the data into a new DuckDB instance if you want to perform your own analysis.
 
+### Development environment
+
+The full toolchain is declared in `flake.nix` and pinned by `flake.lock`:
+Rust, just, sqlx, etc. + the integration test version-pinned binaries.
+Also includes CLI tools like duckdb, rclone, etc.
+
+- One-off shell: `nix develop`
+- Auto-load on cd: install [direnv](https://direnv.net) +
+  [nix-direnv](https://github.com/nix-community/nix-direnv), then run
+  `direnv allow` once in the checkout.
+
+CPU should meet the x86-64-v3 uarch level for using the Nix config.
+
+**Remote dev box**: Use debian stable + run `infra/ansible/devbox_init.yml` (see the playbook header for prerequisites).
+Clone the repo there, `direnv allow`, and attach with VS Code **Remote-SSH** — the VS Code
+server installs itself on first connect, and the Claude Code extension and its
+sessions then live on the VM (usable with Claude Code Remote Control). Keep
+long builds and integration tests in `tmux` (`tmux new -As work`) so they
+survive disconnects. For a local TimescaleDB (`just gen-sql`), add the host to
+the `[timescale]` inventory group and run `timescaledb_init.yml`.
+
+Smoke test commands:
+
+```bash
+nix develop
+cargo clippy --workspace
+cargo test --workspace
+just integration-test
+```
+
 ### Usage
 
 - Install NATS: <https://docs.nats.io/running-a-nats-service/introduction/installation>

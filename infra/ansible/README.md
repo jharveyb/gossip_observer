@@ -111,6 +111,13 @@ ansible-playbook controller_init.yml
 
 # Redeploy collectors after a code or config change.
 ansible-playbook collector_deploy.yml --ask-vault-pass --limit collectors-2
+
+# Provision a remote dev-environment VM (host in the [devbox] group; run
+# server_init.yml + tailscale_init.yml against it first). Installs Determinate
+# Nix + direnv so the repo's flake.nix devShell provides the toolchain. Add the
+# host to [timescale] too and run timescaledb_init.yml if you want a local DB
+# for `just gen-sql`. See the header of devbox_init.yml.
+ansible-playbook devbox_init.yml
 ```
 
 ## Sharing collected data

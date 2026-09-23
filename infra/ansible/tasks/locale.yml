@@ -8,21 +8,17 @@
     name: "{{ locale }}"
     state: present
 
-- name: Get current locale
-  ansible.builtin.command: localectl status
-  # register stores stdout & stderr, plus return code
-  register: current_locale
-  changed_when: false
-  check_mode: false
-
-- name: Set expected locale
-  ansible.builtin.set_fact:
-    expected_locale: "LANG={{ locale }}"
-
-- name: Set locale to "{{ locale }}"
-  # Raw string-ish value, must template
-  ansible.builtin.command: localectl set-locale LANG="{{ locale }}"
-  # Conditional; variable usage without templating brackets
-  when: expected_locale not in current_locale.stdout
-  register: locale_output
-  changed_when: locale_output.rc != 0
+# Write /etc/default/locale directly (what `update-locale` edits) instead of
+# `localectl set-locale`: localectl needs a polkit-authorized D-Bus call to
+# systemd-localed, and minimal Debian images without polkitd (and unprivileged
+# LXC containers) deny it even for root — "Failed to issue method call:
+# Access denied". Takes effect on next login, same as localectl.
+- name: Set default locale
+  ansible.builtin.lineinfile:
+    path: /etc/default/locale
+    regexp: "^LANG="
+    line: "LANG={{ locale }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"

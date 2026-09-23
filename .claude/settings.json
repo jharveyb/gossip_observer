@@ -1,0 +1,16 @@
+{
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": { "source": { "source": "github", "repo": "anthropics/claude-plugins-official" } },
+    "trailofbits": { "source": { "source": "github", "repo": "trailofbits/skills" } },
+    "aiguide": { "source": { "source": "github", "repo": "timescale/pg-aiguide" } },
+    "duckdb-skills": { "source": { "source": "github", "repo": "duckdb/duckdb-skills" } },
+    "ast-grep-marketplace": { "source": { "source": "github", "repo": "ast-grep/agent-skill" } }
+  },
+  "enabledPlugins": {
+    "claude-md-management@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "property-based-testing@trailofbits": true,
+    "git-cleanup@trailofbits": true
+  }
+}

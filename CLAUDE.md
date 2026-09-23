@@ -10,6 +10,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 - `gossip_analyze`, `electrum-cli` — supporting tools. `analysis/` holds the Python query/plot code.
 
 ## Commands
+- Dev env: `flake.nix` pins the whole toolchain (Rust from `rust-toolchain.toml`, protoc, mold, sqlx-cli, and the integration-test `bitcoind`/`nats-server`/`garage` binaries exported as `*_EXE`). Enter with `nix develop` or direnv; remote dev VM bootstrap is `infra/ansible/devbox_init.yml`.
 - Build: `just build` (debug) / `just build-prod` (release). Workspace builds are offline by default (`SQLX_OFFLINE=true`).
 - Test + lint: `cargo test --workspace`, `cargo clippy --workspace`.
 - Integration test (controller ⇄ collector pair, log janitor, artifact publishing; ~2 min): `just integration-test` — needs `bitcoind`, `nats-server` and `garage` on PATH (or `BITCOIND_EXE`/`NATS_SERVER_EXE`/`GARAGE_EXE`). The garage download one-liner is in the recipe comment.

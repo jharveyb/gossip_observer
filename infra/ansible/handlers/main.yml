@@ -64,6 +64,11 @@
   loop: "{{ host_controllers }}"
   when: host_controllers is defined and host_controllers | length > 0
 
+- name: Restart nix-daemon
+  ansible.builtin.systemd:
+    name: nix-daemon
+    state: restarted
+
 - name: Restart journald
   ansible.builtin.systemd:
     name: systemd-journald

@@ -1,0 +1,22 @@
+# Dev-environment VM (Debian stable, x86-64 with AVX2 — the workspace builds
+# with target-cpu=x86-64-v3). Run server_init.yml and tailscale_init.yml
+# against the host first; add it to [devbox] in hosts.ini. For a local
+# TimescaleDB (just gen-sql / check-sql), also add it to [timescale] and run
+# timescaledb_init.yml --ask-vault-pass — the version pins + gate G2 apply to
+# the dev box like any other timescale host.
+#
+# After this play: SSH in as {{ nonroot_username }}, clone the repo (personal
+# git credentials, so not automated here), `direnv allow` in the checkout,
+# and the flake devShell provides the full toolchain.
+- name: Configure dev environment VM
+  hosts: devbox
+  become: true
+
+  tasks:
+    - name: Import dev env tasks
+      ansible.builtin.import_tasks: tasks/dev_env.yml
+      tags: [dev_env]
+
+  handlers:
+    - name: Import handlers
+      ansible.builtin.import_tasks: handlers/main.yml
