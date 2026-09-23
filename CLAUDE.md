@@ -32,6 +32,8 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 
 ## Verify before finishing Rust changes
 Run `cargo clippy --workspace` and `cargo test --workspace`; if SQL changed, `just gen-sql`; if protos, gRPC clients/servers, or proto conversions changed, `just integration-test`.
+A new test is only evidence once you have seen it fail — reintroduce the bug it targets, confirm it catches it, revert. A green first run has twice meant the test never reached the code under it.
+Scripted edits (python/sed over a whole file) must assert the needle is non-empty and occurs exactly once: a reversed `s.index(a):s.index(b)` slice yields `""`, and `str.replace("", x)` inserts at every character — this destroyed a 1200-line source file once.
 
 ## MCP: Bitcoin Knowledge Base (bkb)
 Lightning/Bitcoin spec lookups: `bkb_lookup_bolt` / `_bip` / `_blip` / `_lud` / `_nut`, and `bkb_search` (full-text). Use for BOLT/BIP questions instead of guessing.

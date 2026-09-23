@@ -136,8 +136,8 @@ does not do virtual-hosted), `with_allow_http` for the plain-HTTP tailscale path
   `controller_publishes_graph_dumps_to_garage` is the proof — the real controller publishing to a
   real Garage over plain HTTP. Reinstating the bad ordering fails both in under two seconds.
 - **Backfill is the retry sweep, not just a migration tool.** `observer_controller::backfill`
-  scans `graph_dir` + `storage_dir`, diffs against one bulk `ArtifactUploader::list_keys` per
-  family, and publishes a bounded slice oldest-first. The controller has no other retry path — a
+  diffs against one bulk `ArtifactUploader::list_keys` per family and publishes a bounded slice
+  oldest-first. The controller has no other retry path — a
   failed live upload is logged and the file sits there forever — so the task keeps running once
   drained, where a pass costs one `read_dir` and a few listings. Filenames are recovered by
   `collector_manager::parse_dump_file_name`, which is an **allowlist** and proves itself an
@@ -169,10 +169,6 @@ does not do virtual-hosted), `with_allow_http` for the plain-HTTP tailscale path
   and one ended up able to disable both its guards — hence also: a zero budget is rejected by
   `validate`, and rejected whether or not `backfill.enabled` is set, because the archiver's sweep
   reads those fields without consulting that flag.
-- **Backfill budgets count attempts; the archiver's counts only transferred bytes.** Both are
-  deliberate. Backfill has no poison-pill guard, so a permanently-failing file must cost one slot
-  rather than the whole pass; the archiver's `head_size` short-circuit must stay free or the one
-  cheap catch-up tick becomes several.
 - **`upload.endpoint` is a full URL and there is no `use_ssl` flag** — the scheme alone decides
   whether plain HTTP is allowed, so the two can't contradict each other. Note the archiver's
   older `export.verify_endpoint` is still a bare `host:port` paired with `verify_use_ssl`; the
