@@ -1272,6 +1272,25 @@ def main():
         default=5,
         help="Minimum receive count for queries on collector-originated messages (default: 5)",
     )
+    # DuckDB otherwise takes ~80% of system RAM (49.9 GiB here), which a
+    # multi-day range can exhaust: each day of `timings` is ~85M rows and the
+    # COUNT(DISTINCT ...) queries build large hash tables. Capping it makes the
+    # query spill to disk instead of competing with everything else on the box.
+    parser.add_argument(
+        "--memory-limit",
+        help="DuckDB memory limit, e.g. 24GB (default: DuckDB's own ~80%% of RAM)",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        help="DuckDB thread count (default: DuckDB's own, one per core)",
+    )
+    parser.add_argument(
+        "--temp-dir",
+        help="Spill directory (default: '.tmp' relative to the working "
+        "directory, i.e. inside analysis/). Point it at a roomy volume when "
+        "spilling a multi-day range.",
+    )
     args = parser.parse_args()
     sections = set(args.sections)
 
@@ -1284,6 +1303,18 @@ def main():
     print(f"Sections: {', '.join(sorted(sections))}")
 
     conn = duckdb.connect()
+    if args.memory_limit:
+        conn.execute(f"SET memory_limit='{args.memory_limit}'")
+    if args.threads:
+        conn.execute(f"SET threads={args.threads}")
+    if args.temp_dir:
+        os.makedirs(args.temp_dir, exist_ok=True)
+        conn.execute(f"SET temp_directory='{args.temp_dir}'")
+    limit, threads = conn.execute(
+        "SELECT current_setting('memory_limit'), current_setting('threads')"
+    ).fetchone()
+    print(f"DuckDB: memory_limit={limit}, threads={threads}")
+
     load_range(conn, args.data_dir, args.date, args.days)
 
     if "outer" in sections:

@@ -14,6 +14,8 @@ The data on disk should match the structure used in the S3 bucket where data is 
 
 ### Gossip data layout
 
+**v1** layout:
+
 ```sh
 ls $DATADIR
 
@@ -29,6 +31,26 @@ tree $DATADIR/message_hashes/
 ```
 
 So, ./TABLE_NAME/YYYY/MM/DD/table_name_YYYY-MM-DD.parquet.
+
+Newer data is published as **v2**, which is ~28% smaller and lives under its own prefix:
+
+```sh
+tree $DATADIR/v2/
+../$DATADIR/v2/
+└── table=timings
+    └── year=2026
+        └── month=03
+            ├── timings_2026-03-07_2026-03-08.parquet
+            ├── timings_2026-03-08_2026-03-09.parquet
+...
+```
+
+So, `./v2/table=TABLE_NAME/year=YYYY/month=MM/table_name_START_END.parquet`, where
+`START`/`END` are the half-open range the file covers.
+
+Both layouts can coexist in the same directory; `parquet_queries.py` picks v2 per
+day where it exists and falls back to v1, so a partially converted tree just works.
+See "Reading the v2 files" below for the differences that matter to a reader.
 
 ### Packet capture data layout
 
@@ -52,7 +74,8 @@ tree $DATADIR
 
 Use any S3-compatible tool for downloads. The endpoint is <https://observer-data.jharveyb.xyz/>. Ask me for read-only credentials.
 
-Right now the published data size is ~700 MB per day (as compressed Parquet, counting all tables). So ~20 GB per month.
+Right now the published data size is ~750 MB per day in v1, or **~540 MB per day in
+v2** (compressed Parquet, all tables) — v2 should be ~28.1% smaller.
 
 With [rclone](https://rclone.org/), you can use the config snippet in `infra/ansible/DATA_SHARING.md` for bucket access. To fetch the March data:
 
@@ -92,3 +115,90 @@ uv run parquet_queries.py 2026-02-09 --days 3 --originated-cutoff 11 --peer-cuto
 # over that same dataset.
 uv run parquet_queries.py 2026-02-09 --days 3 --peer-cutoff 300 --data-dir $DATA_DIR/ stats
 ```
+
+## Reading the v2 files
+
+v2 keeps every column v1 had except two, and narrows the types of the rest. If you
+use `parquet_queries.py` you can ignore all of this — `load_range` normalises both
+formats to one shape. This section is for reading the files directly.
+
+### Column changes
+
+| table | column | v1 | v2 |
+|---|---|---|---|
+| timings | `hash`, `inner_hash` | 8-byte little-endian `BLOB` | `UBIGINT` |
+| timings | `collector`, `peer` | 66-char hex `VARCHAR` | 33-byte `BLOB` |
+| timings | `orig_timestamp` | `TIMESTAMPTZ` (µs) | `UINTEGER` (epoch seconds) |
+| timings | `row_inc`, `peer_hash` | present | **removed** |
+| metadata | `hash`, `inner_hash`, `scid` | `BLOB` | `UBIGINT` |
+| metadata | `orig_node` | hex `VARCHAR`, nullable | `BLOB`, nullable |
+| message_hashes | `outer_hash`, `inner_hash` | `BLOB` | `UBIGINT` |
+| message_first_seen | `hash` | `BLOB` | `UBIGINT` |
+| messages | `hash` | `BLOB` | `UBIGINT` |
+| messages | `raw` | unpadded base64url `VARCHAR` | `BLOB` |
+
+Converting back, if you need v1's spelling:
+
+```sql
+lower(hex(peer))          -- BLOB(33)  -> 66-char hex pubkey
+to_timestamp(orig_timestamp)  -- epoch seconds -> TIMESTAMPTZ
+```
+
+`net_timestamp` is unchanged and still microsecond-precision `TIMESTAMPTZ`.
+`orig_timestamp` narrows to whole seconds, which is lossless for every value in the
+archive — the exporter refuses to write v2 for a chunk containing a sub-second
+value rather than truncating one silently.
+
+### Querying
+
+Glob **per table**. `table=` is a partition key, and the five tables have different
+columns:
+
+```sql
+-- good
+SELECT count(*) FROM read_parquet('v2/table=timings/**/*.parquet', hive_partitioning = true);
+
+-- wrong, and quietly so
+SELECT count(*) FROM read_parquet('v2/**/*.parquet');
+```
+
+The second one does not error. `count(*)` never projects a real column, so no
+schema conflict surfaces and you get the row count of *all five tables added
+together* — a number that means nothing. The mistake only announces itself once you
+select an actual column:
+
+```
+Invalid Input Error: schema mismatch in glob: column "first_seen" was read from the
+original file ".../message_first_seen_...parquet", but could not be found in file
+".../timings_...parquet"
+```
+
+So a cross-table glob is not protected by a loud failure — scope it to one table.
+
+With `hive_partitioning = true` you also get `table`, `year` and `month` as virtual
+columns from the directory names. Two gotchas: `table` is a reserved word, so it
+needs quoting (`"table"`), and `month` comes back as a zero-padded `VARCHAR`
+(`'03'`) while `year` is a `BIGINT`.
+
+If you are unioning v2 with v1 files, pass `hive_partitioning = false` — v1 paths
+have no `key=value` directories, so those three virtual columns would exist on one
+side of the union and not the other.
+
+### Recovering `peer_hash`
+
+v2 drops `peer_hash` because it carried no information: it is XXH3-64 of `peer`'s
+**66-character hex string** (not of the 33 raw bytes), stored little-endian. To
+recompute it:
+
+```python
+import xxhash
+
+def peer_hash(peer_blob: bytes) -> int:      # v2 `peer` is BLOB(33)
+    return xxhash.xxh3_64_intdigest(peer_blob.hex().encode())
+```
+
+Note that most uses do not need it: `peer_hash` is 1:1 with `peer`.
+
+`messages.hash` is built the same way, but over the **base64url text** rather than
+the decoded bytes — so verifying a message hash from a v2 `BLOB` means re-encoding
+it first.
