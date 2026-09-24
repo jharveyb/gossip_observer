@@ -117,6 +117,16 @@
           analysisPython
 
           tmux
+
+          # misc Rust CLIs
+          cargo-sweep
+          ripgrep
+          tealdeer
+          dust
+          hyperfine
+          samply
+          tokio-console
+          lazygit
         ];
 
         env = {
