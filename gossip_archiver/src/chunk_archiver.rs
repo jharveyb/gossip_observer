@@ -797,7 +797,7 @@ async fn init_temp_duckdb(cfg: &ArchiverConfig) -> anyhow::Result<async_duckdb::
     let archive_dir = PathBuf::from(&cfg.export.dir);
 
     // All DuckDB non-Parquet writes will be in this directory.
-    let tmp_dir = archive_dir.join("duckdb_tmp");
+    let tmp_dir = cfg.export.duckdb_temp_root().join("duckdb_tmp");
     if let Ok(true) = tokio::fs::try_exists(&tmp_dir).await {
         tokio::fs::remove_dir_all(&tmp_dir)
             .await
@@ -852,7 +852,7 @@ async fn cleanup_temp_duckdb(duckdb: async_duckdb::Client, cfg: &ArchiverConfig)
     }
 
     let archive_dir = PathBuf::from(&cfg.export.dir);
-    let tmp_dir = archive_dir.join("duckdb_tmp");
+    let tmp_dir = cfg.export.duckdb_temp_root().join("duckdb_tmp");
     if let Err(rm_dir) = tokio::fs::remove_dir_all(&tmp_dir).await {
         error!(error = %rm_dir, "Failed to remove DuckDB temp directory");
     }
@@ -1079,9 +1079,7 @@ async fn init_verify_duckdb(
     key_id: &str,
     secret: &str,
 ) -> anyhow::Result<async_duckdb::Client> {
-    let archive_dir = PathBuf::from(&cfg.export.dir);
-
-    let tmp_dir = archive_dir.join("duckdb_verify_tmp");
+    let tmp_dir = cfg.export.duckdb_temp_root().join("duckdb_verify_tmp");
     if let Ok(true) = tokio::fs::try_exists(&tmp_dir).await {
         tokio::fs::remove_dir_all(&tmp_dir)
             .await
@@ -1141,7 +1139,7 @@ async fn cleanup_verify_duckdb(duckdb: async_duckdb::Client, cfg: &ArchiverConfi
     }
 
     let archive_dir = PathBuf::from(&cfg.export.dir);
-    let tmp_dir = archive_dir.join("duckdb_verify_tmp");
+    let tmp_dir = cfg.export.duckdb_temp_root().join("duckdb_verify_tmp");
     if let Err(rm_dir) = tokio::fs::remove_dir_all(&tmp_dir).await {
         error!(error = %rm_dir, "Failed to remove DuckDB temp directory");
     }

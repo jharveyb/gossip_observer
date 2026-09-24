@@ -552,6 +552,20 @@ mod tests {
             .collect()
     }
 
+    /// DuckDB auto-installs the `icu` extension into `~/.duckdb` on first use
+    /// of a timezone-aware function. Parallel tests racing that install on a
+    /// cold cache (fresh machine, CI) step on each other's temp files and fail
+    /// with "Could not remove file ... icu.duckdb_extension"; serialize it.
+    fn duckdb_conn() -> async_duckdb::Connection {
+        static ICU: std::sync::Once = std::sync::Once::new();
+        ICU.call_once(|| {
+            async_duckdb::Connection::open_in_memory()
+                .and_then(|c| c.execute_batch("INSTALL icu; LOAD icu;"))
+                .expect("preinstall the duckdb icu extension");
+        });
+        async_duckdb::Connection::open_in_memory().expect("in-memory duckdb")
+    }
+
     // --- v1 layout: unchanged, and pinned against the deployed bucket ---
 
     #[test]
@@ -903,7 +917,7 @@ mod tests {
     fn v2_macros_round_trip_against_duckdb() {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as b64};
 
-        let conn = async_duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        let conn = duckdb_conn();
         conn.execute_batch(V2_MACROS).expect("install macros");
 
         // --- le_blob_u64: 8-byte little-endian BYTEA -> UBIGINT ---
@@ -1015,7 +1029,7 @@ mod tests {
     /// rather than trusting the type.
     #[test]
     fn epoch_secs_truncates_sub_second_input() {
-        let conn = async_duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        let conn = duckdb_conn();
         conn.execute_batch(V2_MACROS).expect("install macros");
         let got: u32 = conn
             .query_row(
@@ -1075,7 +1089,7 @@ mod tests {
     /// export.
     #[test]
     fn precheck_predicate_matches_exactly_the_lossy_rows() {
-        let conn = async_duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        let conn = duckdb_conn();
         conn.execute_batch(
             "CREATE TABLE t (orig_timestamp TIMESTAMPTZ);
              INSERT INTO t VALUES

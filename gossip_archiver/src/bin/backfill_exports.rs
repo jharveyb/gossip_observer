@@ -57,6 +57,12 @@ struct Args {
     /// DuckDB thread count.
     #[arg(long, default_value_t = 4)]
     threads: u32,
+    /// DuckDB scratch/spill directory. Defaults to `{out-dir}/duckdb_tmp`.
+    ///
+    /// Set it to keep spill off the output volume, or to put it on a faster
+    /// disk; re-exporting a day of `timings` can spill several GB.
+    #[arg(long)]
+    temp_dir: Option<PathBuf>,
     /// Rewrite outputs that already exist and verify.
     #[arg(long)]
     force: bool,
@@ -362,7 +368,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     fs::create_dir_all(&args.out_dir)?;
-    let tmp = args.out_dir.join("duckdb_tmp");
+    let tmp = args
+        .temp_dir
+        .clone()
+        .unwrap_or_else(|| args.out_dir.join("duckdb_tmp"));
     fs::create_dir_all(&tmp)?;
     let conn = async_duckdb::Connection::open_in_memory()?;
     conn.execute_batch(&format!(

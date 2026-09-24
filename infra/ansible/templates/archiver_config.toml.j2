@@ -28,10 +28,17 @@ flush_interval = {{ archiver_db_flush_interval | default(2) }}
 enabled = {{ item.export_enabled | default(false) | lower }}
 
 {% if item.export_dir is defined %}
-# Output + DuckDB temp-spill location. Set per-instance to a roomy non-root
-# volume: both the Parquet files and the duckdb_tmp spill directory live here.
+# Output location. Set per-instance to a roomy non-root volume.
 # Omit to fall back to the binary default of {storage_dir}/exports.
 dir = "{{ item.export_dir }}"
+{% endif %}
+{% if item.export_temp_dir is defined %}
+# DuckDB scratch + spill. Defaults to {dir}/duckdb_tmp, which is fine: nothing
+# enumerates the export tree, since every upload is a named file resolved from
+# chunk_archive_log. Set this only to move spill off the export volume (keeping
+# its disk accounting to published bytes, which matters once delete_local is
+# draining it) or onto a faster disk. Needs room for a multi-GB chunk to spill.
+temp_dir = "{{ item.export_temp_dir }}"
 {% endif %}
 
 # DuckDB buffer memory limit (MB). Conservative on this 8 GB VPS, which also

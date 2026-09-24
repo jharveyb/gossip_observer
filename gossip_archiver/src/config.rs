@@ -44,6 +44,15 @@ pub struct DataExport {
     /// entirely.
     #[serde(default)]
     pub parquet: ParquetOptions,
+    /// Where DuckDB puts its scratch database and spill files.
+    ///
+    /// Defaults to `{dir}/duckdb_tmp`, so by default the service writes only
+    /// inside the directory it was configured with. Nothing enumerates `dir` --
+    /// every upload is a named file resolved from `chunk_archive_log`, and the
+    /// pending-upload sweep is DB-driven -- so a scratch directory living there
+    /// is inert.
+    #[serde(default)]
+    pub temp_dir: Option<String>,
     /// Before writing a v2 export, verify the source holds no rows that the v2
     /// transforms would silently lose. Costs one extra scan of the chunk.
     ///
@@ -222,6 +231,11 @@ impl DataExport {
         Ok(())
     }
 
+    /// Root for DuckDB scratch files: `temp_dir` if set, else `dir`.
+    pub fn duckdb_temp_root(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(self.temp_dir.as_ref().unwrap_or(&self.dir))
+    }
+
     /// The layout new chunks are written in.
     ///
     /// Infallible because `validate()` has already rejected anything else at
@@ -245,6 +259,7 @@ mod tests {
             threads: 1,
             format_version,
             parquet,
+            temp_dir: None,
             v2_precheck: true,
             deletion_enabled: false,
             deletion_dry_run: true,
@@ -300,9 +315,18 @@ mod tests {
         use std::collections::HashMap;
 
         let env: HashMap<String, String> = [
-            ("ARCHIVER_EXPORT__PARQUET__COMPRESSION_LEVEL".to_string(), "7".to_string()),
-            ("ARCHIVER_EXPORT__PARQUET__ROW_GROUP_SIZE".to_string(), "4096".to_string()),
-            ("ARCHIVER_EXPORT__FORMAT_VERSION".to_string(), "2".to_string()),
+            (
+                "ARCHIVER_EXPORT__PARQUET__COMPRESSION_LEVEL".to_string(),
+                "7".to_string(),
+            ),
+            (
+                "ARCHIVER_EXPORT__PARQUET__ROW_GROUP_SIZE".to_string(),
+                "4096".to_string(),
+            ),
+            (
+                "ARCHIVER_EXPORT__FORMAT_VERSION".to_string(),
+                "2".to_string(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -336,5 +360,35 @@ mod tests {
         assert_eq!(parsed.export.parquet.compression_level, Some(7));
         assert_eq!(parsed.export.parquet.row_group_size, Some(4096));
         assert_eq!(parsed.export.parquet.compression, "zstd");
+    }
+
+    fn export_with(dir: &str, temp_dir: Option<&str>) -> DataExport {
+        let mut e = export(2, ParquetOptions::default());
+        e.dir = dir.into();
+        e.temp_dir = temp_dir.map(str::to_string);
+        e
+    }
+
+    /// By default the service writes only inside the directory it was given.
+    /// Nothing enumerates `export.dir` -- uploads resolve named files from
+    /// `chunk_archive_log` -- so scratch living there is inert.
+    #[test]
+    fn duckdb_scratch_defaults_inside_the_export_dir() {
+        let e = export_with("/mnt/volume_nyc1_01/exports", None);
+        assert_eq!(
+            e.duckdb_temp_root(),
+            std::path::PathBuf::from("/mnt/volume_nyc1_01/exports")
+        );
+    }
+
+    /// An override may point anywhere, including off the export volume -- which
+    /// is the reason the knob exists.
+    #[test]
+    fn temp_dir_may_leave_the_export_volume() {
+        let custom_path = "/mnt/fast/scratch";
+        let e = export_with("/mnt/vol/exports", Some(custom_path));
+        let root = e.duckdb_temp_root();
+        assert!(!root.starts_with("/mnt/vol"));
+        assert_eq!(root, std::path::PathBuf::from(&custom_path));
     }
 }
