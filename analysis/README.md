@@ -100,6 +100,19 @@ rclone copy observer-data:gossip-observer-data/message_hashes/2026/03 ./message_
 rclone copy observer-data:gossip-observer-data/message_first_seen/2026/03 ./message_first_seen/2026/03/ -P
 ```
 
+## Collectors
+
+`collectors.json` lists every collector: pubkey, chain backend, and the SCIDs of
+the channels it owns. The origination queries in `parquet_queries.py` use it to
+tell a collector's own gossip apart from gossip it relays or serves. After
+opening or closing a channel, update it and check it against the data:
+
+```sh
+uv run python derive_collectors.py --data-dir $DATADIR   # fails if the SCIDs disagree with the exports
+```
+
+The same run writes `collectors.csv`, the version published alongside the data.
+
 ## Examples
 
 ```sh

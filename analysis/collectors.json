@@ -1,0 +1,208 @@
+{
+  "collectors": [
+    {
+      "collector_id": "c01",
+      "pubkey": "039646e24ed7067af3340717c8a1ae0dba8fae56cacdba2d4be4161a9a5d92308d",
+      "uuid": "019bfdbc-10b8-794f-91cb-132c5f4cc390",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c02",
+      "pubkey": "02be86fcfd15193884d72332ba5a7112c2b929dd388c87e2f6bb36b3e0fc1af7c8",
+      "uuid": "019c26b4-9efe-7333-9c5e-7b3336d9b733",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028571137643839489
+      ]
+    },
+    {
+      "collector_id": "c03",
+      "pubkey": "03f217cf79e6e24ed3547a3ea32e6c149ad4849bccbd92ed759f9e680f66855954",
+      "uuid": "019c26b5-3e05-7d13-91ab-182eb98219e1",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c04",
+      "pubkey": "03ddc4f6b61d1d6826acb6fbe0013d478e930b90e5cd31e0fd3a6ba80963256a06",
+      "uuid": "019c26b5-a344-7be0-91a5-8221c53446a2",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c05",
+      "pubkey": "02a7089f81bb535403031b248cad512f8d8267dbe91241cd4dbbb92afcdc2baec2",
+      "uuid": "019c26b6-aff9-74e0-935f-0cd39683850f",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c06",
+      "pubkey": "03fa502117c9dacc575ee87b770ac07f6f574ed32e831bb1a025e2a3d130b87df5",
+      "uuid": "019c26b7-1636-73e7-aa3b-a9ca4020d220",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c07",
+      "pubkey": "029ab8668a756d0bcfa11e76c8f2e5e4de27121acf417bedaa3e38044361b51ecd",
+      "uuid": "019c26b8-3118-72db-9059-d0d7eab225ba",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028579933714841601
+      ]
+    },
+    {
+      "collector_id": "c08",
+      "pubkey": "029c0a4817877ec7b5857269ec47cbfd6221649eef2e8928129a9213b5aaec4ab7",
+      "uuid": "019c26b8-3125-798a-afbf-cf3f308089cd",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c09",
+      "pubkey": "037f0eecd594484c49dc53683602ebb1bc50af0717dec53b0022877384703623ea",
+      "uuid": "019c26b8-3137-7cb2-bf48-250a5ce79d8d",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c10",
+      "pubkey": "026396c83abf5eedd7d7b3d4047790ab46b875e9918501810fc031d1f374e914ae",
+      "uuid": "019c26b8-3148-759c-8494-454ce6b62c57",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028578834279497729
+      ]
+    },
+    {
+      "collector_id": "c11",
+      "pubkey": "027865bd89b9ae0270cccb65060a92511b86a1f1ee29f6e611a85157ab7110e397",
+      "uuid": "019c26b8-315a-77b2-9e80-61f45ec40f15",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c12",
+      "pubkey": "022398a4472f19fb55e5cbfca722579b69b65c323f508abd9030afef4056d3107f",
+      "uuid": "019c26b8-316d-7d55-9e6d-18990aed72a2",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028964762817527809,
+        1050452518698221569
+      ]
+    },
+    {
+      "collector_id": "c13",
+      "pubkey": "03d42ada2b0f7930f41bafc3dd98245dd445faf14f6242618a103994920fece0df",
+      "uuid": "019c26b8-3180-7332-b0fe-a48931990692",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c14",
+      "pubkey": "03abd82259d259b0acecd1e8ae1d35b04e3bf4270ba2dbb9416ad1b150f255e371",
+      "uuid": "019c26b8-3191-7fff-895f-5ed752c53bdc",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028429300572553216
+      ]
+    },
+    {
+      "collector_id": "c15",
+      "pubkey": "027f0ce3198b762a0879a63e57ac8c04fac9f0de8cbae923fa2d454f7bbdc705f5",
+      "uuid": "019c26b8-31a6-7954-9de7-881d681e742e",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c16",
+      "pubkey": "03c926a800929fcc99826c23dd1a39a4e1253c96f6249595bab7620c3d810f3662",
+      "uuid": "019c26b8-31b8-7cc9-bb95-1b0223d7b5b1",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028571137643905025
+      ]
+    },
+    {
+      "collector_id": "c17",
+      "pubkey": "021b4c2e6135d016e4ef27e7a187c3f71b1f6f236a4fee48773c76b25fd3ebe498",
+      "uuid": "019c26b8-31d4-7973-b55f-b6218e03d7ea",
+      "host": "collectors-3-big",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c18",
+      "pubkey": "0370942652c1778a683f85be315fb167cef474d16d091ece242b9606f36303feed",
+      "uuid": "019c26b8-31e4-741f-9034-71f14cdb8753",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c19",
+      "pubkey": "03fb60edd9a56e9946cf136187e9093f44e6e131b71524c1c78b148310c9cb3797",
+      "uuid": "019c26b8-31f2-7969-9266-3536fc515d27",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    },
+    {
+      "collector_id": "c20",
+      "pubkey": "02590d4fac69d138a88a2e3684f196236e8664e40b941acf80bfaf1c57f2c2472a",
+      "uuid": "019c26b8-3205-7c55-8236-24db921b665e",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": true,
+      "scids": [
+        1028964762816937984
+      ]
+    },
+    {
+      "collector_id": "c21",
+      "pubkey": "0201b7019f3b07676994d49e34dadd6954854c239d6fbd7c8c2998ea18ee606dc1",
+      "uuid": "019c26b8-3219-7c9b-aa3f-312979fffa20",
+      "host": "collectors-2",
+      "chain_source": "electrum",
+      "has_channels": false,
+      "scids": []
+    }
+  ]
+}
