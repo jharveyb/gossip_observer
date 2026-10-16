@@ -15,6 +15,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 - Test + lint: `cargo test --workspace`, `cargo clippy --workspace`.
 - Integration test (controller ⇄ collector pair, log janitor, artifact publishing; ~2 min): `just integration-test` — needs `bitcoind`, `nats-server` and `garage` on PATH (or `BITCOIND_EXE`/`NATS_SERVER_EXE`/`GARAGE_EXE`). The garage download one-liner is in the recipe comment.
 - SQL offline cache: `just gen-sql` (= `cargo sqlx prepare --workspace`) after changing any SQL; `just check-sql` to verify. Needs a DB with the TimescaleDB extension applied.
+- Convert historical exports to the v2 format: `cargo run -p gossip_archiver --bin backfill_exports -- --help`. Resumable and verifying; a full-archive run is multi-hour, so ask first.
 - Deploy: Ansible playbooks in `infra/ansible/` (`collector_init.yml`, `archiver_init.yml`, `controller_init.yml`, `data_sharing_init.yml`). Dry-run with `--check --diff`; scope with `--limit`. Vault-encrypted secrets → `--ask-vault-pass`.
 
 ## Layout conventions
@@ -28,6 +29,7 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 - **gRPC / protobuf** (wire contract + lockstep deploys, `*Display` messages, client/server conventions, integration test) → `.claude/rules/grpc.md`
 - **TimescaleDB / migrations / retention** → `.claude/rules/database.md`
 - **DuckDB/Parquet query correctness + viz** → `.claude/rules/analysis.md`
+- **Exported Parquet format** (v1 vs v2, per-table COPY options, dropped columns, `format_version`) → `.claude/rules/export-format.md`
 - **What the gossip data means** (`dir=1`/`dir=2`, fanout) → `.claude/rules/gossip-semantics.md`
 - **Patched LDK forks** (why the fork, `MessageExporter` capture, export schema, Tor) → `.claude/rules/forks.md`
 
@@ -35,6 +37,9 @@ A Rust workspace that collects Lightning Network gossip and analyzes propagation
 Run `cargo clippy --workspace` and `cargo test --workspace`; if SQL changed, `just gen-sql`; if protos, gRPC clients/servers, or proto conversions changed, `just integration-test`.
 A new test is only evidence once you have seen it fail — reintroduce the bug it targets, confirm it catches it, revert. A green first run has twice meant the test never reached the code under it.
 Scripted edits (python/sed over a whole file) must assert the needle is non-empty and occurs exactly once: a reversed `s.index(a):s.index(b)` slice yields `""`, and `str.replace("", x)` inserts at every character — this destroyed a 1200-line source file once.
+
+## Code navigation
+For Rust callers / implementors / definitions (especially across crates), use the `LSP` tool (rust-analyzer: find references, go to definition/implementation) before grep; grep misses trait-dispatched and re-exported uses.
 
 ## MCP: Bitcoin Knowledge Base (bkb)
 Lightning/Bitcoin spec lookups: `bkb_lookup_bolt` / `_bip` / `_blip` / `_lud` / `_nut`, and `bkb_search` (full-text). Use for BOLT/BIP questions instead of guessing.

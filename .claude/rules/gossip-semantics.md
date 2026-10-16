@@ -12,7 +12,7 @@ What the collected `timings` data actually means — required for correct analys
 Each `dir=2` row is one point-to-point send via the fork's `PeerManager::enqueue_message` (rust-lightning `gossip_observer-v0.2`), dominated by **initial-sync serving** (a peer requests full sync → the node walks the graph and enqueues each message to that one peer). So:
 - A channelless collector legitimately shows large `dir=2` channel counts (sync dumps).
 - **`dir=2` timestamps are serve time, not create time** — never use `MIN(dir=2)` as "entered the network." Anchor propagation/fanout on `message_first_seen.first_seen`.
-- Broadcast **relay** and the node's own freshly-created broadcasts go through `forward_broadcast_msg` (a different path) and are **not** exported; own gossip appears only later as sync-serves. For exact origination gate channel gossip on owned-SCID match (`COLLECTOR_SCIDS`, `query_collector_origination`), type-2 on `orig_node`.
+- Broadcast **relay** and the node's own freshly-created broadcasts (`BroadcastChannelUpdate`/`BroadcastNodeAnnouncement` → `forward_broadcast_msg`, which pushes straight onto `gossip_broadcast_buffer`) are **not** exported. Own gossip does reach `dir=2` two ways: a `SendChannelUpdate` to the channel counterparty goes through `enqueue_message`, so it is exported near creation time, and later sync-serves. For exact origination gate channel gossip on owned-SCID match (`COLLECTOR_SCIDS` from `analysis/collectors.json`, `query_collector_origination`), type-2 on `orig_node`.
 - `metadata.orig_node` is populated **only for node_announcement (type 2)** — NULL for channel_announcement/channel_update.
 - Inbound `dir=1` DOES capture the received firehose (tens of millions of rows/collector/day).
 

@@ -54,6 +54,12 @@ Exercise `when:` guards, registered-variable shapes and loop behaviour in a thro
 ## TOML templates
 Quote strings (IPs/URLs/paths); leave ints/bools unquoted. Unquoted `127.0.0.1` parses as an invalid float. Text files that Rust `.trim()`s want a trailing `\n` (`content: "{{ x }}\n"`).
 
+**A sub-table header captures every bare key written after it.** `[export.parquet]` must come
+last within `[export]`, because a plain `export.*` key emitted below it silently reparents into
+`export.parquet`. The symptom is a startup deserialize error naming a *different* field than the
+one you moved. Render the template and `tomllib.loads()` it when adding keys near a sub-table —
+that catches the reparenting immediately.
+
 **Never use bash array-length syntax (dollar-brace-hash-name) in an `ansible.builtin.shell`
 block.** That opening sequence starts a Jinja comment which is never closed, and the task
 dies at parse time with "failed at splitting arguments, either an unbalanced jinja2 block
