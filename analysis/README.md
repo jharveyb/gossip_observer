@@ -138,7 +138,7 @@ formats to one shape. This section is for reading the files directly.
 ### Column changes
 
 | table | column | v1 | v2 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | timings | `hash`, `inner_hash` | 8-byte little-endian `BLOB` | `UBIGINT` |
 | timings | `collector`, `peer` | 66-char hex `VARCHAR` | 33-byte `BLOB` |
 | timings | `orig_timestamp` | `TIMESTAMPTZ` (µs) | `UINTEGER` (epoch seconds) |
